@@ -1,4 +1,22 @@
 let ponderCache = {};
+const AGGRESSIVE_BOOK = {
+    // Englund Gambit
+    "rnbqkbnr/pppppppp/8/8/3P4/8/PPP1PPPP/RNBQKBNR b KQkq": "e7e5",
+    "rnbqkbnr/pppp1ppp/8/4P3/8/8/PPP1PPPP/RNBQKBNR b KQkq": "b8c6",
+    
+    // Stafford Gambit
+    "rnbqkbnr/pppp1ppp/8/4p3/4P3/5N2/PPPP1PPP/RNBQKB1R b KQkq": "g8f6",
+    "rnbqkb1r/pppp1ppp/5n2/4p3/4P3/5N2/PPPP1PPP/RNBQKB1R w KQkq": "f3e5",
+    "rnbqkb1r/pppp1ppp/5n2/4N3/4P3/8/PPPP1PPP/RNBQKB1R b KQkq": "b8c6",
+    
+    // Scholar's Mate Trap
+    "r1bqkbnr/pppp1ppp/2n5/4p3/2B1P3/5Q2/PPPP1PPP/RNB1K1NR b KQkq": "c6d4",
+    
+    // Caro-Kann Fantasy Variation Trap
+    "rnbqkbnr/pp2pppp/2p5/3p4/3PP3/5P2/PPP3PP/RNBQKBNR b KQkq": "d5e4",
+    "rnbqkbnr/pp2pppp/2p5/8/3Pp3/5P2/PPP3PP/RNBQKBNR w KQkq": "f3e4",
+    "rnbqkbnr/pp2pppp/2p5/8/3PP3/8/PPP3PP/RNBQKBNR b KQkq": "e7e5"
+};
 let creatingOffscreen = false;
 
 const normalizeFen = (f) => {
@@ -44,6 +62,19 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         const currentElo = result.elo || 3000;
         const activeWorkerCount = result.targetWorkers || 4;
         const normFen = normalizeFen(message.fen);
+        
+        // Check Aggressive Opening Book first
+        if (message.isMyTurn) {
+            const fenParts = message.fen.split(' ');
+            const bookKey = fenParts[0] + ' ' + fenParts[1] + ' ' + fenParts[2];
+            if (AGGRESSIVE_BOOK[bookKey]) {
+                const trapMove = AGGRESSIVE_BOOK[bookKey];
+                console.log("[Background] TRAP TRIGGERED:", trapMove);
+                sendResponse({ bestMove: trapMove, pv: [trapMove] });
+                ponderCache = {};
+                return;
+            }
+        }
         
         if (message.isMyTurn && ponderCache[normFen]) {
             console.log("[Background] PONDER HIT! INSTANT REPLY for", normFen, "->", ponderCache[normFen].bestMove);
@@ -116,3 +147,4 @@ function callOffscreenSMP(fen, timeMs, currentElo, activeWorkerCount, isMyTurn, 
         });
     });
 }
+

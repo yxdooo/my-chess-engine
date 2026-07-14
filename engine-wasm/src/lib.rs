@@ -605,3 +605,4 @@ fn evaluate(board: &Board) -> i32 {
 
     (mg_score * (24 - phase) + eg_score * phase) / 24
 }
+

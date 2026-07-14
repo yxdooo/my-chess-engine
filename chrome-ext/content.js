@@ -146,11 +146,11 @@ function getMyTimeLeft() {
     return seconds;
 }
 
-function drawArrow(fromIdx, toIdx) {
+function drawArrow(fromIdx, toIdx, color) {
   initOverlay();
   if (!overlayCanvas) return;
   const ctx = overlayCanvas.getContext('2d');
-  ctx.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
+  
 
   const sqSize = overlayCanvas.width / 8;
   
@@ -211,15 +211,29 @@ function processPosition() {
             return;
         }
         
-        if (isMyTurn && response && response.bestMove && response.bestMove.length >= 4) {
-          console.log("[Content] Got best move from background:", response.bestMove);
-          const f = response.bestMove.charCodeAt(0) - 97;
-          const r = response.bestMove.charCodeAt(1) - 49;
-          const tf = response.bestMove.charCodeAt(2) - 97;
-          const tr = response.bestMove.charCodeAt(3) - 49;
+        if (isMyTurn && response && response.pv && response.pv.length > 0) {
+          if (overlayCanvas) overlayCanvas.getContext('2d').clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
           
-          if (f >= 0 && f <= 7 && r >= 0 && r <= 7 && tf >= 0 && tf <= 7 && tr >= 0 && tr <= 7) {
-              drawArrow(r * 8 + f, tr * 8 + tf);
+          const colors = [
+              'rgba(46, 204, 113, 0.95)', // Green
+              'rgba(231, 76, 60, 0.85)',  // Red
+              'rgba(52, 152, 219, 0.75)'  // Blue
+          ];
+          
+          const maxMoves = Math.min(response.pv.length, 3);
+          for (let i = maxMoves - 1; i >= 0; i--) {
+              let move = response.pv[i];
+              if (typeof move === 'string') move = move.replace(/['"]/g, '');
+              if (move && move.length >= 4) {
+                  const f = move.charCodeAt(0) - 97;
+                  const r = move.charCodeAt(1) - 49;
+                  const tf = move.charCodeAt(2) - 97;
+                  const tr = move.charCodeAt(3) - 49;
+                  
+                  if (f >= 0 && f <= 7 && r >= 0 && r <= 7 && tf >= 0 && tf <= 7 && tr >= 0 && tr <= 7) {
+                      drawArrow(r * 8 + f, tr * 8 + tf, colors[i]);
+                  }
+              }
           }
         }
       });
@@ -239,4 +253,5 @@ observer.observe(document.body, { childList: true, subtree: true });
 setTimeout(processPosition, 1000);
 
 chrome.runtime.onMessage.addListener((msg) => { if (msg.type === 'FORCE_EVALUATE') { currentFEN = ''; processPosition(); } });
+
 
