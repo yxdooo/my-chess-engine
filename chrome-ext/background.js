@@ -78,7 +78,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         
         if (message.isMyTurn && ponderCache[normFen]) {
             console.log("[Background] PONDER HIT! INSTANT REPLY for", normFen, "->", ponderCache[normFen].bestMove);
-            sendResponse({ bestMove: ponderCache[normFen].bestMove });
+            sendResponse({ bestMove: ponderCache[normFen].bestMove, pv: [ponderCache[normFen].bestMove] });
             ponderCache = {}; 
             return;
         }
@@ -102,13 +102,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           .then(r => r.json())
           .then(data => {
             if (data.moves && data.moves.length > 0 && currentElo >= 1600 && message.isMyTurn) {
-              sendResponse({ bestMove: data.moves[0].uci });
+              sendResponse({ bestMove: data.moves[0].uci, pv: [data.moves[0].uci] });
             } else {
                 fetch("https://tablebase.lichess.ovh/standard?fen=" + encodeURIComponent(message.fen))
                 .then(r => r.json())
                 .then(tb => {
                   if (tb.moves && tb.moves.length > 0 && currentElo >= 2000 && message.isMyTurn) {
-                    sendResponse({ bestMove: tb.moves[0].uci });
+                    sendResponse({ bestMove: tb.moves[0].uci, pv: [tb.moves[0].uci] });
                   } else {
                     callOffscreenSMP(message.fen, engineTime, currentElo, activeWorkerCount, message.isMyTurn, sendResponse);
                   }
@@ -147,4 +147,5 @@ function callOffscreenSMP(fen, timeMs, currentElo, activeWorkerCount, isMyTurn, 
         });
     });
 }
+
 
