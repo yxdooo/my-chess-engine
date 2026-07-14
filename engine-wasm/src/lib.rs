@@ -157,14 +157,14 @@ struct TranspositionTable {
 
 impl TranspositionTable {
     fn new(size: usize) -> Self {
-        Self { entries: vec![TTEntry { hash: 0, best_move: None, depth: 0, score: 0, flag: 0 }; size], size }
+        Self { entries: vec![TTEntry { hash: 0, best_move: None, depth: 0, score: 0, flag: 0 }; size.next_power_of_two()], size: size.next_power_of_two() }
     }
     fn store(&mut self, hash: u64, best_move: Option<ChessMove>, depth: u8, score: i32, flag: u8) {
-        let index = (hash as usize) % self.size;
+        let index = (hash as usize) & (self.size - 1);
         self.entries[index] = TTEntry { hash, best_move, depth, score, flag };
     }
     fn probe(&self, hash: u64) -> Option<TTEntry> {
-        let index = (hash as usize) % self.size;
+        let index = (hash as usize) & (self.size - 1);
         let entry = self.entries[index];
         if entry.hash == hash { Some(entry) } else { None }
     }
@@ -337,7 +337,7 @@ impl ChessEngine {
         let tt_best_move = self.tt.probe(hash).and_then(|entry| entry.best_move);
 
         let mut moves: Vec<ChessMove> = MoveGen::new_legal(board).collect();
-        if moves.is_empty() { return (None, 0); }
+        if moves.is_empty() { return (None, if board.status() == BoardStatus::Checkmate { -MATE } else { 0 }); }
         
         self.sort_moves(board, &mut moves, 0, tt_best_move);
         
@@ -578,12 +578,12 @@ fn evaluate(board: &Board) -> i32 {
         for sq in w_pieces {
             let idx = sq.to_index();
             let (mg_pst, eg_pst) = match piece {
-                Piece::Pawn => (PAWN_MG_PST[63 - idx], PAWN_EG_PST[63 - idx]),
-                Piece::Knight => (KNIGHT_MG_PST[63 - idx], KNIGHT_EG_PST[63 - idx]),
-                Piece::Bishop => (BISHOP_MG_PST[63 - idx], BISHOP_EG_PST[63 - idx]),
-                Piece::Rook => (ROOK_MG_PST[63 - idx], ROOK_EG_PST[63 - idx]),
-                Piece::Queen => (QUEEN_MG_PST[63 - idx], QUEEN_EG_PST[63 - idx]),
-                Piece::King => (KING_MG_PST[63 - idx], KING_EG_PST[63 - idx]),
+                Piece::Pawn => (PAWN_MG_PST[idx ^ 56], PAWN_EG_PST[idx ^ 56]),
+                Piece::Knight => (KNIGHT_MG_PST[idx ^ 56], KNIGHT_EG_PST[idx ^ 56]),
+                Piece::Bishop => (BISHOP_MG_PST[idx ^ 56], BISHOP_EG_PST[idx ^ 56]),
+                Piece::Rook => (ROOK_MG_PST[idx ^ 56], ROOK_EG_PST[idx ^ 56]),
+                Piece::Queen => (QUEEN_MG_PST[idx ^ 56], QUEEN_EG_PST[idx ^ 56]),
+                Piece::King => (KING_MG_PST[idx ^ 56], KING_EG_PST[idx ^ 56]),
             };
             mg_score += mg_pst;
             eg_score += eg_pst;
@@ -605,4 +605,5 @@ fn evaluate(board: &Board) -> i32 {
 
     (mg_score * (24 - phase) + eg_score * phase) / 24
 }
+
 
