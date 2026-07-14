@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>KnightOS — Chess Engine</title>
+  <meta name="description" content="A ~2000 ELO chess engine with live Chess.com analysis assistant. Play against AI or get real-time move suggestions.">
+  <link rel="stylesheet" href="css/style.css">
+  <style>
+    .landing-page { padding-top: 60px; }
+    .elo-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 6px 14px;
+      background: var(--accent-dim);
+      border: 1px solid var(--border-accent);
+      border-radius: 999px;
+      font-size: 0.8125rem;
+      font-weight: 600;
+      color: var(--accent);
+      margin-bottom: 36px;
+    }
+    .elo-dot {
+      width: 7px; height: 7px;
+      border-radius: 50%;
+      background: var(--accent);
+      animation: pulse 2s ease infinite;
+    }
+    .feature-list {
+      display: flex;
+      gap: 24px;
+      margin-top: 48px;
+      flex-wrap: wrap;
+      justify-content: center;
+    }
+    .feature {
+      text-align: center;
+      flex: 1;
+      min-width: 140px;
+      max-width: 200px;
+    }
+    .feature-icon { font-size: 1.8rem; margin-bottom: 8px; }
+    .feature h4 { font-size: 0.875rem; color: var(--text-primary); margin-bottom: 4px; }
+    .feature p  { font-size: 0.75rem; color: var(--text-muted); }
+  </style>
+</head>
+<body>
+  <main class="landing-page">
+    <div class="logo">
+      <span class="logo-icon">♞</span>
+      <h1 class="logo-text">Knight<span>OS</span></h1>
+    </div>
+
+    <div class="elo-badge">
+      <div class="elo-dot"></div>
+      ~2000 ELO · Alpha-Beta · Transposition Table · LMR
+    </div>
+
+    <p class="tagline">
+      A full-strength chess engine built from scratch. Play against the AI
+      or connect your Chess.com game for real-time move analysis.
+    </p>
+
+    <div class="mode-grid">
+      <a href="play.html" class="mode-card" id="mode-play">
+        <span class="mode-icon">♟</span>
+        <h2>Play vs Engine</h2>
+        <p>Face our AI at three difficulty levels. Full drag-and-drop board with move history, captured pieces, and clock.</p>
+        <span class="badge badge-accent mode-tag">vs AI</span>
+      </a>
+
+      <a href="assistant.html" class="mode-card" id="mode-assistant">
+        <span class="mode-icon">📡</span>
+        <h2>Live Analysis</h2>
+        <p>Share your Chess.com tab. The engine reads your board in real time and suggests the best moves as you play.</p>
+        <span class="badge badge-green mode-tag">Chess.com</span>
+      </a>
+    </div>
+
+    <div class="feature-list">
+      <div class="feature">
+        <div class="feature-icon">⚡</div>
+        <h4>Alpha-Beta + LMR</h4>
+        <p>Searches 10+ ply deep with Late Move Reduction</p>
+      </div>
+      <div class="feature">
+        <div class="feature-icon">🧠</div>
+        <h4>Transposition Table</h4>
+        <p>Zobrist hashing with 1M entry cache</p>
+      </div>
+      <div class="feature">
+        <div class="feature-icon">📸</div>
+        <h4>Screen Detection</h4>
+        <p>Reads Chess.com boards via screen capture API</p>
+      </div>
+      <div class="feature">
+        <div class="feature-icon">🌐</div>
+        <h4>Runs in Browser</h4>
+        <p>No install, no server. Pure JavaScript.</p>
+      </div>
+    </div>
+  </main>
+</body>
+</html>

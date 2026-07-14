@@ -1,0 +1,50 @@
+{
+    "manifest_version":  3,
+    "name":  "Chess Engine V2",
+    "version":  "1.0",
+    "description":  "Custom Rust WASM Chess Engine for Chess.com",
+    "permissions":  [
+                        "activeTab",
+                        "scripting",
+                        "storage",
+                        "offscreen"
+                    ],
+    "host_permissions":  [
+                             "*://*.chess.com/*",
+                             "*://*.lichess.ovh/*"
+                         ],
+    "content_security_policy":  {
+                                    "extension_pages":  "script-src \u0027self\u0027 \u0027wasm-unsafe-eval\u0027; object-src \u0027self\u0027;"
+                                },
+    "background":  {
+                       "service_worker":  "background.js",
+                       "type":  "module"
+                   },
+    "content_scripts":  [
+                            {
+                                "matches":  [
+                                                "*://*.chess.com/*"
+                                            ],
+                                "js":  [
+                                           "content.js"
+                                       ],
+                                "css":  [
+                                            "content.css"
+                                        ]
+                            }
+                        ],
+    "action":  {
+                   "default_popup":  "popup.html"
+               },
+    "web_accessible_resources":  [
+                                     {
+                                         "resources":  [
+                                                           "engine_wasm_bg.wasm",
+                                                           "pkg/*"
+                                                       ],
+                                         "matches":  [
+                                                         "\u003call_urls\u003e"
+                                                     ]
+                                     }
+                                 ]
+}

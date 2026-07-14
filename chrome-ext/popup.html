@@ -1,0 +1,172 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>Chess Engine V2</title>
+  <style>
+    :root {
+      --bg: #121418;
+      --surface: #1e2128;
+      --primary: #4ade80;
+      --primary-hover: #22c55e;
+      --danger: #ef4444;
+      --danger-hover: #dc2626;
+      --text: #f8fafc;
+      --text-muted: #94a3b8;
+      --border: #334155;
+    }
+    body {
+      width: 320px;
+      font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      margin: 0;
+      padding: 20px;
+    }
+    h2 {
+      margin: 0 0 20px 0;
+      font-size: 1.4rem;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      color: var(--text);
+      font-weight: 600;
+      letter-spacing: -0.5px;
+    }
+    .status-box {
+      font-size: 0.9rem;
+      margin-bottom: 20px;
+      padding: 12px 16px;
+      border-radius: 8px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
+      transition: all 0.3s ease;
+    }
+    .status-box.active {
+      border-color: rgba(74, 222, 128, 0.5);
+      background: rgba(74, 222, 128, 0.05);
+    }
+    .status-box.inactive {
+      border-color: rgba(239, 68, 68, 0.5);
+      background: rgba(239, 68, 68, 0.05);
+    }
+    .indicator {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      background: var(--danger);
+      box-shadow: 0 0 10px var(--danger);
+    }
+    .status-box.active .indicator {
+      background: var(--primary);
+      box-shadow: 0 0 10px var(--primary);
+    }
+    .control-group {
+      margin-bottom: 16px;
+    }
+    label {
+      font-size: 0.85rem;
+      color: var(--text-muted);
+      margin-bottom: 6px;
+      display: block;
+      font-weight: 500;
+    }
+    select {
+      width: 100%;
+      padding: 10px;
+      border-radius: 6px;
+      background: var(--surface);
+      color: var(--text);
+      border: 1px solid var(--border);
+      font-size: 0.95rem;
+      outline: none;
+      transition: border-color 0.2s;
+      cursor: pointer;
+    }
+    select:focus {
+      border-color: var(--primary);
+    }
+    .btn {
+      display: block;
+      width: 100%;
+      padding: 12px;
+      border-radius: 8px;
+      background: var(--primary);
+      color: #0f172a;
+      text-align: center;
+      font-weight: 600;
+      cursor: pointer;
+      border: none;
+      font-size: 1rem;
+      transition: all 0.2s;
+      margin-top: 10px;
+      box-shadow: 0 4px 14px rgba(74, 222, 128, 0.2);
+    }
+    .btn:hover {
+      background: var(--primary-hover);
+      transform: translateY(-1px);
+    }
+    .btn.stop {
+      background: transparent;
+      color: var(--danger);
+      border: 1px solid rgba(239, 68, 68, 0.3);
+      box-shadow: none;
+      margin-top: 8px;
+    }
+    .btn.stop:hover {
+      background: rgba(239, 68, 68, 0.1);
+      border-color: var(--danger);
+    }
+    .hw-info {
+      font-size: 0.75rem;
+      color: var(--text-muted);
+      text-align: center;
+      margin-top: 20px;
+      opacity: 0.7;
+    }
+  </style>
+</head>
+<body>
+  <h2>?? Rust Engine V2</h2>
+  
+  <div id="status-box" class="status-box inactive">
+    <div class="indicator"></div>
+    <div>Status: <strong id="status-text">Standby</strong></div>
+  </div>
+
+  <div class="control-group">
+    <label>Engine Strength (ELO)</label>
+    <select id="elo-select">
+      <option value="400">400 ELO (Beginner)</option>
+      <option value="1200">1200 ELO (Intermediate)</option>
+      <option value="1600">1600 ELO (Advanced)</option>
+      <option value="1800">1800 ELO (Expert)</option>
+      <option value="2000">2000 ELO (Master)</option>
+      <option value="2500">2500 ELO (Grandmaster)</option>
+      <option value="3000" selected>3000 ELO (Super GM)</option>
+      <option value="3500">3500+ ELO (God Mode)</option>
+    </select>
+  </div>
+
+  <div class="control-group">
+    <label>CPU Usage Mode (Multi-Threading)</label>
+    <select id="cpu-select">
+      <option value="eco">Eco Mode (1 Core)</option>
+      <option value="balanced" selected>Balanced (50% Cores)</option>
+      <option value="max">Max Performance (All Cores)</option>
+    </select>
+  </div>
+
+  <button class="btn" id="btn-start">Ignite Engine</button>
+  <button class="btn stop" id="btn-stop">Power Down</button>
+
+  <div class="hw-info" id="hw-info">Detecting Hardware...</div>
+
+  <script src="popup.js"></script>
+</body>
+</html>
+

@@ -1,0 +1,21 @@
+# Rust/Cargo
+target/
+engine-wasm/target/
+**/*.rs.bk
+
+# Node/JavaScript
+node_modules/
+npm-debug.log
+
+# IDEs and Editors
+.vscode/
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+.DS_Store
+
+# Logs
+*.log

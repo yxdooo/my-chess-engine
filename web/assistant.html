@@ -1,0 +1,885 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Live Analysis Assistant — KnightOS</title>
+  <meta name="description" content="Real-time Chess.com analysis assistant. Share your screen and get instant move suggestions from the KnightOS engine.">
+  <link rel="stylesheet" href="css/style.css">
+  <style>
+    .how-to-steps {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+    .step {
+      display: flex;
+      align-items: flex-start;
+      gap: 12px;
+    }
+    .step-num {
+      width: 24px;
+      height: 24px;
+      border-radius: 50%;
+      background: var(--accent-dim);
+      border: 1px solid var(--border-accent);
+      color: var(--accent);
+      font-size: 0.75rem;
+      font-weight: 700;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-shrink: 0;
+      margin-top: 1px;
+    }
+    .step-text { font-size: 0.8125rem; color: var(--text-secondary); }
+    .step-text strong { color: var(--text-primary); font-weight: 600; }
+
+    .theme-grid {
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 6px;
+    }
+    .theme-btn {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 7px 10px;
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      background: transparent;
+      color: var(--text-secondary);
+      font-family: var(--font-sans);
+      font-size: 0.8rem;
+      cursor: pointer;
+      transition: all var(--transition-fast);
+      width: 100%;
+    }
+    .theme-btn:hover { border-color: var(--border-accent); color: var(--text-primary); }
+    .theme-btn.active { background: var(--accent-dim); border-color: var(--border-accent); color: var(--accent); }
+    .theme-swatch {
+      width: 14px;
+      height: 14px;
+      border-radius: 3px;
+      flex-shrink: 0;
+    }
+
+    .empty-state {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 12px;
+      height: 100%;
+      padding: 40px;
+      text-align: center;
+    }
+    .empty-state .icon { font-size: 3rem; }
+    .empty-state h3 { color: var(--text-primary); }
+    .empty-state p  { font-size: 0.875rem; color: var(--text-muted); max-width: 260px; }
+
+    .confidence-bar {
+      height: 3px;
+      border-radius: 999px;
+      background: var(--border);
+      overflow: hidden;
+      margin-top: 8px;
+    }
+    .confidence-fill {
+      height: 100%;
+      border-radius: 999px;
+      background: linear-gradient(90deg, var(--red), var(--accent), var(--green));
+      background-size: 300% 100%;
+      transition: width 0.4s ease, background-position 0.4s ease;
+    }
+    .confidence-label {
+      display: flex;
+      justify-content: space-between;
+      font-size: 0.7rem;
+      color: var(--text-muted);
+      margin-top: 4px;
+    }
+
+    .pv-line {
+      font-family: var(--font-mono);
+      font-size: 0.75rem;
+      color: var(--text-muted);
+      margin-top: 6px;
+      word-break: break-all;
+      line-height: 1.6;
+    }
+    .pv-move { color: var(--text-secondary); }
+    .pv-move:first-child { color: var(--accent); font-weight: 600; }
+  </style>
+</head>
+<body>
+  <div class="game-page">
+
+    <!-- Top bar -->
+    <header class="topbar">
+      <a href="index.html" class="topbar-logo">
+        <span class="icon">♞</span>
+        Knight<span>OS</span>
+      </a>
+      <div class="topbar-divider"></div>
+      <span class="topbar-title">Live Analysis — Chess.com</span>
+      <div class="topbar-spacer"></div>
+      <button class="btn btn-ghost btn-sm" id="btn-stop" disabled>Stop Capture</button>
+      <button class="btn btn-primary btn-sm" id="btn-capture">📡 Start Capture</button>
+    </header>
+
+    <!-- Main layout -->
+    <div class="assistant-layout">
+
+      <!-- Left: screen preview -->
+      <div class="capture-zone">
+
+        <div class="capture-preview glass" id="capture-preview">
+          <!-- Board outline overlay rendered here -->
+          <div class="board-outline hidden" id="board-outline"></div>
+          <canvas id="preview-canvas" style="display:none"></canvas>
+          <div class="empty-state" id="empty-state">
+            <div class="icon">📡</div>
+            <h3>No capture active</h3>
+            <p>Click "Start Capture" and select your Chess.com tab to begin live analysis.</p>
+          </div>
+        </div>
+
+        <!-- Status -->
+        <div class="status-bar info hidden" id="status-bar">
+          <span id="status-icon">ℹ</span>
+          <span id="status-text">Ready</span>
+        </div>
+
+        <!-- Controls -->
+        <div class="detection-controls">
+          <button class="btn btn-ghost btn-sm" id="btn-rescan">🔍 Rescan Board</button>
+          <button class="btn btn-ghost btn-sm" id="btn-flip-board">↕ Flip Board</button>
+          <div style="flex:1"></div>
+          <button class="btn btn-ghost btn-sm" id="btn-analyze-fen">Analyze FEN</button>
+        </div>
+
+        <!-- Manual FEN input -->
+        <div class="panel">
+          <div class="fen-label-row" style="margin-bottom:6px">
+            <label for="fen-input">Position FEN</label>
+            <button class="btn btn-ghost btn-sm" id="btn-paste-fen">Paste &amp; Analyze</button>
+          </div>
+          <input
+            type="text"
+            class="input input-mono"
+            id="fen-input"
+            placeholder="rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
+            spellcheck="false"
+          >
+          <div class="flex gap-8 mt-8" style="flex-wrap:wrap">
+            <label style="margin:0;display:flex;align-items:center;gap:6px;font-size:0.8rem;cursor:pointer">
+              <input type="radio" name="side-to-move" id="stm-white" value="w" checked>
+              White to move
+            </label>
+            <label style="margin:0;display:flex;align-items:center;gap:6px;font-size:0.8rem;cursor:pointer">
+              <input type="radio" name="side-to-move" id="stm-black" value="b">
+              Black to move
+            </label>
+          </div>
+        </div>
+
+        <!-- Detected position mini-board -->
+        <div class="panel hidden" id="mini-board-panel">
+          <div class="fen-label-row" style="margin-bottom:10px">
+            <div class="panel-title" style="margin:0">Detected Position</div>
+            <div class="confidence-label" style="font-size:0.75rem;color:var(--text-muted)">
+              Confidence: <span id="confidence-pct">0%</span>
+            </div>
+          </div>
+          <div class="mini-board" id="mini-board"></div>
+          <div class="confidence-bar">
+            <div class="confidence-fill" id="confidence-fill" style="width:0%;background-position:0%"></div>
+          </div>
+          <div class="confidence-label">
+            <span>Low</span><span>High</span>
+            <button id="btn-save-pgn" class="w-full bg-blue-600 hover:bg-blue-500 text-white font-semibold py-2 px-4 rounded-md shadow-sm transition-colors mt-4">
+              Download PGN
+            </button>
+          </div>
+        </div>
+
+      </div>
+
+      <!-- Right: analysis panel -->
+      <aside class="assistant-sidebar">
+
+        <!-- Engine status -->
+        <div class="suggestion-card" id="suggestion-card">
+          <div class="suggestion-header">
+            <div class="engine-indicator">
+              <div class="thinking-pulse hidden" id="eng-pulse"></div>
+              <span id="eng-status-label">Waiting for position</span>
+            </div>
+            <div class="badge badge-accent">~2000 ELO</div>
+          </div>
+
+          <!-- Top move -->
+          <div class="top-move hidden" id="top-move-card">
+            <div class="top-move-label">Best Move</div>
+            <div class="top-move-san" id="top-move-san">—</div>
+            <div class="top-move-eval" id="top-move-eval"></div>
+            <div class="pv-line" id="pv-line"></div>
+          </div>
+
+          <!-- No moves placeholder -->
+          <div class="empty-state" id="no-suggestion" style="height:auto;padding:24px">
+            <div class="icon" style="font-size:2rem">♟</div>
+            <p>Share your Chess.com tab or paste a FEN to get move suggestions.</p>
+          </div>
+
+          <!-- Alt moves -->
+          <div class="alt-moves hidden" id="alt-moves-list"></div>
+
+          <!-- Depth / nodes -->
+          <div class="depth-info hidden" id="depth-info">
+            <div class="depth-stat">
+              <div class="val" id="info-depth">—</div>
+              <div class="lbl">Depth</div>
+            </div>
+            <div class="depth-stat">
+              <div class="val" id="info-nodes">—</div>
+              <div class="lbl">Nodes</div>
+            </div>
+            <div class="depth-stat">
+              <div class="val" id="info-time">—</div>
+              <div class="lbl">Time</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Score bar -->
+        <div class="panel">
+          <div class="panel-title">Evaluation</div>
+          <div class="score-bar-wrapper">
+            <span style="font-size:0.75rem;color:var(--text-muted)">B</span>
+            <div class="score-bar">
+              <div class="score-bar-fill" id="asst-score-fill" style="width:50%"></div>
+            </div>
+            <span style="font-size:0.75rem;color:var(--text-muted)">W</span>
+            <span class="score-value" id="asst-score-value">0.0</span>
+          </div>
+        </div>
+
+        <!-- Settings -->
+        <div class="panel">
+          <div class="panel-title">Detection Settings</div>
+
+          <label class="mt-8 mb-8">Board Theme (Chess.com)</label>
+          <div class="theme-grid" id="theme-grid">
+            <button class="theme-btn active" id="theme-default" data-theme="default">
+              <span class="theme-swatch" style="background:linear-gradient(135deg,#f0d9b5 50%,#b58863 50%)"></span>
+              Default (Brown)
+            </button>
+            <button class="theme-btn" id="theme-green" data-theme="green">
+              <span class="theme-swatch" style="background:linear-gradient(135deg,#eeeed2 50%,#769656 50%)"></span>
+              Green
+            </button>
+            <button class="theme-btn" id="theme-blue" data-theme="blue">
+              <span class="theme-swatch" style="background:linear-gradient(135deg,#dee3e6 50%,#8ca2ad 50%)"></span>
+              Blue
+            </button>
+            <button class="theme-btn" id="theme-purple" data-theme="purple">
+              <span class="theme-swatch" style="background:linear-gradient(135deg,#f1f1f1 50%,#8877b7 50%)"></span>
+              Purple
+            </button>
+          </div>
+
+          <label class="mt-12 mb-8">Target ELO</label>
+          <div style="display:grid;grid-template-columns:repeat(2,1fr);gap:6px">
+            <button class="diff-btn" data-time="300"  data-elo="1400">~1400 ELO</button>
+            <button class="diff-btn" data-time="700"  data-elo="1600">~1600 ELO</button>
+            <button class="diff-btn active" data-time="1800" data-elo="1800">~1800 ELO</button>
+            <button class="diff-btn" data-time="3500" data-elo="2000">~2000 ELO</button>
+          </div>
+          <p style="font-size:0.7rem;color:var(--text-muted);margin-top:6px">Higher ELO = deeper search, longer think time</p>
+        </div>
+
+        <!-- Game Memory panel -->
+        <div class="panel" id="memory-panel">
+          <div class="flex items-center justify-between" style="margin-bottom:12px">
+            <div class="panel-title" style="margin:0">Game Memory</div>
+            <button class="btn btn-ghost btn-sm" id="btn-reset-memory">Reset</button>
+          </div>
+          <div class="flex items-center gap-8" style="margin-bottom:10px">
+            <div style="width:10px;height:10px;border-radius:50%;background:var(--green);flex-shrink:0" id="memory-dot"></div>
+            <span style="font-size:0.8125rem;color:var(--text-secondary)" id="memory-label">Tracking game history</span>
+          </div>
+          <div class="engine-stat"><span class="label">Moves tracked</span><span class="value" id="memory-moves">0</span></div>
+          <div class="engine-stat"><span class="label">En passant</span><span class="value" id="memory-ep">—</span></div>
+          <div class="engine-stat"><span class="label">Castling rights</span><span class="value" id="memory-castle">KQkq</span></div>
+          <div class="engine-stat"><span class="label">Half-move clock</span><span class="value" id="memory-hmc">0</span></div>
+          <p style="font-size:0.7rem;color:var(--text-muted);margin-top:10px;line-height:1.5">
+            The engine uses full move history for accurate repetition detection, en passant, and castling rights.
+          </p>
+        </div>
+
+        <!-- How to use -->
+        <div class="panel">
+          <div class="panel-title">How to Use</div>
+          <div class="how-to-steps">
+            <div class="step">
+              <div class="step-num">1</div>
+              <div class="step-text">Open <strong>Chess.com</strong> in another tab and start or join a game.</div>
+            </div>
+            <div class="step">
+              <div class="step-num">2</div>
+              <div class="step-text">Click <strong>Start Capture</strong> and select your Chess.com tab in the browser dialog.</div>
+            </div>
+            <div class="step">
+              <div class="step-num">3</div>
+              <div class="step-text">The engine detects your board and shows the <strong>best move</strong> in real time. It <strong>remembers every move</strong> for full game awareness.</div>
+            </div>
+            <div class="step">
+              <div class="step-num">4</div>
+              <div class="step-text">Toggle <strong>Flip Board</strong> if you're playing as Black. Hit <strong>Reset</strong> in Game Memory to start fresh.</div>
+            </div>
+          </div>
+        </div>
+
+      </aside>
+    </div>
+  </div>
+
+  <script src="js/chess.js"></script>
+  <script src="js/engine.js"></script>
+  <script src="js/screen-reader.js"></script>
+  <script>
+  'use strict';
+
+  // ── State ──────────────────────────────────────────────────────────────
+  const reader  = new ScreenReader();
+  const engine  = new ChessEngine({ ttSizeMb: 32 });
+  let currentFEN   = null;       // last full FEN passed to engine
+  let currentBoard = null;       // board-only part of last detected FEN
+  let engineBusy   = false;
+  let engineTimeMs = 1800;
+  let sideOverride = null;       // 'w' or 'b' manual override
+
+  // ── Game Memory ────────────────────────────────────────────────────────
+  // Maintains a full ChessGame with complete move history so the engine
+  // has accurate castling rights, en passant, and repetition context.
+  let trackedGame   = null;      // ChessGame with full history
+  let trackedMoves  = 0;         // move counter for display
+
+  /** FEN char → encoded piece value (matches chess.js convention) */
+  const FEN_TO_PIECE = {
+    P:1,N:2,B:3,R:4,Q:5,K:6,
+    p:9,n:10,b:11,r:12,q:13,k:14,
+  };
+
+  /**
+   * Parses the board portion of a FEN string into a Uint8Array(64).
+   * Square index: 0=a1, 7=h1, 8=a2, ..., 63=h8.
+   */
+  function parseBoardFEN(boardStr) {
+    const board = new Uint8Array(64);
+    const rows = boardStr.split('/');
+    for (let r = 7; r >= 0; r--) {
+      let f = 0;
+      for (const ch of rows[7 - r]) {
+        if (ch >= '1' && ch <= '8') {
+          f += parseInt(ch);
+        } else {
+          board[r * 8 + f] = FEN_TO_PIECE[ch] ?? 0;
+          f++;
+        }
+      }
+    }
+    return board;
+  }
+
+  /**
+   * Given the board-only FEN before and after a move, finds the legal move
+   * in prevGame that produces newBoard by trying all legal moves.
+   * Returns the matching Move object, or null if no match found.
+   */
+  function detectMoveFromBoardChange(prevGame, newBoard) {
+    const legalMoves = prevGame.generateMoves();
+    for (const move of legalMoves) {
+      prevGame._applyMove(move);
+      let matches = true;
+      for (let sq = 0; sq < 64; sq++) {
+        if (prevGame.board[sq] !== newBoard[sq]) { matches = false; break; }
+      }
+      prevGame._undoMove();
+      if (matches) return move;
+    }
+    return null;
+  }
+
+  /** Resets game memory to a fresh position from the given FEN. */
+  function resetMemory(fen) {
+    try {
+      trackedGame  = new ChessGame(fen);
+      trackedMoves = 0;
+    } catch (e) {
+      trackedGame  = null;
+      trackedMoves = 0;
+    }
+    updateMemoryUI();
+  }
+
+  /** Updates the Game Memory panel with current tracked game state. */
+  function updateMemoryUI() {
+    const movesEl  = document.getElementById('memory-moves');
+    const epEl     = document.getElementById('memory-ep');
+    const castleEl = document.getElementById('memory-castle');
+    const hmcEl    = document.getElementById('memory-hmc');
+    const labelEl  = document.getElementById('memory-label');
+    const dotEl    = document.getElementById('memory-dot');
+
+    if (!trackedGame) {
+      movesEl.textContent  = '0';
+      epEl.textContent     = '—';
+      castleEl.textContent = '—';
+      hmcEl.textContent    = '0';
+      labelEl.textContent  = 'No game tracked yet';
+      dotEl.style.background = 'var(--text-muted)';
+      return;
+    }
+
+    movesEl.textContent = trackedMoves;
+
+    // En passant
+    const epSq = trackedGame.epSquare;
+    epEl.textContent = epSq >= 0
+      ? 'abcdefgh'[epSq & 7] + (epSq >> 3 + 1)
+      : '—';
+
+    // Castling rights
+    const cr = trackedGame.castlingRights;
+    let castle = '';
+    if (cr & 1) castle += 'K';
+    if (cr & 2) castle += 'Q';
+    if (cr & 4) castle += 'k';
+    if (cr & 8) castle += 'q';
+    castleEl.textContent = castle || '—';
+
+    hmcEl.textContent = trackedGame.halfMoveClock;
+
+    if (trackedMoves > 0) {
+      labelEl.textContent = `Tracking — ${trackedMoves} move${trackedMoves !== 1 ? 's' : ''} in memory`;
+      dotEl.style.background = 'var(--green)';
+    } else {
+      labelEl.textContent = 'Tracking game history';
+      dotEl.style.background = 'var(--accent)';
+    }
+  }
+
+  // ── Init ───────────────────────────────────────────────────────────────
+  function init() {
+    bindUI();
+
+    reader.onPositionChange = (fen) => {
+      const stm      = sideOverride ?? getSideToMove();
+      const boardStr = fen.split(' ')[0];
+      onNewBoard(boardStr, stm);
+    };
+
+    reader.onBoardDetected = (bounds) => {
+      showBoardOutline(bounds);
+      setStatus('success', '✓ Board detected — analyzing position...');
+    };
+
+    reader.onFrame = (canvas) => {
+      const preview = document.getElementById('preview-canvas');
+      preview.width  = canvas.width;
+      preview.height = canvas.height;
+      preview.getContext('2d').drawImage(canvas, 0, 0);
+    };
+  }
+
+  function resetUI() {
+    document.getElementById('btn-capture').disabled  = false;
+    document.getElementById('btn-stop').disabled     = true;
+    document.getElementById('preview-canvas').style.display = 'none';
+    document.getElementById('empty-state').style.display    = '';
+    document.getElementById('board-outline').classList.add('hidden');
+    document.getElementById('status-bar').classList.add('hidden');
+    document.getElementById('mini-board-panel').classList.add('hidden');
+    hideSuggestion();
+    currentFEN   = null;
+    currentBoard = null;
+  }
+
+  // ── Position change pipeline ────────────────────────────────────────────
+  /**
+   * Called whenever screen reader detects a new board layout.
+   * Updates game memory by deducing what move was played, then triggers analysis.
+   */
+  function onNewBoard(boardStr, stm) {
+    if (boardStr === currentBoard) return; // no change
+
+    if (!trackedGame) {
+      // First position seen: initialize tracked game
+      const initFEN = boardStr + ' ' + stm + ' KQkq - 0 1';
+      resetMemory(initFEN);
+      currentBoard = boardStr;
+      onNewFEN(trackedGame.toFEN());
+      return;
+    }
+
+    // Position changed — deduce the move that was played
+    const newBoard = parseBoardFEN(boardStr);
+    const move = detectMoveFromBoardChange(trackedGame, newBoard);
+
+    if (move) {
+      // Successfully identified the move: apply it to maintain full history
+      trackedGame.makeMove(move);
+      trackedMoves++;
+      setStatus('success', `✓ Move detected: ${trackedGame.moveToUCI(move)} — ${trackedMoves} move${trackedMoves !== 1 ? 's' : ''} in memory`);
+    } else {
+      // Could not match any legal move to the new board state.
+      // This can happen due to: detection error, piece detection mismatch, or a jump
+      // in the game (e.g., user fast-forwarded). Reset memory to current position.
+      const stmNow = trackedGame.sideToMove === COLOR.WHITE ? 'w' : 'b';
+      resetMemory(boardStr + ' ' + stmNow + ' KQkq - 0 1');
+      setStatus('warning', 'Move not recognized — memory reset to current position');
+    }
+
+    currentBoard = boardStr;
+    updateMemoryUI();
+    onNewFEN(trackedGame.toFEN());
+  }
+
+  function onNewFEN(fen) {
+    if (fen === currentFEN) return;
+    currentFEN = fen;
+
+    document.getElementById('fen-input').value = fen;
+    renderMiniBoard(fen);
+    document.getElementById('mini-board-panel').classList.remove('hidden');
+    analyzePosition(fen);
+  }
+
+  // ── Analysis ───────────────────────────────────────────────────────────
+  function analyzePosition(fen) {
+    if (engineBusy) return;
+    engineBusy = true;
+
+    document.getElementById('eng-pulse').classList.remove('hidden');
+    document.getElementById('eng-status-label').textContent = 'Analyzing...';
+    document.getElementById('no-suggestion').classList.add('hidden');
+    document.getElementById('top-move-card').classList.add('hidden');
+    document.getElementById('depth-info').classList.add('hidden');
+
+    let game;
+    try {
+      // Use trackedGame if available (has full history); otherwise parse FEN
+      game = trackedGame ?? new ChessGame(fen);
+      // Sanity check: if tracked game FEN doesn't match, fall back to FEN
+      if (trackedGame && trackedGame.toFEN().split(' ')[0] !== fen.split(' ')[0]) {
+        game = new ChessGame(fen);
+      }
+    } catch (e) {
+      setStatus('error', 'Invalid position: ' + e.message);
+      finishAnalysis();
+      return;
+    }
+
+    if (game.isGameOver()) {
+      setStatus('warning', 'Game over: ' + game.getResult());
+      finishAnalysis();
+      return;
+    }
+
+    engine.getBestMove(game, {
+      timeMs: engineTimeMs,
+      onProgress: (info) => updateDepthInfo(info),
+    }).then(result => {
+      if (!result?.move) { finishAnalysis(); return; }
+
+      const moveUCI = game.moveToUCI(result.move);
+      const moveSAN = game.moveToSAN ? game.moveToSAN(result.move) : moveUCI;
+      const score   = result.score;
+      const cp      = score / 100;
+
+      document.getElementById('top-move-san').textContent  = moveSAN;
+      document.getElementById('top-move-eval').textContent =
+        (score > 0 ? '+' : '') + cp.toFixed(2) +
+        (game.sideToMove === COLOR.WHITE ? ' (White advantage)' : ' (Black advantage)');
+
+      // PV line
+      if (result.pv && result.pv.length > 0) {
+        const pvGame = game.clone();
+        const pvTokens = result.pv.slice(0, 8).map(m => {
+          const san = pvGame.moveToSAN ? pvGame.moveToSAN(m) : pvGame.moveToUCI(m);
+          pvGame._applyMove(m);
+          return san;
+        });
+        document.getElementById('pv-line').innerHTML =
+          pvTokens.map(s => `<span class="pv-move">${s}</span>`).join(' ');
+      } else {
+        document.getElementById('pv-line').textContent = '';
+      }
+
+      updateScoreBar(score, game.sideToMove);
+      document.getElementById('top-move-card').classList.remove('hidden');
+      showAltMoves(game, result.move);
+      finishAnalysis();
+    });
+  }
+
+  function finishAnalysis() {
+    engineBusy = false;
+    document.getElementById('eng-pulse').classList.add('hidden');
+    document.getElementById('eng-status-label').textContent = 'Analysis complete';
+    document.getElementById('depth-info').classList.remove('hidden');
+  }
+
+  function updateDepthInfo(info) {
+    document.getElementById('info-depth').textContent = info.depth ?? '—';
+    document.getElementById('info-nodes').textContent = info.nodes ? formatNum(info.nodes) : '—';
+    document.getElementById('info-time').textContent  = info.timeMs ? info.timeMs + 'ms' : '—';
+  }
+
+  function showAltMoves(game, bestMove) {
+    const altContainer = document.getElementById('alt-moves-list');
+    altContainer.innerHTML = '';
+
+    const moves = game.generateMoves();
+    if (moves.length <= 1) { altContainer.classList.add('hidden'); return; }
+
+    const bestUCI = game.moveToUCI(bestMove);
+    const scored = moves
+      .filter(m => game.moveToUCI(m) !== bestUCI)
+      .slice(0, 5)
+      .map(m => {
+        game._applyMove(m);
+        const sc = -engine.evaluate(game);
+        game._undoMove();
+        return { m, sc };
+      })
+      .sort((a, b) => b.sc - a.sc)
+      .slice(0, 3);
+
+    for (const { m, sc } of scored) {
+      const san = game.moveToSAN ? game.moveToSAN(m) : game.moveToUCI(m);
+      const cp  = (sc / 100).toFixed(2);
+      const div = document.createElement('div');
+      div.className = 'alt-move';
+      div.innerHTML = `<span class="san">${san}</span><span class="eval">${sc > 0 ? '+' : ''}${cp}</span>`;
+      altContainer.appendChild(div);
+    }
+
+    altContainer.classList.remove('hidden');
+  }
+
+  function hideSuggestion() {
+    document.getElementById('top-move-card').classList.add('hidden');
+    document.getElementById('alt-moves-list').classList.add('hidden');
+    document.getElementById('depth-info').classList.add('hidden');
+    document.getElementById('no-suggestion').classList.remove('hidden');
+    document.getElementById('eng-status-label').textContent = 'Waiting for position';
+  }
+
+  // ── UI helpers ─────────────────────────────────────────────────────────
+  function renderMiniBoard(fen) {
+    const el = document.getElementById('mini-board');
+    const pos = fen.split(' ')[0];
+    const rows = pos.split('/');
+    el.innerHTML = '';
+
+    for (let r = 0; r < 8; r++) {
+      let file = 0;
+      for (const ch of rows[r]) {
+        if (ch >= '1' && ch <= '8') {
+          for (let i = 0; i < parseInt(ch); i++) {
+            el.appendChild(makeMiniSq(null, file, 7 - r));
+            file++;
+          }
+        } else {
+          el.appendChild(makeMiniSq(ch, file, 7 - r));
+          file++;
+        }
+      }
+    }
+  }
+
+  function makeMiniSq(pieceChar, file, rank) {
+    const div = document.createElement('div');
+    const isLight = (file + rank) % 2 === 1;
+    div.className = 'mini-sq ' + (isLight ? 'light' : 'dark');
+    if (pieceChar) {
+      const span = document.createElement('span');
+      const isWhite = pieceChar === pieceChar.toUpperCase();
+      span.className = isWhite ? 'mini-piece-w' : 'mini-piece-b';
+      const pieceMap = {P:'♙',N:'♘',B:'♗',R:'♖',Q:'♕',K:'♔',p:'♟',n:'♞',b:'♝',r:'♜',q:'♛',k:'♚'};
+      span.textContent = pieceMap[pieceChar] ?? '';
+      div.appendChild(span);
+    }
+    return div;
+  }
+
+  function updateScoreBar(score, sideToMove) {
+    const whiteScore = sideToMove === COLOR.WHITE ? score : -score;
+    const cp  = Math.max(-1000, Math.min(1000, whiteScore));
+    const pct = 50 + cp / 20;
+    document.getElementById('asst-score-fill').style.width  = Math.max(5, Math.min(95, pct)) + '%';
+    document.getElementById('asst-score-value').textContent = (cp > 0 ? '+' : '') + (cp / 100).toFixed(1);
+  }
+
+  function showBoardOutline(bounds) {
+    const preview = document.getElementById('capture-preview');
+    const canvas  = document.getElementById('preview-canvas');
+    if (!canvas.width) return;
+
+    const scaleX = preview.offsetWidth  / canvas.width;
+    const scaleY = preview.offsetHeight / canvas.height;
+    const outline = document.getElementById('board-outline');
+
+    outline.style.left   = (bounds.x * scaleX) + 'px';
+    outline.style.top    = (bounds.y * scaleY) + 'px';
+    outline.style.width  = (bounds.size * scaleX) + 'px';
+    outline.style.height = (bounds.size * scaleY) + 'px';
+    outline.classList.remove('hidden');
+
+    const pct = Math.round(Math.min(1, bounds.size / 100) * 100);
+    document.getElementById('confidence-pct').textContent = pct + '%';
+    document.getElementById('confidence-fill').style.width = pct + '%';
+    document.getElementById('confidence-fill').style.backgroundPosition = (100 - pct) + '%';
+  }
+
+  function setStatus(type, text) {
+    const bar = document.getElementById('status-bar');
+    bar.className = 'status-bar ' + type;
+    bar.classList.remove('hidden');
+    document.getElementById('status-text').textContent = text;
+  }
+
+  function getSideToMove() {
+    return document.querySelector('input[name="side-to-move"]:checked')?.value ?? 'w';
+  }
+
+  function formatNum(n) {
+    if (n >= 1e6) return (n / 1e6).toFixed(1) + 'M';
+    if (n >= 1e3) return (n / 1e3).toFixed(0) + 'K';
+    return n;
+  }
+
+  // ── Bindings ───────────────────────────────────────────────────────────
+  function bindUI() {
+    document.getElementById('btn-capture').addEventListener('click', async () => {
+      try {
+        setStatus('info', 'Requesting screen share...');
+        await reader.startCapture();
+        document.getElementById('btn-capture').disabled  = true;
+        document.getElementById('btn-stop').disabled     = false;
+        document.getElementById('preview-canvas').style.display = 'block';
+        document.getElementById('empty-state').style.display    = 'none';
+        setStatus('info', 'Looking for chessboard...');
+      } catch (e) {
+        if (e.name !== 'NotAllowedError') {
+          setStatus('error', 'Capture failed: ' + e.message);
+        } else {
+          setStatus('warning', 'Screen share cancelled.');
+        }
+      }
+    });
+
+    document.getElementById('btn-stop').addEventListener('click', () => {
+      reader.stopCapture();
+      resetUI();
+    });
+
+    document.getElementById('btn-rescan').addEventListener('click', () => {
+      reader.resetDetection();
+      setStatus('info', 'Rescanning for board...');
+    });
+
+    document.getElementById('btn-flip-board').addEventListener('click', () => {
+      reader.setFlipped(!reader._flipped);
+      if (currentBoard) {
+        const stm = getSideToMove();
+        onNewBoard(currentBoard, stm);
+      }
+    });
+
+    document.getElementById('btn-paste-fen').addEventListener('click', () => {
+      const fen = document.getElementById('fen-input').value.trim();
+      if (fen) {
+        // Paste overrides tracked game — reset memory to this position
+        resetMemory(fen);
+        currentBoard = fen.split(' ')[0];
+        updateMemoryUI();
+        onNewFEN(fen);
+      }
+    });
+
+    document.getElementById('fen-input').addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') {
+        const fen = e.target.value.trim();
+        if (fen) {
+          resetMemory(fen);
+          currentBoard = fen.split(' ')[0];
+          updateMemoryUI();
+          onNewFEN(fen);
+        }
+      }
+    });
+
+    document.getElementById('btn-analyze-fen').addEventListener('click', () => {
+      const fen = document.getElementById('fen-input').value.trim() ||
+        document.getElementById('fen-input').placeholder;
+      resetMemory(fen);
+      currentBoard = fen.split(' ')[0];
+      updateMemoryUI();
+      onNewFEN(fen);
+    });
+
+    document.getElementById('btn-reset-memory').addEventListener('click', () => {
+      trackedGame  = null;
+      trackedMoves = 0;
+      currentBoard = null;
+      currentFEN   = null;
+      updateMemoryUI();
+      setStatus('info', 'Game memory cleared — next detected position will start fresh.');
+    });
+
+    // Side-to-move radios
+    document.querySelectorAll('input[name="side-to-move"]').forEach(radio => {
+      radio.addEventListener('change', () => {
+        sideOverride = radio.value;
+        // Update tracked game side-to-move if we have one
+        if (trackedGame && currentBoard) {
+          const newFEN = currentBoard + ' ' + radio.value + ' KQkq - 0 1';
+          resetMemory(newFEN);
+          updateMemoryUI();
+          onNewFEN(trackedGame.toFEN());
+        }
+      });
+    });
+
+    // Theme buttons
+    document.querySelectorAll('.theme-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        document.querySelectorAll('.theme-btn').forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+        reader.setTheme(btn.dataset.theme);
+        reader.resetDetection();
+      });
+    });
+
+    // ELO / time buttons
+    document.querySelectorAll('[data-time][data-elo]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        document.querySelectorAll('[data-time][data-elo]').forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+        engineTimeMs = parseInt(btn.dataset.time);
+        document.getElementById('eng-status-label').textContent =
+          'ELO target: ' + btn.dataset.elo + ' (' + btn.dataset.time + 'ms)';
+      });
+    });
+  }
+
+  document.addEventListener('DOMContentLoaded', init);
+  </script>
+
+</body>
+</html>
