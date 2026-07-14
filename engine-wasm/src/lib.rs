@@ -112,11 +112,13 @@ impl ChessEngine {
         let mut pv = Vec::new();
         let mut current_board = board.clone();
         for _ in 0..6 {
-            if let Some(entry) = self.tt.probe(current_board.get_hash()) {
+            if let Some(entry) = self.tt.probe(current_board.get_hash(), 0) {
                 if let Some(pv_move) = entry.best_move {
-                    pv.push(format!("\"{}\"", pv_move.to_string()));
-                    current_board = current_board.make_move_new(pv_move);
-                    continue;
+                    if MoveGen::new_legal(&current_board).any(|m| m == pv_move) {
+                        pv.push(format!("\"{}\"", pv_move.to_string()));
+                        current_board = current_board.make_move_new(pv_move);
+                        continue;
+                    }
                 }
             }
             break;
@@ -159,14 +161,21 @@ impl TranspositionTable {
     fn new(size: usize) -> Self {
         Self { entries: vec![TTEntry { hash: 0, best_move: None, depth: 0, score: 0, flag: 0 }; size.next_power_of_two()], size: size.next_power_of_two() }
     }
-    fn store(&mut self, hash: u64, best_move: Option<ChessMove>, depth: u8, score: i32, flag: u8) {
+    fn store(&mut self, hash: u64, best_move: Option<ChessMove>, depth: u8, mut score: i32, flag: u8, ply: u8) {
+        if score > MATE - 128 { score += ply as i32; } else if score < -MATE + 128 { score -= ply as i32; }
         let index = (hash as usize) & (self.size - 1);
-        self.entries[index] = TTEntry { hash, best_move, depth, score, flag };
+        let entry = &self.entries[index];
+        if entry.hash == 0 || entry.hash == hash || depth >= entry.depth {
+            self.entries[index] = TTEntry { hash, best_move, depth, score, flag };
+        }
     }
-    fn probe(&self, hash: u64) -> Option<TTEntry> {
+    fn probe(&self, hash: u64, ply: u8) -> Option<TTEntry> {
         let index = (hash as usize) & (self.size - 1);
-        let entry = self.entries[index];
-        if entry.hash == hash { Some(entry) } else { None }
+        let mut entry = self.entries[index];
+        if entry.hash == hash { 
+            if entry.score > MATE - 128 { entry.score -= ply as i32; } else if entry.score < -MATE + 128 { entry.score += ply as i32; }
+            Some(entry) 
+        } else { None }
     }
 }
 
@@ -334,7 +343,7 @@ impl ChessEngine {
         let mut best_score = -INF;
         
         let hash = board.get_hash();
-        let tt_best_move = self.tt.probe(hash).and_then(|entry| entry.best_move);
+        let tt_best_move = self.tt.probe(hash, 0).and_then(|entry| entry.best_move);
 
         let mut moves: Vec<ChessMove> = MoveGen::new_legal(board).collect();
         if moves.is_empty() { return (None, if board.status() == BoardStatus::Checkmate { -MATE } else { 0 }); }
@@ -396,7 +405,7 @@ impl ChessEngine {
 
         for m in moves {
             let next_board = board.make_move_new(m);
-            let score = -self.quiescence_search(&next_board, -beta, -alpha, ply + 1);
+            let score = -self.quiescence_search(&next_board, -beta, -alpha, ply.saturating_add(1));
             if self.stop_search { return 0; }
             if score >= beta { return beta; }
             if score > alpha { alpha = score; }
@@ -419,7 +428,7 @@ impl ChessEngine {
 
         let hash = board.get_hash();
         let mut tt_best_move = None;
-        if let Some(entry) = self.tt.probe(hash) {
+        if let Some(entry) = self.tt.probe(hash, ply) {
             tt_best_move = entry.best_move;
             if entry.depth >= depth {
                 if entry.flag == EXACT { return entry.score; }
@@ -428,11 +437,12 @@ impl ChessEngine {
             }
         }
         
-        let has_pieces = board.pieces(Piece::Knight).popcnt() + board.pieces(Piece::Bishop).popcnt() + board.pieces(Piece::Rook).popcnt() + board.pieces(Piece::Queen).popcnt() > 0;
+        let stm_pieces = board.color_combined(board.side_to_move()) & (board.pieces(Piece::Knight) | board.pieces(Piece::Bishop) | board.pieces(Piece::Rook) | board.pieces(Piece::Queen));
+        let has_pieces = stm_pieces.popcnt() > 0;
         if !is_check && depth >= 3 && has_pieces && (ply as usize) < 128 {
             if let Some(null_board) = board.null_move() {
                 let r = if depth > 6 { 3 } else { 2 };
-                let null_score = -self.negamax(&null_board, depth - 1 - r, -beta, -beta + 1, ply + 1);
+                let null_score = -self.negamax(&null_board, depth - 1 - r, -beta, -beta + 1, ply.saturating_add(1));
                 if self.stop_search { return 0; }
                 if null_score >= beta { return beta; }
             }
@@ -463,21 +473,21 @@ impl ChessEngine {
             }
 
             if b_search_pv {
-                score = -self.negamax(&next_board, depth - 1 + extension, -beta, -alpha, ply + 1);
+                score = -self.negamax(&next_board, depth - 1 + extension, -beta, -alpha, ply.saturating_add(1));
                 b_search_pv = false;
             } else {
                 if moves_evaluated >= 4 && depth >= 3 && !is_capture && next_board.status() != BoardStatus::Checkmate {
                     let r = if moves_evaluated > 6 && depth >= 4 { 2 } else { 1 };
-                    score = -self.negamax(&next_board, depth - 1 - r + extension, -alpha - 1, -alpha, ply + 1);
+                    score = -self.negamax(&next_board, depth - 1 - r + extension, -alpha - 1, -alpha, ply.saturating_add(1));
                     if score > alpha { 
-                        score = -self.negamax(&next_board, depth - 1 + extension, -alpha - 1, -alpha, ply + 1);
+                        score = -self.negamax(&next_board, depth - 1 + extension, -alpha - 1, -alpha, ply.saturating_add(1));
                     }
                 } else {
-                    score = -self.negamax(&next_board, depth - 1 + extension, -alpha - 1, -alpha, ply + 1);
+                    score = -self.negamax(&next_board, depth - 1 + extension, -alpha - 1, -alpha, ply.saturating_add(1));
                 }
                 
                 if score > alpha && score < beta {
-                    score = -self.negamax(&next_board, depth - 1 + extension, -beta, -alpha, ply + 1);
+                    score = -self.negamax(&next_board, depth - 1 + extension, -beta, -alpha, ply.saturating_add(1));
                 }
             }
 
@@ -505,7 +515,7 @@ impl ChessEngine {
 
         let flag = if best_score <= original_alpha { UPPERBOUND } else if best_score >= beta { LOWERBOUND } else { EXACT };
         if !self.stop_search {
-            self.tt.store(hash, best_move, depth, best_score, flag);
+            self.tt.store(hash, best_move, depth, best_score, flag, ply);
         }
         best_score
     }
@@ -605,5 +615,7 @@ fn evaluate(board: &Board) -> i32 {
 
     (mg_score * (24 - phase) + eg_score * phase) / 24
 }
+
+
 
 
