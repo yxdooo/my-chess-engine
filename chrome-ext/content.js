@@ -48,21 +48,48 @@ function parseBoard() {
       if (cls.match(/^square-[a-h1-8][1-8]$/)) squareClass = cls;
     });
 
-    if (pieceClass && squareClass) {
-      let file, rank;
-      if (isNaN(parseInt(squareClass[7]))) {
-          file = squareClass.charCodeAt(7) - 97;
-          rank = parseInt(squareClass[8]) - 1;
-      } else {
-          file = parseInt(squareClass[7]) - 1;
-          rank = parseInt(squareClass[8]) - 1;
-      }
-      let char = pieceClass[1];
-      if (pieceClass[0] === 'w') char = char.toUpperCase();
-      board[rank * 8 + file] = char;
+    if (pieceClass) {
+      let file = -1, rank = -1;
       
-      if (char === 'K') whiteKing = true;
-      if (char === 'k') blackKing = true;
+      if (squareClass) {
+          if (isNaN(parseInt(squareClass[7]))) {
+              file = squareClass.charCodeAt(7) - 97;
+              rank = parseInt(squareClass[8]) - 1;
+          } else {
+              file = parseInt(squareClass[7]) - 1;
+              rank = parseInt(squareClass[8]) - 1;
+          }
+      } else if (p.style && p.style.transform) {
+          // Fallback to transform: translate(x, y)
+          const match = p.style.transform.match(/translate\((.*?)[px%]+,\s*(.*?)[px%]+\)/);
+          if (match) {
+              const x = parseFloat(match[1]);
+              const y = parseFloat(match[2]);
+              // chess.com usually uses percentages or pixels
+              // if %, typically each square is 100%
+              // if px, it's relative to board width
+              let sqW = 100;
+              if (p.style.transform.includes('px')) {
+                  sqW = boardEl.clientWidth / 8;
+              }
+              
+              file = Math.round(x / sqW);
+              rank = 7 - Math.round(y / sqW);
+              if (flipBoard) {
+                  file = 7 - file;
+                  rank = 7 - rank;
+              }
+          }
+      }
+
+      if (file >= 0 && file <= 7 && rank >= 0 && rank <= 7) {
+          let char = pieceClass[1];
+          if (pieceClass[0] === 'w') char = char.toUpperCase();
+          board[rank * 8 + file] = char;
+          
+          if (char === 'K') whiteKing = true;
+          if (char === 'k') blackKing = true;
+      }
     }
   });
 
