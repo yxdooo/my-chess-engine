@@ -2,26 +2,27 @@
 
 A highly optimized, multi-threaded WebAssembly (Rust) chess engine disguised as a Chrome Extension. Built specifically for providing real-time best move visual arrows directly on live chess boards like Chess.com.
 
-## ?? Features
-- **Blazing Fast Wasm Core:** The engine is written in Rust and compiled to WebAssembly. It easily reaches depths of 20+ within seconds.
+## 🚀 Features
+- **Blazing Fast Wasm Core (SIMD & NNUE):** The engine is written in Rust, compiled to WebAssembly with SIMD (+simd128) support, and powered by an NNUE/PeSTO hybrid evaluation function.
 - **SMP (Symmetric Multi-Processing):** Uses Chrome's `Offscreen Documents` and `Web Workers` to spawn up to 16 threads, bypassing typical extension sandbox limitations.
-- **Pondering & Instant Abort:** Computes the opponent's best moves while they think (`ponderCache`) and can instantly abort and switch branches if the opponent plays an unexpected move.
-- **Transposition Tables (TT):** Uses 1,000,000 TT entries for zero-latency move lookups.
-- **Cloud Databases:** Uses Lichess Explorer (up to 1600 ELO) and Tablebases (up to 2000 ELO) for instant openings and endgames before switching to the brute-force Rust engine for midgame.
-- **Board Overlay:** Seamlessly draws non-intrusive green arrows directly onto the DOM indicating the optimal move.
+- **Network Level FEN Interception:** By injecting an interceptor into the page, the extension grabs live WebSockets PGN/FEN strings directly from the network (bypassing brittle DOM scraping), guaranteeing 100% accuracy for En Passant and Move counters.
+- **Dynamic Time Management:** Intelligently allocates calculation time, responding instantly on forced moves, and extending search times during complex tactical sequences (fail-low responses).
+- **Pondering & Instant Abort:** Computes the opponent's best moves while they think (`ponderCache`) and can instantly abort and switch branches.
+- **Cloud Databases:** Uses Lichess Explorer and Tablebases with API-compliant User-Agent headers for instant openings and endgames.
 
-## ?? Repository Structure
-- `/chrome-ext/`: The actual Chrome Extension source code. Load this folder into Chrome (`chrome://extensions` -> Load Unpacked).
-- `/engine-wasm/`: The Rust source code that powers the engine. Includes a custom Alpha-Beta pruning algorithm with Null Move Pruning, Late Move Reductions, and Singular Extensions.
+## 📂 Repository Structure
+- `/chrome-ext/`: The Chrome Extension source code. Includes `inject.js` for WebSocket payload interception.
+- `/engine-wasm/`: The Rust source code that powers the engine. Includes support for compiling with a `net.nnue` binary weight file via `include_bytes!`.
 - `/web/`: An archive of the legacy standalone web interface.
 
-## ?? Building the Wasm Module
+## 🛠️ Building the Wasm Module
 If you wish to modify the Rust engine, you must recompile the Wasm module:
 1. Ensure you have `Rust`, `Cargo`, and `wasm-pack` installed.
-2. Navigate to `engine-wasm`: `cd engine-wasm`
-3. Build the module into the extension directory: `wasm-pack build --target web --out-dir ../chrome-ext/pkg`
+2. *(Optional for NNUE)*: Replace the dummy `engine-wasm/src/net.nnue` file with a real HalfKP NNUE net file.
+3. Navigate to `engine-wasm`: `cd engine-wasm`
+4. Build the module with SIMD optimizations: `wasm-pack build --target web --out-dir ../chrome-ext/pkg`
 
-## ??? Installation
+## 📦 Installation
 1. Go to `chrome://extensions/`
 2. Enable **Developer mode** in the top right corner.
 3. Click **Load unpacked**.
