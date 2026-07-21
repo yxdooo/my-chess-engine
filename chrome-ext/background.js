@@ -38,6 +38,8 @@ async function setupOffscreenDocument(path) {
         });
         await creatingOffscreen;
         creatingOffscreen = null;
+        // Döküman oluştuktan sonra scriptlerin yüklenip listener'ları kaydetmesi için 150ms bekle
+        await new Promise(r => setTimeout(r, 150));
     }
 }
 
