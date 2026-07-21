@@ -45,7 +45,7 @@ function parseBoard() {
     let squareClass = '';
     p.classList.forEach(cls => {
       if (cls.match(/^[wb][prnbqk]$/)) pieceClass = cls;
-      if (cls.match(/^square-\d\d$/)) squareClass = cls;
+      if (cls.match(/^square-[a-h1-8][1-8]$/)) squareClass = cls;
     });
 
     if (pieceClass && squareClass) {
