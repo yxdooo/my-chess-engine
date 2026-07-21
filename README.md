@@ -58,7 +58,7 @@ The script will strip `console.log` statements and heavily obfuscate the JavaScr
 2. Enable **Developer mode** in the top right corner.
 3. Click **Load unpacked**.
 4. Select the `dist/` folder generated in the previous step.
-5. Pin the extension to your toolbar, navigate to a chessboard, set your desired strength, and click **Ignite Engine**.
+5. Pin the extension to your toolbar, navigate to a chessboard, set your desired strength, and click **Start Engine**.
 
 ## ⚖️ License
 MIT License
