@@ -49,8 +49,14 @@ function parseBoard() {
     });
 
     if (pieceClass && squareClass) {
-      const file = parseInt(squareClass[7]) - 1;
-      const rank = parseInt(squareClass[8]) - 1;
+      let file, rank;
+      if (isNaN(parseInt(squareClass[7]))) {
+          file = squareClass.charCodeAt(7) - 97;
+          rank = parseInt(squareClass[8]) - 1;
+      } else {
+          file = parseInt(squareClass[7]) - 1;
+          rank = parseInt(squareClass[8]) - 1;
+      }
       let char = pieceClass[1];
       if (pieceClass[0] === 'w') char = char.toUpperCase();
       board[rank * 8 + file] = char;

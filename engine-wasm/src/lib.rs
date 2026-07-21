@@ -131,6 +131,10 @@ impl ChessEngine {
             }
             break;
         }
+        
+        if pv.is_empty() && best_move.is_some() {
+            pv.push(format!("\"{}\"", best_move.unwrap().to_string()));
+        }
 
         let best_move_str = match best_move {
             Some(m) => m.to_string(),
@@ -352,6 +356,7 @@ impl ChessEngine {
     fn search_root(&mut self, board: &Board, depth: u8, mut alpha: i32, beta: i32, split_id: u32, split_count: u32) -> (Option<ChessMove>, i32) {
         let mut best_move = None;
         let mut best_score = -INF;
+        let original_alpha = alpha;
         
         let hash = board.get_hash();
         let tt_best_move = self.tt.probe(hash, 0).and_then(|entry| entry.best_move);
@@ -394,6 +399,10 @@ impl ChessEngine {
                 best_move = Some(m);
             }
             if score > alpha { alpha = score; }
+        }
+        if !self.stop_search {
+            let flag = if best_score <= original_alpha { UPPERBOUND } else if best_score >= beta { LOWERBOUND } else { EXACT };
+            self.tt.store(hash, best_move, depth, best_score, flag, 0);
         }
         (best_move, best_score)
     }
