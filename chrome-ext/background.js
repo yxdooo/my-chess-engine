@@ -43,7 +43,7 @@ async function setupOffscreenDocument(path) {
 
 async function hasDocument() {
     const matchedClients = await clients.matchAll();
-    return matchedClients.some(c => c.url.includes(chrome.runtime.id));
+    return matchedClients.some(c => c.url.includes('offscreen.html'));
 }
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
