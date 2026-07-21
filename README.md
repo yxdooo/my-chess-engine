@@ -52,13 +52,14 @@ node build_prod.js
 ```
 The script will strip `console.log` statements and heavily obfuscate the JavaScript source code using `javascript-obfuscator`.
 
-## 🎮 Installation
+## 🎮 Installation for End Users
 
-1. Open Google Chrome and navigate to `chrome://extensions/`
-2. Enable **Developer mode** in the top right corner.
-3. Click **Load unpacked**.
-4. Select the `dist/` folder generated in the previous step.
-5. Pin the extension to your toolbar, navigate to a chessboard, set your desired strength, and click **Start Engine**.
+1. Go to the main page of this repository and click on **`Aether-Engine.zip`**, then click the **Download** button (or click the raw download button).
+2. Extract the downloaded `Aether-Engine.zip` file into a folder on your computer.
+3. Open Google Chrome and navigate to `chrome://extensions/`
+4. Enable **Developer mode** in the top right corner.
+5. Click **Load unpacked** and select the extracted folder.
+6. Pin the extension to your toolbar, navigate to a chessboard, set your desired strength, and click **Start Engine**.
 
 ## ⚖️ License
 MIT License
