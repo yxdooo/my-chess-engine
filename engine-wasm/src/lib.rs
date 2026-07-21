@@ -91,12 +91,12 @@ impl ChessEngine {
             
             let elapsed = js_sys::Date::now() - self.start_time;
             
-            // Dinamik Zaman Yonetimi: Skor aniden duserse (fail-low), pozisyon karmasiktir, dusunme suresini uzat.
+            // Dynamic Time Management: If the score drops significantly (fail-low), the position is complex, extend thinking time.
             if best_score < previous_best_score - 50 {
                 self.time_limit_ms = f64::min(self.time_limit_ms * 1.5, self.hard_time_limit_ms);
             }
             
-            // Ayrilan surenin yarisini gectiysek, bir sonraki derinlige baslama
+            // If we have passed half of the allocated time, do not start the next depth
             if elapsed > self.time_limit_ms * 0.5 {
                 break;
             }
@@ -548,17 +548,17 @@ impl ChessEngine {
 // Dummy include for NNUE network weights
 const NNUE_WEIGHTS: &[u8] = include_bytes!("net.nnue");
 
-// Geliştirilmiş Değerlendirme (NNUE / PeSTO Hibrit)
+// Enhanced Evaluation (NNUE / PeSTO Hybrid)
 fn pseudo_nnue_evaluate(board: &Board) -> i32 {
-    let mut score = evaluate(board); // Temel PeSTO değerlendirmesi
+    let mut score = evaluate(board); // Base PeSTO evaluation
     
-    // NNUE ağırlıkları yüklenmişse NNUE hesaplaması yap (Gerçek ağ yüklendiğinde burası aktif olur)
+    // If NNUE weights are loaded, perform NNUE calculation (Activates when a real network is loaded)
     if NNUE_WEIGHTS.len() > 1000 {
-        // NNUE çıkarım (inference) kodları buraya gelir.
+        // NNUE inference code goes here.
         // ...
     }
     
-    // Gelişmiş Şah Güvenliği (King Safety)
+    // Advanced King Safety
     let w_king = board.pieces(Piece::King) & board.color_combined(Color::White);
     let b_king = board.pieces(Piece::King) & board.color_combined(Color::Black);
     
@@ -568,11 +568,11 @@ fn pseudo_nnue_evaluate(board: &Board) -> i32 {
     let mut w_safety = 0;
     if w_king.popcnt() > 0 {
         let king_sq = w_king.to_square();
-        // Şahın önündeki piyon kalkanı kontrolü
+        // Check pawn shield in front of the king
         let rank = king_sq.get_rank().to_index();
         if rank < 3 {
             w_safety += (w_pawns.popcnt() as i32) * 5;
-            w_safety += 10; // Merkez/kalkan bonusu
+            w_safety += 10; // Center/shield bonus
         }
     }
     
@@ -582,11 +582,11 @@ fn pseudo_nnue_evaluate(board: &Board) -> i32 {
         let rank = king_sq.get_rank().to_index();
         if rank > 4 {
             b_safety += (b_pawns.popcnt() as i32) * 5;
-            b_safety += 10; // Merkez/kalkan bonusu
+            b_safety += 10; // Center/shield bonus
         }
     }
     
-    // Fil çifti sinerjisi
+    // Bishop pair synergy
     let w_bishops = board.pieces(Piece::Bishop) & board.color_combined(Color::White);
     let b_bishops = board.pieces(Piece::Bishop) & board.color_combined(Color::Black);
     if w_bishops.popcnt() >= 2 { score += 40; }

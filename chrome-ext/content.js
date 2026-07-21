@@ -254,18 +254,18 @@ setTimeout(processPosition, 1000);
 
 chrome.runtime.onMessage.addListener((msg) => { if (msg.type === 'FORCE_EVALUATE') { currentFEN = ''; processPosition(); } });
 
-// Ağdan (WebSocket) gelen FEN verilerini dinle
+// Listen for FEN data coming from the intercepted WebSocket
 window.addEventListener('message', function(event) {
     if (event.source !== window || !event.data || event.data.type !== 'CHESS_WS_MESSAGE') return;
     try {
         const payload = event.data.payload;
-        // Tam geçerli bir FEN regex'i (En Passant ve Hamle sayaçları dahil)
+        // Fully compliant FEN regex (including En Passant and move counters)
         const fenRegex = /([rnbqkbnrRNBQKBNR1-8]+\/){7}[rnbqkbnrRNBQKBNR1-8]+ [wb] (K?Q?k?q?|-) ([a-h][36]|-) \d+ \d+/;
         const match = payload.match(fenRegex);
         if (match && match[0]) {
             processPosition(match[0]);
         }
     } catch (e) {
-        console.error("[Content] Hata:", e);
+        console.error("[Content] Error:", e);
     }
 });

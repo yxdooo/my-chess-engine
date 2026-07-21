@@ -38,7 +38,7 @@ async function setupOffscreenDocument(path) {
         });
         await creatingOffscreen;
         creatingOffscreen = null;
-        // Döküman oluştuktan sonra scriptlerin yüklenip listener'ları kaydetmesi için 150ms bekle
+        // Wait 150ms for the document to spawn and scripts to register listeners
         await new Promise(r => setTimeout(r, 150));
     }
 }
