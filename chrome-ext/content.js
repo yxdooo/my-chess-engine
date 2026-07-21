@@ -191,8 +191,8 @@ function drawArrow(fromIdx, toIdx, color) {
   ctx.fill();
 }
 
-function processPosition() {
-    const fen = parseBoard();
+function processPosition(networkFen = null) {
+    const fen = networkFen || parseBoard();
     if (fen && fen !== currentFEN) {
       console.log("[Content] New FEN detected:", fen);
       currentFEN = fen;
@@ -254,4 +254,18 @@ setTimeout(processPosition, 1000);
 
 chrome.runtime.onMessage.addListener((msg) => { if (msg.type === 'FORCE_EVALUATE') { currentFEN = ''; processPosition(); } });
 
-
+// Ağdan (WebSocket) gelen FEN verilerini dinle
+window.addEventListener('message', function(event) {
+    if (event.source !== window || !event.data || event.data.type !== 'CHESS_WS_MESSAGE') return;
+    try {
+        const payload = event.data.payload;
+        // Tam geçerli bir FEN regex'i (En Passant ve Hamle sayaçları dahil)
+        const fenRegex = /([rnbqkbnrRNBQKBNR1-8]+\/){7}[rnbqkbnrRNBQKBNR1-8]+ [wb] (K?Q?k?q?|-) ([a-h][36]|-) \d+ \d+/;
+        const match = payload.match(fenRegex);
+        if (match && match[0]) {
+            processPosition(match[0]);
+        }
+    } catch (e) {
+        console.error("[Content] Hata:", e);
+    }
+});

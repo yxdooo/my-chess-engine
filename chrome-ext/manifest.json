@@ -23,7 +23,8 @@
     "content_scripts":  [
                             {
                                 "matches":  [
-                                                "*://*.chess.com/*"
+                                                "*://*.chess.com/*",
+                                                "*://*.lichess.org/*"
                                             ],
                                 "js":  [
                                            "content.js"
@@ -31,6 +32,16 @@
                                 "css":  [
                                             "content.css"
                                         ]
+                            },
+                            {
+                                "matches":  [
+                                                "*://*.chess.com/*",
+                                                "*://*.lichess.org/*"
+                                            ],
+                                "js":  [
+                                           "inject.js"
+                                       ],
+                                "world": "MAIN"
                             }
                         ],
     "action":  {

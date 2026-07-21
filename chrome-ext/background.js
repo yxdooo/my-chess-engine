@@ -98,13 +98,17 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             else engineTime = 2500; 
         }
         
-        fetch("https://explorer.lichess.ovh/masters?fen=" + encodeURIComponent(message.fen))
+        fetch("https://explorer.lichess.ovh/masters?fen=" + encodeURIComponent(message.fen), {
+            headers: { "User-Agent": "ChessEngineV2-Ext (contact: dev@example.com)" }
+        })
           .then(r => r.json())
           .then(data => {
             if (data.moves && data.moves.length > 0 && currentElo >= 1600 && message.isMyTurn) {
               sendResponse({ bestMove: data.moves[0].uci, pv: [data.moves[0].uci] });
             } else {
-                fetch("https://tablebase.lichess.ovh/standard?fen=" + encodeURIComponent(message.fen))
+                fetch("https://tablebase.lichess.ovh/standard?fen=" + encodeURIComponent(message.fen), {
+                    headers: { "User-Agent": "ChessEngineV2-Ext (contact: dev@example.com)" }
+                })
                 .then(r => r.json())
                 .then(tb => {
                   if (tb.moves && tb.moves.length > 0 && currentElo >= 2000 && message.isMyTurn) {
