@@ -1,30 +1,64 @@
-# Chess Engine V2 - Chrome Extension
+# Aether Chess Engine
 
-A highly optimized, multi-threaded WebAssembly (Rust) chess engine disguised as a Chrome Extension. Built specifically for providing real-time best move visual arrows directly on live chess boards like Chess.com.
+**Aether** is a highly optimized, multi-threaded WebAssembly (Rust) chess engine disguised as a Chrome Extension. Built specifically for providing real-time best move visual arrows directly on live chess boards like Chess.com.
+
+> [!WARNING]
+> This engine is for educational and research purposes only. Using chess engines in live online games against other humans without their consent violates the Terms of Service of platforms like Chess.com and Lichess.
 
 ## 🚀 Features
-- **Blazing Fast Wasm Core (SIMD & NNUE):** The engine is written in Rust, compiled to WebAssembly with SIMD (+simd128) support, and powered by an NNUE/PeSTO hybrid evaluation function.
-- **SMP (Symmetric Multi-Processing):** Uses Chrome's `Offscreen Documents` and `Web Workers` to spawn up to 16 threads, bypassing typical extension sandbox limitations.
-- **Network Level FEN Interception:** By injecting an interceptor into the page, the extension grabs live WebSockets PGN/FEN strings directly from the network (bypassing brittle DOM scraping), guaranteeing 100% accuracy for En Passant and Move counters.
-- **Dynamic Time Management:** Intelligently allocates calculation time, responding instantly on forced moves, and extending search times during complex tactical sequences (fail-low responses).
-- **Pondering & Instant Abort:** Computes the opponent's best moves while they think (`ponderCache`) and can instantly abort and switch branches.
-- **Cloud Databases:** Uses Lichess Explorer and Tablebases with API-compliant User-Agent headers for instant openings and endgames.
 
-## 📂 Repository Structure
-- `/chrome-ext/`: The Chrome Extension source code. Includes `inject.js` for WebSocket payload interception.
-- `/engine-wasm/`: The Rust source code that powers the engine. Includes support for compiling with a `net.nnue` binary weight file via `include_bytes!`.
-- `/web/`: An archive of the legacy standalone web interface.
+- **Blazing Fast WASM Core**: The entire chess engine is written in Rust and compiled to WebAssembly, ensuring near-native performance directly in your browser.
+- **Lazy SMP (Symmetric Multiprocessing)**: Utilizes a dedicated Web Worker pool coordinated by Chrome's Offscreen API to distribute the search tree across multiple CPU cores.
+- **PeSTO's Evaluation / Pseudo-NNUE**: Features an advanced handcrafted evaluation function combining piece-square tables, pawn structure analysis (isolated, doubled, passed pawns), and king safety.
+- **Quiescence Search & TT**: Advanced search heuristics including Razoring, Check Extensions, and a dedicated Transposition Table (Hash) for resolving tactical skirmishes.
+- **Cloud Tablebase & Explorer Integration**: Falls back seamlessly to Lichess Masters Explorer and 7-man Syzygy Tablebases for instant perfect play in the opening and endgame.
+- **Glassmorphic UI**: Beautiful, premium dark-themed popup interface with granular controls over ELO strength, Core count, and Hash size.
+- **Production Ready**: Fully obfuscated build pipeline for maximum IP protection and minimal extension size.
 
-## 🛠️ Building the Wasm Module
-If you wish to modify the Rust engine, you must recompile the Wasm module:
-1. Ensure you have `Rust`, `Cargo`, and `wasm-pack` installed.
-2. *(Optional for NNUE)*: Replace the dummy `engine-wasm/src/net.nnue` file with a real HalfKP NNUE net file.
-3. Navigate to `engine-wasm`: `cd engine-wasm`
-4. Build the module with SIMD optimizations: `wasm-pack build --target web --out-dir ../chrome-ext/pkg`
+## 🛠️ Architecture
 
-## 📦 Installation
-1. Go to `chrome://extensions/`
+1. **`popup.js/html`**: The user interface for configuring engine settings.
+2. **`background.js` (Service Worker)**: The orchestrator. It manages the connection between the active chess tab and the hidden offscreen document, passing FEN strings and fetching cloud data.
+3. **`offscreen.html / offscreen.js`**: A hidden DOM environment necessary for spawning multiple Web Workers (since Chrome MV3 Service Workers cannot spawn dedicated workers).
+4. **`worker.js`**: The worker thread that imports the WASM binary and executes the `search` function.
+5. **`engine-wasm/`**: The core Rust crate containing the custom chess engine.
+
+## 📦 Build Instructions
+
+### Prerequisites
+- [Rust](https://rustup.rs/) (latest stable)
+- [wasm-pack](https://rustwasm.github.io/wasm-pack/installer/)
+- Node.js & NPM
+
+### 1. Compile the WASM Engine
+Navigate to the `engine-wasm` directory and build the WebAssembly target:
+```bash
+cd engine-wasm
+wasm-pack build --target web --release
+```
+
+### 2. Prepare the Extension
+Copy the generated WASM files to the extension source folder:
+```bash
+cp pkg/engine_wasm.js ../chrome-ext/
+cp pkg/engine_wasm_bg.wasm ../chrome-ext/
+```
+
+### 3. Production Build (Obfuscation)
+Run the Node build script from the root directory to generate the production-ready `dist/` folder:
+```bash
+npm install
+node build_prod.js
+```
+The script will strip `console.log` statements and heavily obfuscate the JavaScript source code using `javascript-obfuscator`.
+
+## 🎮 Installation
+
+1. Open Google Chrome and navigate to `chrome://extensions/`
 2. Enable **Developer mode** in the top right corner.
 3. Click **Load unpacked**.
-4. Select the `chrome-ext` folder from this repository.
-5. Open any match on Chess.com, click the extension icon, set your desired ELO, and click **Ignite Engine**.
+4. Select the `dist/` folder generated in the previous step.
+5. Pin the extension to your toolbar, navigate to a chessboard, set your desired strength, and click **Ignite Engine**.
+
+## ⚖️ License
+MIT License

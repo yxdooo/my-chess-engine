@@ -79,6 +79,7 @@ dependencies = [
  "chess",
  "console_error_panic_hook",
  "js-sys",
+ "nnue-rs",
  "wasm-bindgen",
 ]
 
@@ -165,6 +166,12 @@ checksum = "1fa76a2c86f704bdb222d66965fb3d63269ce38518b83cb0575fca855ebb6316"
 dependencies = [
  "adler2",
 ]
+
+[[package]]
+name = "nnue-rs"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f484047679d5f4ad45412bffb6e4e9ee8d8943fdaae65107ad9b9fa6ba32d916"
 
 [[package]]
 name = "nodrop"

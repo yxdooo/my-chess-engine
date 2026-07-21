@@ -1,6 +1,12 @@
 use wasm_bindgen::prelude::*;
 use chess::{Board, ChessMove, Color, Piece, Square, MoveGen, BoardStatus, BitBoard, Rank, File};
 use std::str::FromStr;
+use std::sync::LazyLock;
+
+static NNUE: LazyLock<Option<nnue_rs::Network>> = LazyLock::new(|| {
+    let bytes = include_bytes!("../nn-82215d0fd0df.nnue");
+    nnue_rs::Network::from_bytes(bytes).ok()
+});
 
 #[wasm_bindgen]
 pub struct ChessEngine {
@@ -12,88 +18,135 @@ pub struct ChessEngine {
     hard_time_limit_ms: f64,
     start_time: f64,
     nodes: u32,
+    nodes_evaluated: u32,
     elo: u32,
+    history_hashes: Vec<u64>,
 }
 
 #[wasm_bindgen]
 impl ChessEngine {
     #[wasm_bindgen(constructor)]
-    pub fn new() -> ChessEngine {
+    pub fn new() -> Self {
         console_error_panic_hook::set_once();
-        ChessEngine {
-            tt: TranspositionTable::new(1_000_000),
+        Self {
+            tt: TranspositionTable::new(1000000), 
             killers: [[None; 2]; 128],
             history: [[0; 64]; 64],
+            nodes_evaluated: 0,
             stop_search: false,
-            time_limit_ms: 0.0,
-            hard_time_limit_ms: 0.0,
+            time_limit_ms: 1000.0,
+            hard_time_limit_ms: 5000.0,
             start_time: 0.0,
             nodes: 0,
             elo: 3000,
+            history_hashes: Vec::new(),
         }
     }
 
+    pub fn set_hash_size(&mut self, mb: usize) {
+        // 1 entry is 24 bytes (approx 32 with overhead). 
+        // mb * 1024 * 1024 / 24 = approx entries. We use next power of two.
+        let entries = (mb * 1024 * 1024) / std::mem::size_of::<TTEntry>();
+        self.tt = TranspositionTable::new(entries);
+    }
+
     #[wasm_bindgen]
-    pub fn get_best_move(&mut self, fen: &str, time_ms: u32, elo: u32, split_id: u32, split_count: u32) -> String {
-        let board = match Board::from_str(fen) {
-            Ok(b) => b,
-            Err(_) => return String::from("{\"bestMove\":\"\",\"score\":0,\"pv\":[]}"),
-        };
+    pub fn get_best_move(&mut self, fen: String, time_limit_ms: f64, elo: f64, split_id: u8, split_count: u8, history: String) -> String {
+        self.nodes_evaluated = 0;
+        self.stop_search = false;
+        self.time_limit_ms = time_limit_ms;
+        self.hard_time_limit_ms = time_limit_ms * 3.0;
+        self.elo = elo as u32;
+        
+        let mut board = Board::from_str(&fen).unwrap_or(Board::default());
+        
+        // Parse history FENs into hashes for 3-fold repetition check
+        self.history_hashes.clear();
+        for h_fen in history.split('|') {
+            if h_fen.is_empty() { continue; }
+            // Reconstruct a board to get its hash
+            // (Assuming normalized FEN format: "piece_placement side_to_move castling en_passant")
+            // We append " 0 1" to make it valid for from_str if it's truncated
+            let full_fen = format!("{} 0 1", h_fen);
+            if let Ok(b) = Board::from_str(&full_fen) {
+                self.history_hashes.push(b.get_hash());
+            }
+        }
 
         let moves: Vec<ChessMove> = MoveGen::new_legal(&board).collect();
         if moves.len() == 1 {
-            let m = moves[0];
-            let ponder_fen = board.make_move_new(m).to_string();
-            return format!("{{\"bestMove\":\"{}\",\"score\":0,\"pv\":[\"{}\"],\"ponderFen\":\"{}\"}}", m.to_string(), m.to_string(), ponder_fen);
+            return format!("{{\"bestMove\":\"{}\",\"score\":0,\"pv\":[\"{}\"]}}", moves[0].to_string(), moves[0].to_string());
         }
 
         self.start_time = js_sys::Date::now();
-        self.time_limit_ms = time_ms as f64;
-        self.hard_time_limit_ms = self.time_limit_ms * 3.0; 
-        self.elo = elo;
-        self.stop_search = false;
-        self.killers = [[None; 2]; 128];
-        self.history = [[0; 64]; 64];
-        self.nodes = 0;
-
-        let mut best_move = None;
+        
+        let mut best_move: Option<ChessMove> = None;
         let mut best_score = -INF;
         let mut previous_best_score = -INF;
+        let mut second_best_score = -INF;
+        
         let mut alpha = -INF;
         let mut beta = INF;
         
-        let max_depth = if elo < 500 { 1 } 
-                        else if elo < 1000 { 2 } 
-                        else if elo < 1500 { 3 } 
-                        else if elo < 2000 { 5 } 
+        let max_depth = if self.elo < 500 { 1 } 
+                        else if self.elo < 1000 { 2 } 
+                        else if self.elo < 1500 { 3 } 
+                        else if self.elo < 2000 { 5 } 
                         else { 64 };
 
-        for depth in 1..=max_depth {
+        let is_check = board.checkers().popcnt() > 0;
+        if is_check {
+            self.time_limit_ms = f64::min(self.time_limit_ms * 2.0, self.hard_time_limit_ms);
+        }
+
+        for depth in 1..=64 {
+            if depth > max_depth { break; }
+            let current_best = self.search_root(&board, depth, alpha, beta, split_id as u32, split_count as u32);
+            
             if self.stop_search { break; }
             
-            let mut current_best = self.search_root(&board, depth, alpha, beta, split_id, split_count);
-            
-            if !self.stop_search && (current_best.1 <= alpha || current_best.1 >= beta) {
+            if current_best.1 <= alpha || current_best.1 >= beta {
                 alpha = -INF;
                 beta = INF;
-                current_best = self.search_root(&board, depth, alpha, beta, split_id, split_count);
-            }
-            
-            if !self.stop_search {
-                if let Some(m) = current_best.0 {
-                    best_move = Some(m);
-                    previous_best_score = best_score;
-                    best_score = current_best.1;
-                    alpha = best_score - 50;
-                    beta = best_score + 50;
+                let re_search = self.search_root(&board, depth, alpha, beta, split_id as u32, split_count as u32);
+                if !self.stop_search {
+                    best_move = re_search.0;
+                    best_score = re_search.1;
+                    second_best_score = re_search.2;
                 }
+            } else {
+                best_move = current_best.0;
+                best_score = current_best.1;
+                second_best_score = current_best.2;
+                alpha = best_score - 50;
+                beta = best_score + 50;
             }
             
             let elapsed = js_sys::Date::now() - self.start_time;
             
-            // Dynamic Time Management: If the score drops significantly (fail-low), the position is complex, extend thinking time.
+            // Panic Time: If the score drops significantly (fail-low), the position is complex, extend thinking time drastically.
             if best_score < previous_best_score - 50 {
-                self.time_limit_ms = f64::min(self.time_limit_ms * 1.5, self.hard_time_limit_ms);
+                self.time_limit_ms = f64::min(self.time_limit_ms * 2.0, self.hard_time_limit_ms);
+            }
+            
+            // 1. Instant Mate Found: If we found a forced mate, stop immediately!
+            if best_score > 20000 {
+                self.stop_search = true;
+                break;
+            }
+            
+            // Node Time Management (Soft Bound)
+            // If the position is clearly winning (>1000cp, ~5 pawns), we don't need to be as picky.
+            let early_exit_threshold = if best_score > 1000 { 100 } else { 300 };
+            let early_exit_depth = if best_score > 1000 { 5 } else { 7 };
+            
+            // If we've searched deep enough, and the best move is decisively better than the second best,
+            // and we've consumed 40% of the maximum allowed time, cut the search early to save time for future moves!
+            if depth >= early_exit_depth && best_score.saturating_sub(second_best_score) > early_exit_threshold {
+                if elapsed > self.hard_time_limit_ms * 0.4 {
+                    self.stop_search = true;
+                    break;
+                }
             }
             
             // If we have passed half of the allocated time, do not start the next depth
@@ -102,8 +155,8 @@ impl ChessEngine {
             }
         }
         
-        if elo < 2500 {
-            let blunder_chance = (2500 - elo) / 50;
+        if elo < 2500.0 {
+            let blunder_chance = ((2500.0 - elo) / 50.0) as u32;
             let random = (js_sys::Math::random() * 100.0) as u32;
             
             if random < blunder_chance {
@@ -353,16 +406,17 @@ impl ChessEngine {
         moves.sort_by_key(|m| -self.score_move(board, m, ply, tt_best_move));
     }
 
-    fn search_root(&mut self, board: &Board, depth: u8, mut alpha: i32, beta: i32, split_id: u32, split_count: u32) -> (Option<ChessMove>, i32) {
+    fn search_root(&mut self, board: &Board, depth: u8, mut alpha: i32, beta: i32, split_id: u32, split_count: u32) -> (Option<ChessMove>, i32, i32) {
         let mut best_move = None;
         let mut best_score = -INF;
+        let mut second_best_score = -INF;
         let original_alpha = alpha;
         
         let hash = board.get_hash();
         let tt_best_move = self.tt.probe(hash, 0).and_then(|entry| entry.best_move);
 
         let mut moves: Vec<ChessMove> = MoveGen::new_legal(board).collect();
-        if moves.is_empty() { return (None, if board.status() == BoardStatus::Checkmate { -MATE } else { 0 }); }
+        if moves.is_empty() { return (None, if board.status() == BoardStatus::Checkmate { -MATE } else { 0 }, -INF); }
         
         self.sort_moves(board, &mut moves, 0, tt_best_move);
         
@@ -374,7 +428,7 @@ impl ChessEngine {
         } else {
             split_moves = moves;
         }
-        if split_moves.is_empty() { return (None, -INF); }
+        if split_moves.is_empty() { return (None, -INF, -INF); }
 
         let mut b_search_pv = true;
 
@@ -395,8 +449,11 @@ impl ChessEngine {
             if self.stop_search { break; }
 
             if score > best_score {
+                second_best_score = best_score;
                 best_score = score;
                 best_move = Some(m);
+            } else if score > second_best_score {
+                second_best_score = score;
             }
             if score > alpha { alpha = score; }
         }
@@ -404,7 +461,7 @@ impl ChessEngine {
             let flag = if best_score <= original_alpha { UPPERBOUND } else if best_score >= beta { LOWERBOUND } else { EXACT };
             self.tt.store(hash, best_move, depth, best_score, flag, 0);
         }
-        (best_move, best_score)
+        (best_move, best_score, second_best_score)
     }
 
     fn quiescence_search(&mut self, board: &Board, mut alpha: i32, beta: i32, ply: u8) -> i32 {
@@ -412,11 +469,22 @@ impl ChessEngine {
         if (self.nodes & 2047) == 0 { self.check_time(); }
         if self.stop_search { return 0; }
 
+        let hash = board.get_hash();
+        if let Some(entry) = self.tt.probe(hash, ply) {
+            if entry.flag == EXACT { return entry.score; }
+            if entry.flag == LOWERBOUND && entry.score >= beta { return entry.score; }
+            if entry.flag == UPPERBOUND && entry.score <= alpha { return entry.score; }
+        }
+
         let in_check = board.checkers().popcnt() > 0;
         let stand_pat = pseudo_nnue_evaluate(board);
+        let original_alpha = alpha;
         
         if !in_check {
-            if stand_pat >= beta { return beta; }
+            if stand_pat >= beta { 
+                self.tt.store(hash, None, 0, stand_pat, LOWERBOUND, ply);
+                return beta; 
+            }
             if stand_pat + 1225 < alpha { return alpha; }
             if alpha < stand_pat { alpha = stand_pat; }
         }
@@ -425,7 +493,11 @@ impl ChessEngine {
             MoveGen::new_legal(board).collect()
         } else {
             MoveGen::new_legal(board)
-                .filter(|m| board.piece_on(m.get_dest()).is_some() || m.get_promotion().is_some())
+                .filter(|m| {
+                    board.piece_on(m.get_dest()).is_some() 
+                    || m.get_promotion().is_some() 
+                    || board.make_move_new(*m).checkers().popcnt() > 0
+                })
                 .collect()
         };
             
@@ -435,14 +507,50 @@ impl ChessEngine {
             return -MATE + ply as i32;
         }
 
+        let mut best_score = if in_check { -INF } else { stand_pat };
+        let mut best_move = None;
+
         for m in moves {
+            // SEE-lite / Delta Pruning
+            if !in_check {
+                let dest_piece = board.piece_on(m.get_dest());
+                let is_promotion = m.get_promotion().is_some();
+                
+                if let Some(p) = dest_piece {
+                    if !is_promotion {
+                        let captured_val = piece_value_mg(p);
+                        if stand_pat + captured_val + 200 < alpha {
+                            continue;
+                        }
+                        if let Some(attacker) = board.piece_on(m.get_source()) {
+                            let attacker_val = piece_value_mg(attacker);
+                            if attacker_val > captured_val + 400 {
+                                if stand_pat + captured_val <= alpha {
+                                    continue;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
             let next_board = board.make_move_new(m);
             let score = -self.quiescence_search(&next_board, -beta, -alpha, ply.saturating_add(1));
             if self.stop_search { return 0; }
-            if score >= beta { return beta; }
+            
+            if score > best_score {
+                best_score = score;
+                best_move = Some(m);
+            }
             if score > alpha { alpha = score; }
+            if score >= beta { break; }
         }
-        alpha
+        
+        if !self.stop_search {
+            let flag = if best_score <= original_alpha { UPPERBOUND } else if best_score >= beta { LOWERBOUND } else { EXACT };
+            self.tt.store(hash, best_move, 0, best_score, flag, ply);
+        }
+        best_score
     }
 
     fn negamax(&mut self, board: &Board, mut depth: u8, mut alpha: i32, beta: i32, ply: u8) -> i32 {
@@ -453,10 +561,34 @@ impl ChessEngine {
         if board.status() == BoardStatus::Checkmate { return -MATE + ply as i32; }
         if board.status() == BoardStatus::Stalemate { return 0; }
         
+        let hash = board.get_hash();
+        if self.history_hashes.contains(&hash) { return 0; }
+        
         let is_check = board.checkers().popcnt() > 0;
         if is_check && depth < 64 { depth += 1; }
         
         if depth == 0 { return self.quiescence_search(board, alpha, beta, ply); }
+
+        // Razoring
+        if !is_check && depth <= 3 {
+            let static_eval = pseudo_nnue_evaluate(board);
+            let razor_margin = depth as i32 * 300;
+            if static_eval + razor_margin <= alpha {
+                let q_score = self.quiescence_search(board, alpha - razor_margin, beta, ply);
+                if q_score + razor_margin <= alpha {
+                    return q_score;
+                }
+            }
+        }
+        
+        // Reverse Futility Pruning (Static Null Move Pruning)
+        if !is_check && depth <= 3 {
+            let margin = depth as i32 * 200;
+            let static_eval = pseudo_nnue_evaluate(board);
+            if static_eval - margin >= beta {
+                return static_eval - margin; // Fast fail-high
+            }
+        }
 
         let hash = board.get_hash();
         let mut tt_best_move = None;
@@ -471,10 +603,11 @@ impl ChessEngine {
         
         let stm_pieces = board.color_combined(board.side_to_move()) & (board.pieces(Piece::Knight) | board.pieces(Piece::Bishop) | board.pieces(Piece::Rook) | board.pieces(Piece::Queen));
         let has_pieces = stm_pieces.popcnt() > 0;
-        if !is_check && depth >= 3 && has_pieces && (ply as usize) < 128 {
+        if !is_check && depth >= 2 && has_pieces && (ply as usize) < 128 {
             if let Some(null_board) = board.null_move() {
-                let r = if depth > 6 { 3 } else { 2 };
-                let null_score = -self.negamax(&null_board, depth - 1 - r, -beta, -beta + 1, ply.saturating_add(1));
+                let r = 3 + depth / 4; // More aggressive reduction
+                let reduced_depth = if depth > r { depth - r - 1 } else { 0 };
+                let null_score = -self.negamax(&null_board, reduced_depth, -beta, -beta + 1, ply.saturating_add(1));
                 if self.stop_search { return 0; }
                 if null_score >= beta { return beta; }
             }
@@ -493,12 +626,21 @@ impl ChessEngine {
 
         for m in moves {
             let is_capture = board.piece_on(m.get_dest()).is_some();
+            let is_promotion = m.get_promotion().is_some();
+
+            // Futility Pruning
+            if depth <= 2 && !is_check && !is_capture && !is_promotion && moves_evaluated > 0 && best_score > -MATE + 128 {
+                let f_margin = if depth == 1 { 300 } else { 500 };
+                if pseudo_nnue_evaluate(board) + f_margin <= alpha {
+                    continue; 
+                }
+            }
+
             let next_board = board.make_move_new(m);
             
             let mut score;
             
             // Singular Extensions
-            // If we are searching the PV, and best score is huge compared to alpha, depth is dynamically tweaked
             let mut extension = 0;
             if depth >= 5 && best_score > second_best + 150 && moves_evaluated > 0 && is_capture {
                 extension = 1;
@@ -508,8 +650,10 @@ impl ChessEngine {
                 score = -self.negamax(&next_board, depth - 1 + extension, -beta, -alpha, ply.saturating_add(1));
                 b_search_pv = false;
             } else {
-                if moves_evaluated >= 4 && depth >= 3 && !is_capture && next_board.status() != BoardStatus::Checkmate {
-                    let r = if moves_evaluated > 6 && depth >= 4 { 2 } else { 1 };
+                if moves_evaluated >= 3 && depth >= 3 && !is_capture && next_board.status() != BoardStatus::Checkmate {
+                    // More aggressive LMR based on depth and move count
+                    let mut r = 1 + (depth / 4) + (moves_evaluated / 6) as u8;
+                    if r > depth - 2 { r = depth - 2; }
                     score = -self.negamax(&next_board, depth - 1 - r + extension, -alpha - 1, -alpha, ply.saturating_add(1));
                     if score > alpha { 
                         score = -self.negamax(&next_board, depth - 1 + extension, -alpha - 1, -alpha, ply.saturating_add(1));
@@ -555,17 +699,66 @@ impl ChessEngine {
 }
 
 // Dummy include for NNUE network weights
-const NNUE_WEIGHTS: &[u8] = include_bytes!("net.nnue");
-
 // Enhanced Evaluation (NNUE / PeSTO Hybrid)
-fn pseudo_nnue_evaluate(board: &Board) -> i32 {
-    let mut score = evaluate(board); // Base PeSTO evaluation
-    
-    // If NNUE weights are loaded, perform NNUE calculation (Activates when a real network is loaded)
-    if NNUE_WEIGHTS.len() > 1000 {
-        // NNUE inference code goes here.
-        // ...
+struct NnueBoard<'a>(&'a Board);
+
+impl<'a> nnue_rs::Board for NnueBoard<'a> {
+    fn side_to_move(&self) -> nnue_rs::Color {
+        match self.0.side_to_move() {
+            Color::White => nnue_rs::Color::White,
+            Color::Black => nnue_rs::Color::Black,
+        }
     }
+
+    fn king_square(&self, color: nnue_rs::Color) -> u8 {
+        let c = match color {
+            nnue_rs::Color::White => Color::White,
+            nnue_rs::Color::Black => Color::Black,
+        };
+        (self.0.pieces(Piece::King) & self.0.color_combined(c)).to_square().to_index() as u8
+    }
+
+    fn for_each_piece(&self, f: &mut dyn FnMut(u8, nnue_rs::Piece)) {
+        for color in [Color::White, Color::Black] {
+            let nnue_color = match color {
+                Color::White => nnue_rs::Color::White,
+                Color::Black => nnue_rs::Color::Black,
+            };
+            for piece in [
+                Piece::Pawn, Piece::Knight, Piece::Bishop,
+                Piece::Rook, Piece::Queen, Piece::King
+            ] {
+                let nnue_kind = match piece {
+                    Piece::Pawn => nnue_rs::PieceKind::Pawn,
+                    Piece::Knight => nnue_rs::PieceKind::Knight,
+                    Piece::Bishop => nnue_rs::PieceKind::Bishop,
+                    Piece::Rook => nnue_rs::PieceKind::Rook,
+                    Piece::Queen => nnue_rs::PieceKind::Queen,
+                    Piece::King => nnue_rs::PieceKind::King,
+                };
+                let nnue_piece = nnue_rs::Piece { color: nnue_color, kind: nnue_kind };
+                
+                let bitboard = self.0.pieces(piece) & self.0.color_combined(color);
+                for sq in bitboard {
+                    f(sq.to_index() as u8, nnue_piece);
+                }
+            }
+        }
+    }
+}
+
+fn pseudo_nnue_evaluate(board: &Board) -> i32 {
+    if let Some(net) = NNUE.as_ref() {
+        let score = net.evaluate(&NnueBoard(board));
+        // nnue-rs score is relative to side-to-move, but my quiescence search expects it to be relative to side-to-move too.
+        // Wait, my old `evaluate` returned relative to side-to-move: `if board.side_to_move() == Color::White { score } else { -score }`
+        // Wait, let's double check. My old evaluate ends with `if board.side_to_move() == Color::White { score } else { -score }`.
+        // Ah! The old evaluate was returning relative to white, and then converting to side-to-move.
+        // `nnue-rs` `evaluate` returns relative to side-to-move.
+        return score;
+    }
+
+    let mut score = evaluate(board); // Base PeSTO evaluation
     
     // Advanced King Safety
     let w_king = board.pieces(Piece::King) & board.color_combined(Color::White);
@@ -595,6 +788,63 @@ fn pseudo_nnue_evaluate(board: &Board) -> i32 {
         }
     }
     
+    // Positional Pawn Evaluation (Passed, Isolated, Doubled)
+    let mut w_pawn_score = 0;
+    for sq in w_pawns {
+        let file = sq.get_file().to_index();
+        let rank = sq.get_rank().to_index();
+        let mut isolated = true;
+        let mut doubled = false;
+        let mut passed = true;
+        
+        for other_sq in w_pawns {
+            if other_sq == sq { continue; }
+            let other_file = other_sq.get_file().to_index();
+            let other_rank = other_sq.get_rank().to_index();
+            if (other_file as i32 - file as i32).abs() == 1 { isolated = false; }
+            if other_file == file && other_rank > rank { doubled = true; }
+        }
+        for enemy_sq in b_pawns {
+            let enemy_file = enemy_sq.get_file().to_index();
+            let enemy_rank = enemy_sq.get_rank().to_index();
+            if enemy_rank > rank && (enemy_file as i32 - file as i32).abs() <= 1 {
+                passed = false;
+                break;
+            }
+        }
+        if isolated { w_pawn_score -= 15; }
+        if doubled { w_pawn_score -= 15; }
+        if passed { w_pawn_score += 20 + (rank as i32) * 15; }
+    }
+    
+    let mut b_pawn_score = 0;
+    for sq in b_pawns {
+        let file = sq.get_file().to_index();
+        let rank = sq.get_rank().to_index();
+        let mut isolated = true;
+        let mut doubled = false;
+        let mut passed = true;
+        
+        for other_sq in b_pawns {
+            if other_sq == sq { continue; }
+            let other_file = other_sq.get_file().to_index();
+            let other_rank = other_sq.get_rank().to_index();
+            if (other_file as i32 - file as i32).abs() == 1 { isolated = false; }
+            if other_file == file && other_rank < rank { doubled = true; }
+        }
+        for enemy_sq in w_pawns {
+            let enemy_file = enemy_sq.get_file().to_index();
+            let enemy_rank = enemy_sq.get_rank().to_index();
+            if enemy_rank < rank && (enemy_file as i32 - file as i32).abs() <= 1 {
+                passed = false;
+                break;
+            }
+        }
+        if isolated { b_pawn_score -= 15; }
+        if doubled { b_pawn_score -= 15; }
+        if passed { b_pawn_score += 20 + ((7 - rank) as i32) * 15; }
+    }
+
     // Bishop pair synergy
     let w_bishops = board.pieces(Piece::Bishop) & board.color_combined(Color::White);
     let b_bishops = board.pieces(Piece::Bishop) & board.color_combined(Color::Black);
@@ -603,6 +853,8 @@ fn pseudo_nnue_evaluate(board: &Board) -> i32 {
 
     score += w_safety;
     score -= b_safety;
+    score += w_pawn_score;
+    score -= b_pawn_score;
     
     if board.side_to_move() == Color::White { score } else { -score }
 }

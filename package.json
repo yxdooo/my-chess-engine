@@ -1,0 +1,24 @@
+{
+  "name": "chess-engine",
+  "version": "1.0.0",
+  "description": "A highly optimized, multi-threaded WebAssembly (Rust) chess engine disguised as a Chrome Extension. Built specifically for providing real-time best move visual arrows directly on live chess boards like Chess.com.",
+  "main": "build_prod.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/yxdooo/my-chess-engine.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/yxdooo/my-chess-engine/issues"
+  },
+  "homepage": "https://github.com/yxdooo/my-chess-engine#readme",
+  "dependencies": {
+    "javascript-obfuscator": "^5.5.0"
+  }
+}

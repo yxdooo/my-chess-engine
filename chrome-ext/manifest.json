@@ -1,61 +1,79 @@
 {
-    "manifest_version":  3,
-    "name":  "Chess Engine V2",
-    "version":  "1.0",
-    "description":  "Custom Rust WASM Chess Engine for Chess.com",
-    "permissions":  [
-                        "activeTab",
-                        "scripting",
-                        "storage",
-                        "offscreen"
-                    ],
-    "host_permissions":  [
-                             "*://*.chess.com/*",
-                             "*://*.lichess.ovh/*"
-                         ],
-    "content_security_policy":  {
-                                    "extension_pages":  "script-src \u0027self\u0027 \u0027wasm-unsafe-eval\u0027; object-src \u0027self\u0027;"
-                                },
-    "background":  {
-                       "service_worker":  "background.js",
-                       "type":  "module"
-                   },
-    "content_scripts":  [
-                            {
-                                "matches":  [
-                                                "*://*.chess.com/*",
-                                                "*://*.lichess.org/*"
-                                            ],
-                                "js":  [
-                                           "content.js"
-                                       ],
-                                "css":  [
-                                            "content.css"
-                                        ]
-                            },
-                            {
-                                "matches":  [
-                                                "*://*.chess.com/*",
-                                                "*://*.lichess.org/*"
-                                            ],
-                                "js":  [
-                                           "inject.js"
-                                       ],
-                                "world": "MAIN"
-                            }
-                        ],
-    "action":  {
-                   "default_popup":  "popup.html"
-               },
-    "web_accessible_resources":  [
-                                     {
-                                         "resources":  [
-                                                           "engine_wasm_bg.wasm",
-                                                           "pkg/*"
-                                                       ],
-                                         "matches":  [
-                                                         "\u003call_urls\u003e"
-                                                     ]
-                                     }
-                                 ]
+    "manifest_version": 3,
+    "name": "Aether Chess Engine",
+    "version": "2.0.0",
+    "description": "A highly optimized, multi-threaded WebAssembly (Rust) chess engine disguised as a Chrome Extension. Real-time best move visual arrows directly on live chess boards.",
+    "icons": {
+        "16": "icon.jpg",
+        "48": "icon.jpg",
+        "128": "icon.jpg"
+    },
+    "permissions": [
+        "activeTab",
+        "scripting",
+        "storage",
+        "offscreen"
+    ],
+    "offscreen": {
+        "reasons": ["WORKER_DOM"],
+        "justification": "Required for WASM execution",
+        "urls": ["offscreen.html"]
+    },
+    "host_permissions": [
+        "*://*.chess.com/*",
+        "*://*.lichess.ovh/*"
+    ],
+    "content_security_policy": {
+        "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self';"
+    },
+    "cross_origin_embedder_policy": {
+        "value": "require-corp"
+    },
+    "cross_origin_opener_policy": {
+        "value": "same-origin"
+    },
+    "background": {
+        "service_worker": "background.js",
+        "type": "module"
+    },
+    "content_scripts": [
+        {
+            "matches": [
+                "*://*.chess.com/*",
+                "*://*.lichess.org/*"
+            ],
+            "js": [
+                "content.js"
+            ],
+            "css": [
+                "content.css"
+            ]
+        },
+        {
+            "matches": [
+                "*://*.chess.com/*",
+                "*://*.lichess.org/*"
+            ],
+            "js": [
+                "inject.js"
+            ],
+            "world": "MAIN"
+        }
+    ],
+    "action": {
+        "default_popup": "popup.html",
+        "default_icon": "icon.jpg"
+    },
+    "web_accessible_resources": [
+        {
+            "resources": [
+                "engine_wasm_bg.wasm",
+                "pkg/*",
+                "icon.jpg"
+            ],
+            "matches": [
+                "<all_urls>"
+            ]
+        }
+    ]
 }

@@ -9,17 +9,20 @@ init().then(() => {
     console.error("Worker WASM Load Error:", e);
 });
 
-onmessage = function(e) {
+onmessage = (e) => {
     if (!engine) return;
-    const msg = e.data;
-    if (msg.type === 'SEARCH') {
+    if (e.data.type === 'SET_HASH_SIZE') {
+        engine.set_hash_size(e.data.size);
+    } else if (e.data.type === 'SEARCH') {
+        const { fen, timeMs, elo, splitId, splitCount, history } = e.data;
+        const histStr = history || "";
+        const result = engine.get_best_move(fen, timeMs, elo, splitId, splitCount, histStr);
         try {
-            const resStr = engine.get_best_move(msg.fen, msg.timeMs, msg.elo, msg.splitId, msg.splitCount);
-            const res = JSON.parse(resStr);
-            postMessage({ type: 'RESULT', splitId: msg.splitId, bestMove: res.bestMove, score: res.score, pv: res.pv, ponderFen: res.ponderFen });
+            const parsed = JSON.parse(result);
+            postMessage({ type: 'RESULT', ...parsed });
         } catch(err) {
-            postMessage({ type: 'ERROR', error: err.toString() });
+            console.error("WASM JSON Parse error:", err, result);
+            postMessage({ type: 'RESULT', bestMove: "", score: 0, pv: [], ponderFen: "" });
         }
     }
-}
-
+};

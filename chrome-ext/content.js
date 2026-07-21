@@ -1,7 +1,14 @@
 let currentFEN = '';
+let fenHistory = [];
+let ponderCache = {};
 let overlayCanvas = null;
 let flipBoard = false;
 let debounceTimer = null;
+
+function normalizeFen(fen) {
+    if (!fen) return "";
+    return fen.split(' ').slice(0, 4).join(' ');
+}
 
 console.log("[Content] Chess Engine V2 content script loaded!");
 
@@ -237,34 +244,86 @@ function processPosition(networkFen = null) {
       const stm = fen.split(' ')[1];
       const myColor = flipBoard ? 'b' : 'w';
       const isMyTurn = (stm === myColor);
+      
+      const normFen = normalizeFen(fen);
+      
+      // If it's the starting position, clear history
+      if (fen.startsWith('rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w')) {
+          fenHistory = [];
+      }
+      fenHistory.push(normFen);
+      const historyStr = fenHistory.join('|');
+      
+      if (isMyTurn && ponderCache[normFen]) {
+          console.log("[Content] 🚀 PONDER HIT! Instantly playing:", ponderCache[normFen].bestMove);
+          playMove(ponderCache[normFen].bestMove);
+          ponderCache = {}; // clear cache
+          return; // Skip asking engine!
+      }
+      ponderCache = {}; // clear cache on any new move
 
-      chrome.runtime.sendMessage({ type: 'NEW_POSITION', fen: fen, timeLeft: timeLeft, isMyTurn: isMyTurn }, response => {
+      chrome.runtime.sendMessage({ 
+          type: 'NEW_POSITION', 
+          fen: fen, 
+          timeLeft: timeLeft, 
+          isMyTurn: isMyTurn,
+          history: historyStr
+      }, response => {
         if (chrome.runtime.lastError) {
             console.error("[Content] Messaging error:", chrome.runtime.lastError);
             return;
         }
         
-        if (isMyTurn && response && response.pv && response.pv.length > 0) {
+        let pvLines = [];
+        if (response) {
+            // If this is a ponder response, cache it!
+            if (response.cachedForFen) {
+                const norm = normalizeFen(response.cachedForFen);
+                ponderCache[norm] = response;
+                console.log("[Content] Ponder cached for future FEN:", norm, response.bestMove);
+            }
+            
+            if (!isMyTurn && response.multiPv && response.multiPv.length > 0) {
+                pvLines = response.multiPv.map(m => m.pv).filter(p => p && p.length > 0);
+            } else if (isMyTurn && response.pv) {
+                pvLines = [response.pv];
+            }
+        }
+
+        if (pvLines.length > 0) {
           if (overlayCanvas) overlayCanvas.getContext('2d').clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
           
-          const colors = [
-              'rgba(46, 204, 113, 0.95)', // Green
-              'rgba(231, 76, 60, 0.85)',  // Red
-              'rgba(52, 152, 219, 0.75)'  // Blue
-          ];
-          
-          const maxMoves = Math.min(response.pv.length, 3);
-          for (let i = maxMoves - 1; i >= 0; i--) {
-              let move = response.pv[i];
-              if (typeof move === 'string') move = move.replace(/['"]/g, '');
-              if (move && move.length >= 4) {
-                  const f = move.charCodeAt(0) - 97;
-                  const r = move.charCodeAt(1) - 49;
-                  const tf = move.charCodeAt(2) - 97;
-                  const tr = move.charCodeAt(3) - 49;
-                  
-                  if (f >= 0 && f <= 7 && r >= 0 && r <= 7 && tf >= 0 && tf <= 7 && tr >= 0 && tr <= 7) {
-                      drawArrow(r * 8 + f, tr * 8 + tf, colors[i]);
+          for (let lineIdx = pvLines.length - 1; lineIdx >= 0; lineIdx--) {
+              const currentPv = pvLines[lineIdx];
+              let colors;
+              if (isMyTurn) {
+                  colors = [
+                      'rgba(46, 204, 113, 0.95)', // Green
+                      'rgba(231, 76, 60, 0.85)',  // Red
+                      'rgba(52, 152, 219, 0.75)'  // Blue
+                  ];
+              } else {
+                  const baseAlpha = lineIdx === 0 ? 0.75 : (lineIdx === 1 ? 0.45 : 0.25);
+                  colors = [
+                      `rgba(149, 165, 166, ${baseAlpha})`,
+                      `rgba(149, 165, 166, ${baseAlpha * 0.7})`,
+                      `rgba(149, 165, 166, ${baseAlpha * 0.5})`
+                  ];
+              }
+              
+              const maxMoves = Math.min(currentPv.length, 3);
+              for (let i = maxMoves - 1; i >= 0; i--) {
+                  let move = currentPv[i];
+                  if (typeof move === 'string') move = move.replace(/['"]/g, '');
+                  if (move && move.length >= 4) {
+                      const f = move.charCodeAt(0) - 97;
+                      const r = move.charCodeAt(1) - 49;
+                      const tf = move.charCodeAt(2) - 97;
+                      const tr = move.charCodeAt(3) - 49;
+                      
+                      if (f >= 0 && f <= 7 && r >= 0 && r <= 7 && tf >= 0 && tf <= 7 && tr >= 0 && tr <= 7) {
+                          drawArrow(r * 8 + f, tr * 8 + tf, colors[i]);
+                      }
                   }
               }
           }

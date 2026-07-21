@@ -24,6 +24,13 @@ const normalizeFen = (f) => {
     return f.split(' ').slice(0, 3).join(' ');
 };
 
+const fetchWithTimeout = (url, options, timeout = 1500) => {
+    return Promise.race([
+        fetch(url, options),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), timeout))
+    ]);
+};
+
 async function setupOffscreenDocument(path) {
     if (await hasDocument()) {
         return;
@@ -54,15 +61,16 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
   
   if (message.type === 'NEW_POSITION') {
-    chrome.storage.local.get(['isActive', 'elo', 'targetWorkers'], (result) => {
+    chrome.storage.local.get(['isActive', 'elo', 'targetWorkers', 'hashSize'], (result) => {
         if (!result.isActive) {
           console.log("[Background] Engine is disabled in storage. Ignoring.");
-          sendResponse({ bestMove: null });
+          if (sendResponse) sendResponse({ bestMove: null });
           return;
         }
         
         const currentElo = result.elo || 3000;
         const activeWorkerCount = result.targetWorkers || 4;
+        const hashSize = result.hashSize || 128;
         const normFen = normalizeFen(message.fen);
         
         // Check Aggressive Opening Book first
@@ -80,7 +88,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         
         if (message.isMyTurn && ponderCache[normFen]) {
             console.log("[Background] PONDER HIT! INSTANT REPLY for", normFen, "->", ponderCache[normFen].bestMove);
-            sendResponse({ bestMove: ponderCache[normFen].bestMove, pv: [ponderCache[normFen].bestMove] });
+            sendResponse({ bestMove: ponderCache[normFen].bestMove, pv: ponderCache[normFen].pv });
             ponderCache = {}; 
             return;
         }
@@ -89,66 +97,93 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         let engineTime = 1500;
         if (message.timeLeft !== null && message.timeLeft !== undefined) {
             let seconds = message.timeLeft;
-            if (seconds < 10) engineTime = 100;
-            else if (seconds < 30) engineTime = 400;
-            else if (seconds < 60) engineTime = 1000;
-            else if (seconds < 300) engineTime = 2500;
-            else engineTime = 4000;
+            if (seconds < 15) engineTime = 100;
+            else if (seconds < 45) engineTime = 500;
+            else if (seconds < 90) engineTime = 1500;
+            else if (seconds < 180) engineTime = 3000; // 3 minutes left -> 3 seconds
+            else if (seconds < 300) engineTime = 5000; // 5 minutes left -> 5 seconds
+            else if (seconds < 600) engineTime = 8000; // 10 minutes left -> 8 seconds
+            else engineTime = 12000; // >10 minutes -> 12 seconds
         } else {
             if (currentElo < 1000) engineTime = 300;
             else if (currentElo < 2000) engineTime = 1000;
             else engineTime = 2500; 
         }
-        
-        fetch("https://explorer.lichess.ovh/masters?fen=" + encodeURIComponent(message.fen), {
-            headers: { "User-Agent": "ChessEngineV2-Ext (contact: dev@example.com)" }
-        })
-          .then(r => r.json())
-          .then(data => {
-            if (data.moves && data.moves.length > 0 && currentElo >= 1600 && message.isMyTurn) {
-              sendResponse({ bestMove: data.moves[0].uci, pv: [data.moves[0].uci] });
-            } else {
-                fetch("https://tablebase.lichess.ovh/standard?fen=" + encodeURIComponent(message.fen), {
-                    headers: { "User-Agent": "ChessEngineV2-Ext (contact: dev@example.com)" }
-                })
-                .then(r => r.json())
-                .then(tb => {
-                  if (tb.moves && tb.moves.length > 0 && currentElo >= 2000 && message.isMyTurn) {
-                    sendResponse({ bestMove: tb.moves[0].uci, pv: [tb.moves[0].uci] });
-                  } else {
-                    callOffscreenSMP(message.fen, engineTime, currentElo, activeWorkerCount, message.isMyTurn, sendResponse);
-                  }
-                }).catch(() => {
-                    callOffscreenSMP(message.fen, engineTime, currentElo, activeWorkerCount, message.isMyTurn, sendResponse);
-                });
-            }
-          }).catch(() => {
-              callOffscreenSMP(message.fen, engineTime, currentElo, activeWorkerCount, message.isMyTurn, sendResponse);
-          });
+        if (message.isMyTurn) {
+            fetchWithTimeout("https://explorer.lichess.ovh/masters?fen=" + encodeURIComponent(message.fen), {
+                headers: { "User-Agent": "ChessEngineV2-Ext (contact: dev@example.com)" }
+            }, 1000)
+              .then(r => r.json())
+              .then(data => {
+                if (data.moves && data.moves.length > 0 && currentElo >= 1600) {
+                  if (sendResponse) sendResponse({ bestMove: data.moves[0].uci, pv: [data.moves[0].uci] });
+                } else {
+                    fetchWithTimeout("https://tablebase.lichess.ovh/standard?fen=" + encodeURIComponent(message.fen), {
+                        headers: { "User-Agent": "ChessEngineV2-Ext (contact: dev@example.com)" }
+                    }, 1000)
+                    .then(r => r.json())
+                    .then(tb => {
+                      if (tb.moves && tb.moves.length > 0 && currentElo >= 2000) {
+                        if (sendResponse) sendResponse({ bestMove: tb.moves[0].uci, pv: [tb.moves[0].uci] });
+                      } else {
+                        callOffscreenSMP(message.fen, engineTime, currentElo, activeWorkerCount, true, message.history, hashSize, sendResponse);
+                      }
+                    }).catch(() => {
+                        callOffscreenSMP(message.fen, engineTime, currentElo, activeWorkerCount, true, message.history, hashSize, sendResponse);
+                    });
+                }
+              }).catch(() => {
+                  callOffscreenSMP(message.fen, engineTime, currentElo, activeWorkerCount, true, message.history, hashSize, sendResponse);
+              });
+        } else {
+            // If not my turn, just start the ponder search
+            callOffscreenSMP(message.fen, engineTime, currentElo, activeWorkerCount, false, message.history, hashSize, sendResponse);
+        }
     });
     return true; 
   }
 });
 
-function callOffscreenSMP(fen, timeMs, currentElo, activeWorkerCount, isMyTurn, sendResponse) {
+function callOffscreenSMP(fen, timeMs, currentElo, activeWorkerCount, isMyTurn, history, hashSize, sendResponse) {
     setupOffscreenDocument('offscreen.html').then(() => {
         chrome.runtime.sendMessage({
             type: 'START_SMP_SEARCH',
             fen: fen,
             timeMs: timeMs,
             elo: currentElo,
-            activeWorkerCount: activeWorkerCount
+            activeWorkerCount: activeWorkerCount,
+            isMyTurn: isMyTurn,
+            history: history,
+            hashSize: hashSize
         }, (response) => {
             if (chrome.runtime.lastError) {
-                console.error("[Background] Error calling offscreen:", chrome.runtime.lastError);
-                sendResponse({ bestMove: null });
+                console.log("Offscreen error:", chrome.runtime.lastError);
+                if (sendResponse) sendResponse({bestMove: null});
+                return;
+            }
+            
+            if (isMyTurn) {
+                if (sendResponse) sendResponse(response);
             } else {
-                if (!isMyTurn && response && response.ponderFen && response.pv && response.pv.length >= 2) {
-                    const nextNorm = normalizeFen(response.ponderFen);
-                    ponderCache[nextNorm] = { bestMove: response.pv[1] };
-                    console.log("[Background] Pondering finished. Cached expected reply for", nextNorm, "->", response.pv[1]);
+                // TRUE PONDERING
+                if (response && response.ponderFen) {
+                    console.log("Opponent expected to play:", response.bestMove, "Pondering our response on:", response.ponderFen);
+                    chrome.runtime.sendMessage({
+                        type: 'START_SMP_SEARCH',
+                        fen: response.ponderFen,
+                        timeMs: timeMs, 
+                        elo: currentElo,
+                        activeWorkerCount: activeWorkerCount,
+                        isMyTurn: true // We are searching for OUR turn
+                    }, (ponderResponse) => {
+                        if (!chrome.runtime.lastError && ponderResponse && sendResponse) {
+                            ponderResponse.cachedForFen = response.ponderFen;
+                            sendResponse(ponderResponse);
+                        }
+                    });
+                } else {
+                    if (sendResponse) sendResponse(response);
                 }
-                sendResponse(response);
             }
         });
     });

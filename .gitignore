@@ -6,6 +6,8 @@ engine-wasm/target/
 # Node/JavaScript
 node_modules/
 npm-debug.log
+dist/
+engine-wasm/pkg/
 
 # IDEs and Editors
 .vscode/
