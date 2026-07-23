@@ -576,6 +576,13 @@ function processPosition(networkFen = null) {
                         playMove(response.bestMove);
                     }
                 });
+            } else if (!isMyTurn && response.bestMove) {
+                // PREMOVE logic: queue the ponder move on the DOM
+                chrome.storage.local.get("engineMode", (res) => {
+                    if (res.engineMode === "autoplay") {
+                        playMove(response.bestMove);
+                    }
+                });
             }
 
             // Collect PV lines to render as arrows.
