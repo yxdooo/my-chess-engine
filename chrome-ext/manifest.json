@@ -1,27 +1,31 @@
 {
     "manifest_version": 3,
     "name": "Aether Chess Engine",
-    "version": "2.0.0",
-    "description": "A highly optimized, multi-threaded WebAssembly (Rust) chess engine disguised as a Chrome Extension. Real-time best move visual arrows directly on live chess boards.",
+    "version": "2.1.0",
+    "description": "A highly optimized, multi-threaded WebAssembly (Rust) chess engine. Real-time best-move arrows directly on Chess.com and Lichess.",
     "icons": {
-        "16": "icon.jpg",
-        "48": "icon.jpg",
-        "128": "icon.jpg"
+        "16": "icon.png",
+        "48": "icon.png",
+        "128": "icon.png"
     },
     "permissions": [
         "activeTab",
         "scripting",
         "storage",
-        "offscreen"
+        "offscreen",
+        "tabs"
     ],
     "offscreen": {
-        "reasons": ["WORKER_DOM"],
-        "justification": "Required for WASM execution",
+        "reasons": ["WORKERS"],
+        "justification": "Spawn Web Workers to run the WASM chess engine across multiple CPU cores (Lazy SMP).",
         "urls": ["offscreen.html"]
     },
     "host_permissions": [
         "*://*.chess.com/*",
-        "*://*.lichess.ovh/*"
+        "*://*.lichess.org/*",
+        "*://*.lichess.ovh/*",
+        "*://*.tablebase.lichess.ovh/*",
+        "*://*.explorer.lichess.ovh/*"
     ],
     "content_security_policy": {
         "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self';"
@@ -62,17 +66,18 @@
     ],
     "action": {
         "default_popup": "popup.html",
-        "default_icon": "icon.jpg"
+        "default_icon": "icon.png"
     },
     "web_accessible_resources": [
         {
             "resources": [
                 "engine_wasm_bg.wasm",
                 "pkg/*",
-                "icon.jpg"
+                "icon.png"
             ],
             "matches": [
-                "<all_urls>"
+                "*://*.chess.com/*",
+                "*://*.lichess.org/*"
             ]
         }
     ]

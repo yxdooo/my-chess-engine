@@ -133,6 +133,148 @@ function drawArrow(fromIdx, toIdx, color) {
 }
 
 // ---------------------------------------------------------------------------
+// Move Execution
+// ---------------------------------------------------------------------------
+
+/**
+ * Dispatches a sequence of mouse/pointer events at a given viewport position.
+ * Used to simulate a click on a chess board square.
+ * @param {number} clientX
+ * @param {number} clientY
+ */
+function simulateClick(clientX, clientY) {
+    const target = document.elementFromPoint(clientX, clientY);
+    if (!target) return;
+
+    const eventArgs = {
+        bubbles: true,
+        cancelable: true,
+        view: window,
+        clientX,
+        clientY,
+        button: 0,
+        buttons: 1,
+    };
+
+    // Fire the full sequence that the browser would normally fire for a real click.
+    for (const type of ["pointerover", "pointerenter", "mouseover", "mouseenter",
+                         "pointermove", "mousemove",
+                         "pointerdown", "mousedown",
+                         "pointerup", "mouseup", "click"]) {
+        target.dispatchEvent(
+            type.startsWith("pointer")
+                ? new PointerEvent(type, { ...eventArgs, pointerId: 1, isPrimary: true })
+                : new MouseEvent(type, eventArgs)
+        );
+    }
+}
+
+/**
+ * Selects a promotion piece in the promotion modal.
+ * Tries Chess.com and generic modal approaches.
+ * Defaults to queen promotion if nothing else is found.
+ * @param {string} promotionChar - One of 'q', 'r', 'b', 'n'
+ */
+function selectPromotion(promotionChar) {
+    // Chess.com promotion modal
+    const chessComModal = document.querySelector(
+        ".promotion-piece-" + promotionChar +
+        ", [data-promotion-piece=\"" + promotionChar + "\"]"
+    );
+    if (chessComModal) {
+        chessComModal.click();
+        return;
+    }
+
+    // Lichess promotion modal
+    const lichessModal = document.querySelector(
+        "cg-board .promotion-choice ." + promotionChar +
+        ", .lichess-promotion ." + promotionChar
+    );
+    if (lichessModal) {
+        lichessModal.click();
+        return;
+    }
+
+    // Generic fallback: click the first promotion square (usually queen)
+    const genericModal = document.querySelector(
+        ".promotion-choice piece, .promotion-piece"
+    );
+    if (genericModal) genericModal.click();
+}
+
+/**
+ * Plays a move on the board by simulating the mouse clicks a user would make.
+ * Supports Chess.com (wc-chess-board / chess-board) and Lichess (cg-board).
+ *
+ * @param {string} uci - UCI move string, e.g. "e2e4" or "e7e8q" (promotion).
+ * @returns {boolean} True if the move was attempted, false if the board wasn't found.
+ */
+function playMove(uci) {
+    if (!uci || uci.length < 4) return false;
+
+    const fromFile = uci.charCodeAt(0) - 97; // 'a'=0 … 'h'=7
+    const fromRank = uci.charCodeAt(1) - 49; // '1'=0 … '8'=7
+    const toFile   = uci.charCodeAt(2) - 97;
+    const toRank   = uci.charCodeAt(3) - 49;
+    const promotionChar = uci.length === 5 ? uci[4] : null; // 'q','r','b','n'
+
+    // Validate coordinates
+    if (
+        fromFile < 0 || fromFile > 7 || fromRank < 0 || fromRank > 7 ||
+        toFile   < 0 || toFile   > 7 || toRank   < 0 || toRank   > 7
+    ) {
+        console.warn("[Content] playMove: invalid UCI coordinates:", uci);
+        return false;
+    }
+
+    const boardEl = document.querySelector(
+        "wc-chess-board, chess-board, cg-board"
+    );
+    if (!boardEl) {
+        console.warn("[Content] playMove: board element not found");
+        return false;
+    }
+
+    const rect = boardEl.getBoundingClientRect();
+    const sqSize = rect.width / 8;
+
+    /**
+     * Converts logical file/rank to viewport coordinates of the square centre.
+     * Accounts for board flip.
+     * @param {number} file - 0-7 (a=0)
+     * @param {number} rank - 0-7 (rank1=0)
+     * @returns {{x: number, y: number}}
+     */
+    function squareToViewport(file, rank) {
+        const visualFile = flipBoard ? 7 - file : file;
+        const visualRank = flipBoard ? rank : 7 - rank;
+        return {
+            x: rect.left + (visualFile + 0.5) * sqSize,
+            y: rect.top  + (visualRank + 0.5) * sqSize,
+        };
+    }
+
+    const from = squareToViewport(fromFile, fromRank);
+    const to   = squareToViewport(toFile, toRank);
+
+    // Step 1: Click source square (piece selection)
+    simulateClick(from.x, from.y);
+
+    // Step 2: Click destination square after a short delay (natural timing)
+    setTimeout(() => {
+        simulateClick(to.x, to.y);
+
+        // Step 3: Handle promotion modal if needed
+        if (promotionChar) {
+            setTimeout(() => selectPromotion(promotionChar), 150);
+        }
+    }, 80);
+
+    return true;
+}
+
+// ---------------------------------------------------------------------------
 // Board Parsing
 // ---------------------------------------------------------------------------
 
@@ -359,6 +501,7 @@ function renderArrows(pvLines, isMyTurn) {
 /**
  * Main entry point. Called when a position change is detected.
  * Sends the FEN to the background script and renders the analysis arrows.
+ * On a ponder cache hit for our turn, also plays the move automatically.
  * @param {string|null} networkFen - FEN from the WebSocket interceptor, or null to parse from DOM.
  */
 function processPosition(networkFen = null) {
@@ -382,11 +525,18 @@ function processPosition(networkFen = null) {
     const historyStr = fenHistory.join("|");
 
     // Check if a ponder result is already cached for this position.
+    // If so, play the move instantly and show the arrow.
     if (isMyTurn && ponderCache[normFen]) {
         const cached = ponderCache[normFen];
         ponderCache = {};
-        if (cached.pv && cached.pv.length > 0) {
-            renderArrows([cached.pv], true);
+
+        if (cached.bestMove) {
+            // Show the arrow first, then play the move after a brief delay
+            // so the user can see what move the engine chose.
+            if (cached.pv && cached.pv.length > 0) {
+                renderArrows([cached.pv], true);
+            }
+            setTimeout(() => playMove(cached.bestMove), 200);
         }
         return;
     }
@@ -416,7 +566,12 @@ function processPosition(networkFen = null) {
                 ponderCache[norm] = response;
             }
 
-            // Collect PV lines to render.
+            // Play the move if it's our turn.
+            if (isMyTurn && response.bestMove) {
+                playMove(response.bestMove);
+            }
+
+            // Collect PV lines to render as arrows.
             let pvLines = [];
             if (!isMyTurn && response.multiPv && response.multiPv.length > 0) {
                 pvLines = response.multiPv
