@@ -24,8 +24,9 @@ pub struct ChessEngine {
     elo: u32,
     /// Zobrist hashes of previously seen positions for 3-fold repetition detection.
     history_hashes: HashSet<u64>,
+    /// Array of Zobrist hashes for the current search path to detect perpetual checks in the search tree.
+    search_path: [u64; 128],
 }
-
 #[wasm_bindgen]
 impl ChessEngine {
     #[wasm_bindgen(constructor)]
@@ -36,12 +37,13 @@ impl ChessEngine {
             killers: [[None; 2]; 128],
             history: [[0; 64]; 64],
             stop_search: false,
-            time_limit_ms: 1000.0,
-            hard_time_limit_ms: 5000.0,
+            time_limit_ms: 0.0,
+            hard_time_limit_ms: 0.0,
             start_time: 0.0,
             nodes: 0,
             elo: 3000,
             history_hashes: HashSet::new(),
+            search_path: [0; 128],
         }
     }
 
@@ -453,6 +455,7 @@ impl ChessEngine {
         let original_alpha = alpha;
         
         let hash = board.get_hash();
+        self.search_path[0] = hash;
         let tt_best_move = self.tt.probe(hash, 0).and_then(|entry| entry.best_move);
 
         let mut moves: Vec<ChessMove> = MoveGen::new_legal(board).collect();
@@ -590,6 +593,16 @@ impl ChessEngine {
         
         let hash = board.get_hash();
         if self.history_hashes.contains(&hash) { return 0; }
+        if ply > 0 {
+            for i in 0..ply {
+                if self.search_path[i as usize] == hash {
+                    return 0;
+                }
+            }
+        }
+        if (ply as usize) < 128 {
+            self.search_path[ply as usize] = hash;
+        }
         
         let is_check = board.checkers().popcnt() > 0;
         if is_check && depth < 64 { depth += 1; }
