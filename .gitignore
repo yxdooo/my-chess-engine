@@ -1,13 +1,17 @@
-# Rust/Cargo
-target/
+# Rust / Cargo
 engine-wasm/target/
 **/*.rs.bk
 
-# Node/JavaScript
+# Node.js / JavaScript
 node_modules/
 npm-debug.log
+
+# Build artifacts (generated – do not commit)
 dist/
 engine-wasm/pkg/
+
+# Release binaries (distribute via GitHub Releases, not source control)
+Aether-Engine.zip
 
 # IDEs and Editors
 .vscode/

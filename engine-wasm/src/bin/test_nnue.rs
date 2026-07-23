@@ -1,5 +1,5 @@
 use std::str::FromStr;
-use nnue_rs::{Network, FenBoard};
+use nnue_rs::Network;
 
 fn main() {
     let bytes = include_bytes!("../../nn-82215d0fd0df.nnue");

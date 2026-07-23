@@ -1,5 +1,6 @@
 use wasm_bindgen::prelude::*;
-use chess::{Board, ChessMove, Color, Piece, Square, MoveGen, BoardStatus, BitBoard, Rank, File};
+use chess::{Board, ChessMove, Color, Piece, MoveGen, BoardStatus};
+use std::collections::HashSet;
 use std::str::FromStr;
 use std::sync::LazyLock;
 
@@ -12,15 +13,17 @@ static NNUE: LazyLock<Option<nnue_rs::Network>> = LazyLock::new(|| {
 pub struct ChessEngine {
     tt: TranspositionTable,
     killers: [[Option<ChessMove>; 2]; 128],
+    /// Butterfly history table for move ordering heuristics.
     history: [[i32; 64]; 64],
     stop_search: bool,
     time_limit_ms: f64,
     hard_time_limit_ms: f64,
     start_time: f64,
+    /// Total nodes visited across the current search.
     nodes: u32,
-    nodes_evaluated: u32,
     elo: u32,
-    history_hashes: Vec<u64>,
+    /// Zobrist hashes of previously seen positions for 3-fold repetition detection.
+    history_hashes: HashSet<u64>,
 }
 
 #[wasm_bindgen]
@@ -29,17 +32,16 @@ impl ChessEngine {
     pub fn new() -> Self {
         console_error_panic_hook::set_once();
         Self {
-            tt: TranspositionTable::new(1000000), 
+            tt: TranspositionTable::new(1_000_000),
             killers: [[None; 2]; 128],
             history: [[0; 64]; 64],
-            nodes_evaluated: 0,
             stop_search: false,
             time_limit_ms: 1000.0,
             hard_time_limit_ms: 5000.0,
             start_time: 0.0,
             nodes: 0,
             elo: 3000,
-            history_hashes: Vec::new(),
+            history_hashes: HashSet::new(),
         }
     }
 
@@ -52,24 +54,22 @@ impl ChessEngine {
 
     #[wasm_bindgen]
     pub fn get_best_move(&mut self, fen: String, time_limit_ms: f64, elo: f64, split_id: u8, split_count: u8, history: String) -> String {
-        self.nodes_evaluated = 0;
+        self.nodes = 0;
         self.stop_search = false;
         self.time_limit_ms = time_limit_ms;
         self.hard_time_limit_ms = time_limit_ms * 3.0;
         self.elo = elo as u32;
+
+        let board = Board::from_str(&fen).unwrap_or(Board::default());
         
-        let mut board = Board::from_str(&fen).unwrap_or(Board::default());
-        
-        // Parse history FENs into hashes for 3-fold repetition check
+        // Rebuild the set of past position hashes for 3-fold repetition detection.
+        // History is passed as pipe-separated normalized FEN strings.
         self.history_hashes.clear();
         for h_fen in history.split('|') {
             if h_fen.is_empty() { continue; }
-            // Reconstruct a board to get its hash
-            // (Assuming normalized FEN format: "piece_placement side_to_move castling en_passant")
-            // We append " 0 1" to make it valid for from_str if it's truncated
             let full_fen = format!("{} 0 1", h_fen);
             if let Ok(b) = Board::from_str(&full_fen) {
-                self.history_hashes.push(b.get_hash());
+                self.history_hashes.insert(b.get_hash());
             }
         }
 
@@ -149,10 +149,13 @@ impl ChessEngine {
                 }
             }
             
-            // If we have passed half of the allocated time, do not start the next depth
+            // If we have passed half of the allocated time, do not start the next depth.
             if elapsed > self.time_limit_ms * 0.5 {
                 break;
             }
+
+            // Update previous_best_score for the next iteration's panic-time check.
+            previous_best_score = best_score;
         }
         
         if elo < 2500.0 {
@@ -698,8 +701,12 @@ impl ChessEngine {
     }
 }
 
-// Dummy include for NNUE network weights
-// Enhanced Evaluation (NNUE / PeSTO Hybrid)
+// ---------------------------------------------------------------------------
+// NNUE Board Adapter
+// ---------------------------------------------------------------------------
+
+/// Adapter that bridges the `chess` crate's `Board` type to the interface
+/// expected by `nnue_rs::Network::evaluate`.
 struct NnueBoard<'a>(&'a Board);
 
 impl<'a> nnue_rs::Board for NnueBoard<'a> {
@@ -749,13 +756,9 @@ impl<'a> nnue_rs::Board for NnueBoard<'a> {
 
 fn pseudo_nnue_evaluate(board: &Board) -> i32 {
     if let Some(net) = NNUE.as_ref() {
-        let score = net.evaluate(&NnueBoard(board));
-        // nnue-rs score is relative to side-to-move, but my quiescence search expects it to be relative to side-to-move too.
-        // Wait, my old `evaluate` returned relative to side-to-move: `if board.side_to_move() == Color::White { score } else { -score }`
-        // Wait, let's double check. My old evaluate ends with `if board.side_to_move() == Color::White { score } else { -score }`.
-        // Ah! The old evaluate was returning relative to white, and then converting to side-to-move.
-        // `nnue-rs` `evaluate` returns relative to side-to-move.
-        return score;
+        // nnue-rs::Network::evaluate returns a score relative to the side to move,
+        // which matches what our search functions expect.
+        return net.evaluate(&NnueBoard(board));
     }
 
     let mut score = evaluate(board); // Base PeSTO evaluation
