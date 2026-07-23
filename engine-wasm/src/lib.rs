@@ -60,6 +60,13 @@ impl ChessEngine {
         self.hard_time_limit_ms = time_limit_ms * 3.0;
         self.elo = elo as u32;
 
+        // History gravity: age heuristic scores to prevent stale move ordering.
+        for from in 0..64usize {
+            for to in 0..64usize {
+                self.history[from][to] /= 2;
+            }
+        }
+
         let board = Board::from_str(&fen).unwrap_or(Board::default());
         
         // Rebuild the set of past position hashes for 3-fold repetition detection.
@@ -84,7 +91,8 @@ impl ChessEngine {
         let mut best_score = -INF;
         let mut previous_best_score = -INF;
         let mut second_best_score = -INF;
-        
+        let mut depth_reached: u8 = 0;
+
         let mut alpha = -INF;
         let mut beta = INF;
         
@@ -118,9 +126,11 @@ impl ChessEngine {
                 best_move = current_best.0;
                 best_score = current_best.1;
                 second_best_score = current_best.2;
-                alpha = best_score - 50;
-                beta = best_score + 50;
+                // Tighten aspiration window for next iteration (±25cp for faster cutoffs).
+                alpha = best_score - 25;
+                beta = best_score + 25;
             }
+            depth_reached = depth;
             
             let elapsed = js_sys::Date::now() - self.start_time;
             
@@ -203,7 +213,10 @@ impl ChessEngine {
             String::new()
         };
 
-        format!("{{\"bestMove\":\"{}\",\"score\":{},\"pv\":[{}],\"ponderFen\":\"{}\"}}", best_move_str, best_score, pv.join(","), ponder_fen)
+        format!(
+            "{{\"bestMove\":\"{}\",\"score\":{},\"pv\":[{}],\"ponderFen\":\"{}\",\"depth\":{},\"nodes\":{}}}",
+            best_move_str, best_score, pv.join(","), ponder_fen, depth_reached, self.nodes
+        )
     }
 }
 
@@ -388,18 +401,20 @@ impl ChessEngine {
 
     fn score_move(&self, board: &Board, m: &ChessMove, ply: u8, tt_best_move: Option<ChessMove>) -> i32 {
         if Some(*m) == tt_best_move { return 10_000_000; }
-        
-        if let Some(victim) = board.piece_on(m.get_dest()) {
-            if let Some(attacker) = board.piece_on(m.get_source()) {
-                return 10000 + 10 * piece_value_mg(victim) - piece_value_mg(attacker);
-            }
+
+        // Captures: order by SEE value.
+        // Good captures (SEE ≥ 0) come before promotions/killers.
+        // Bad captures (SEE < 0) are searched last (negative score).
+        if board.piece_on(m.get_dest()).is_some() {
+            let see = see_value(board, *m, 0);
+            return if see >= 0 { 100_000 + see } else { -10_000 + see };
         }
-        
-        if m.get_promotion().is_some() { return 9500; }
-        
+
+        if m.get_promotion().is_some() { return 9_500; }
+
         if (ply as usize) < 128 {
-            if Some(*m) == self.killers[ply as usize][0] { return 9000; }
-            if Some(*m) == self.killers[ply as usize][1] { return 8000; }
+            if Some(*m) == self.killers[ply as usize][0] { return 9_000; }
+            if Some(*m) == self.killers[ply as usize][1] { return 8_000; }
             return self.history[m.get_source().to_index()][m.get_dest().to_index()];
         }
         0
@@ -514,27 +529,14 @@ impl ChessEngine {
         let mut best_move = None;
 
         for m in moves {
-            // SEE-lite / Delta Pruning
-            if !in_check {
-                let dest_piece = board.piece_on(m.get_dest());
-                let is_promotion = m.get_promotion().is_some();
-                
-                if let Some(p) = dest_piece {
-                    if !is_promotion {
-                        let captured_val = piece_value_mg(p);
-                        if stand_pat + captured_val + 200 < alpha {
-                            continue;
-                        }
-                        if let Some(attacker) = board.piece_on(m.get_source()) {
-                            let attacker_val = piece_value_mg(attacker);
-                            if attacker_val > captured_val + 400 {
-                                if stand_pat + captured_val <= alpha {
-                                    continue;
-                                }
-                            }
-                        }
-                    }
-                }
+            // Full SEE filter for captures in quiescence search.
+            if !in_check && m.get_promotion().is_none() && board.piece_on(m.get_dest()).is_some() {
+                let see = see_value(board, m, 0);
+                // Skip captures that lose material even after all recaptures.
+                if see < 0 { continue; }
+                // Delta pruning: if even an optimistic continuation can't reach alpha, skip.
+                let captured_val = board.piece_on(m.get_dest()).map_or(0, |p| piece_value_mg(p));
+                if stand_pat + captured_val.max(see) + 150 <= alpha { continue; }
             }
 
             let next_board = board.make_move_new(m);
@@ -593,7 +595,7 @@ impl ChessEngine {
             }
         }
 
-        let hash = board.get_hash();
+        // Reuse the hash already computed at the top of this function.
         let mut tt_best_move = None;
         if let Some(entry) = self.tt.probe(hash, ply) {
             tt_best_move = entry.best_move;
@@ -620,10 +622,31 @@ impl ChessEngine {
         let mut second_best = -INF;
         let mut best_move = None;
         let original_alpha = alpha;
+        let is_pv_node = beta > alpha + 1;
 
         let mut moves: Vec<ChessMove> = MoveGen::new_legal(board).collect();
         self.sort_moves(board, &mut moves, ply, tt_best_move);
-        
+
+        // Multi-Cut Pruning: if several quick null-window searches at reduced depth
+        // all cause a beta cutoff, the position is very likely a cut node – prune it.
+        const MC_TRIES: usize = 3;
+        const MC_CUTS: usize = 2;
+        if !is_check && depth >= 6 && has_pieces && !is_pv_node && moves.len() >= MC_TRIES {
+            let mut cutoffs = 0usize;
+            for mc_m in moves.iter().take(MC_TRIES) {
+                if self.stop_search { break; }
+                let next = board.make_move_new(*mc_m);
+                let score = -self.negamax(&next, depth - 4, -beta, -beta + 1, ply.saturating_add(1));
+                if score >= beta {
+                    cutoffs += 1;
+                    if cutoffs >= MC_CUTS {
+                        return beta; // Multi-cut
+                    }
+                }
+            }
+            if self.stop_search { return 0; }
+        }
+
         let mut moves_evaluated = 0;
         let mut b_search_pv = true;
 
@@ -698,6 +721,50 @@ impl ChessEngine {
             self.tt.store(hash, best_move, depth, best_score, flag, ply);
         }
         best_score
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Static Exchange Evaluation (SEE)
+// ---------------------------------------------------------------------------
+
+/// Finds the cheapest legal move that captures on the given square.
+/// Returns None if no side-to-move piece can capture there.
+fn find_cheapest_attacker(board: &Board, sq: chess::Square) -> Option<ChessMove> {
+    let mut min_val = i32::MAX;
+    let mut best = None;
+    for m in MoveGen::new_legal(board) {
+        if m.get_dest() == sq {
+            if let Some(p) = board.piece_on(m.get_source()) {
+                let v = piece_value_mg(p);
+                if v < min_val {
+                    min_val = v;
+                    best = Some(m);
+                }
+            }
+        }
+    }
+    best
+}
+
+/// Computes the Static Exchange Evaluation for a capture move.
+/// Returns the expected net material gain (positive = good for the moving side).
+/// Uses a recursive cheapest-attacker minimax capped at depth 8.
+fn see_value(board: &Board, m: ChessMove, depth: u8) -> i32 {
+    if depth >= 8 { return 0; }
+
+    let captured_val = match board.piece_on(m.get_dest()) {
+        Some(p) => piece_value_mg(p),
+        None => return 0,
+    };
+
+    let next_board = board.make_move_new(m);
+
+    match find_cheapest_attacker(&next_board, m.get_dest()) {
+        // No recapture possible – we keep the full gain.
+        None => captured_val,
+        // Opponent recaptures. They will only do so if it improves their position.
+        Some(recap) => captured_val - see_value(&next_board, recap, depth + 1).max(0),
     }
 }
 

@@ -16,13 +16,10 @@
       --danger: #dc2626;
       --danger-hover: #b91c1c;
       --success: #10b981;
+      --warning: #f59e0b;
     }
-    
-    * {
-      box-sizing: border-box;
-      margin: 0;
-      padding: 0;
-    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
 
     body {
       width: 320px;
@@ -83,19 +80,53 @@
       height: 8px;
       border-radius: 50%;
       background: var(--text-muted);
+      flex-shrink: 0;
     }
 
     .status-box.active .status-indicator {
       background: var(--success);
+      box-shadow: 0 0 6px rgba(16,185,129,0.6);
+      animation: pulse 1.8s ease-in-out infinite;
     }
 
-    .status-box.active {
-      border-color: rgba(16, 185, 129, 0.2);
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.5; }
     }
 
-    .control-group {
-      margin-bottom: 16px;
+    .status-box.active { border-color: rgba(16, 185, 129, 0.25); }
+
+    /* ---- Mode Toggle ---- */
+    .mode-toggle {
+      display: flex;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 7px;
+      padding: 3px;
+      gap: 3px;
     }
+
+    .mode-btn {
+      flex: 1;
+      padding: 6px 8px;
+      border: none;
+      border-radius: 5px;
+      font-family: inherit;
+      font-size: 0.75rem;
+      font-weight: 500;
+      cursor: pointer;
+      background: transparent;
+      color: var(--text-muted);
+      transition: background 0.15s, color 0.15s;
+    }
+
+    .mode-btn.active {
+      background: var(--primary);
+      color: #fff;
+    }
+
+    /* ---- Controls ---- */
+    .control-group { margin-bottom: 14px; }
 
     label {
       display: block;
@@ -105,7 +136,7 @@
       margin-bottom: 6px;
     }
 
-    select {
+    select, input[type="number"] {
       width: 100%;
       padding: 8px 12px;
       border-radius: 6px;
@@ -116,23 +147,30 @@
       font-size: 0.85rem;
       cursor: pointer;
       appearance: none;
+      transition: border-color 0.2s;
+    }
+
+    select {
       background-image: url("data:image/svg+xml;charset=UTF-8,%3csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23a3a3a3' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3e%3cpolyline points='6 9 12 15 18 9'%3e%3c/polyline%3e%3c/svg%3e");
       background-repeat: no-repeat;
       background-position: right 12px center;
       background-size: 14px;
-      transition: border-color 0.2s;
     }
 
-    select:focus {
+    input[type="number"] {
+      appearance: auto;
+      -webkit-appearance: auto;
+      cursor: default;
+    }
+
+    select:focus, input[type="number"]:focus {
       outline: none;
       border-color: var(--primary);
     }
-    
-    select option {
-      background: var(--surface);
-      color: var(--text);
-    }
 
+    select option { background: var(--surface); color: var(--text); }
+
+    /* ---- Buttons ---- */
     .btn {
       width: 100%;
       padding: 10px;
@@ -144,30 +182,73 @@
       cursor: pointer;
       color: #fff;
       background: var(--primary);
-      transition: background 0.2s;
+      transition: background 0.2s, transform 0.1s;
       margin-top: 8px;
     }
 
-    .btn:hover {
-      background: var(--primary-hover);
+    .btn:hover { background: var(--primary-hover); }
+    .btn:active { transform: scale(0.98); }
+
+    .btn.stop { display: none; background: var(--danger); }
+    .btn.stop:hover { background: var(--danger-hover); }
+
+    /* ---- Stats Panel ---- */
+    .stats-panel {
+      margin-top: 16px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      overflow: hidden;
     }
 
-    .btn.stop {
-      display: none;
-      background: var(--danger);
+    .stats-header {
+      font-size: 0.7rem;
+      font-weight: 600;
+      color: var(--text-muted);
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      padding: 8px 12px 6px;
+      border-bottom: 1px solid var(--border);
     }
 
-    .btn.stop:hover {
-      background: var(--danger-hover);
+    .stats-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 1px;
+      background: var(--border);
     }
 
+    .stat-cell {
+      background: var(--surface);
+      padding: 8px 12px;
+    }
+
+    .stat-label {
+      font-size: 0.65rem;
+      color: var(--text-muted);
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      margin-bottom: 2px;
+    }
+
+    .stat-value {
+      font-size: 0.9rem;
+      font-weight: 600;
+      color: var(--text);
+      font-variant-numeric: tabular-nums;
+    }
+
+    .stat-value.positive { color: var(--success); }
+    .stat-value.negative { color: var(--danger); }
+    .stat-value.mate { color: var(--warning); }
+
+    /* ---- Footer ---- */
     .hw-info {
       text-align: center;
-      margin-top: 16px;
+      margin-top: 12px;
       font-size: 0.7rem;
       color: var(--text-muted);
     }
-
   </style>
 </head>
 <body>
@@ -185,6 +266,16 @@
     <span id="status-text">System Standby</span>
   </div>
 
+  <!-- Engine Mode -->
+  <div class="control-group">
+    <label>Engine Mode</label>
+    <div class="mode-toggle">
+      <button class="mode-btn active" id="btn-mode-analysis">🏹 Analysis Only</button>
+      <button class="mode-btn" id="btn-mode-autoplay">🤖 Auto-Play</button>
+    </div>
+  </div>
+
+  <!-- ELO -->
   <div class="control-group">
     <label>Engine Strength (ELO)</label>
     <select id="elo-select">
@@ -199,6 +290,7 @@
     </select>
   </div>
 
+  <!-- CPU -->
   <div class="control-group">
     <label>CPU Allocation</label>
     <select id="cpu-select">
@@ -208,6 +300,7 @@
     </select>
   </div>
 
+  <!-- Hash -->
   <div class="control-group">
     <label>Transposition Table Memory</label>
     <select id="hashSize">
@@ -218,8 +311,37 @@
     </select>
   </div>
 
+  <!-- Increment -->
+  <div class="control-group">
+    <label>Time Increment (seconds)</label>
+    <input type="number" id="increment" min="0" max="60" value="0" step="1">
+  </div>
+
   <button class="btn" id="btn-start">Start Engine</button>
   <button class="btn stop" id="btn-stop">Stop Engine</button>
+
+  <!-- Analysis Stats -->
+  <div class="stats-panel">
+    <div class="stats-header">Last Analysis</div>
+    <div class="stats-grid">
+      <div class="stat-cell">
+        <div class="stat-label">Score</div>
+        <div class="stat-value" id="stat-score">—</div>
+      </div>
+      <div class="stat-cell">
+        <div class="stat-label">Depth</div>
+        <div class="stat-value" id="stat-depth">—</div>
+      </div>
+      <div class="stat-cell">
+        <div class="stat-label">Nodes</div>
+        <div class="stat-value" id="stat-nodes">—</div>
+      </div>
+      <div class="stat-cell">
+        <div class="stat-label">Time</div>
+        <div class="stat-value" id="stat-time">—</div>
+      </div>
+    </div>
+  </div>
 
   <div class="hw-info" id="hw-info">Detecting Hardware...</div>
 

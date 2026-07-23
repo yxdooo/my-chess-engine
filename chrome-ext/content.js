@@ -531,12 +531,15 @@ function processPosition(networkFen = null) {
         ponderCache = {};
 
         if (cached.bestMove) {
-            // Show the arrow first, then play the move after a brief delay
-            // so the user can see what move the engine chose.
+            // Show the arrow first, then conditionally play the move
             if (cached.pv && cached.pv.length > 0) {
                 renderArrows([cached.pv], true);
             }
-            setTimeout(() => playMove(cached.bestMove), 200);
+            chrome.storage.local.get("engineMode", (res) => {
+                if (res.engineMode === "autoplay") {
+                    setTimeout(() => playMove(cached.bestMove), 200);
+                }
+            });
         }
         return;
     }
@@ -566,9 +569,13 @@ function processPosition(networkFen = null) {
                 ponderCache[norm] = response;
             }
 
-            // Play the move if it's our turn.
+            // Play the move if it's our turn and in autoplay mode.
             if (isMyTurn && response.bestMove) {
-                playMove(response.bestMove);
+                chrome.storage.local.get("engineMode", (res) => {
+                    if (res.engineMode === "autoplay") {
+                        playMove(response.bestMove);
+                    }
+                });
             }
 
             // Collect PV lines to render as arrows.

@@ -78,6 +78,8 @@ function processSearch(message) {
     let bestOverallMove = null;
     let bestPv = [];
     let bestPonderFen = "";
+    let bestDepth = 0;
+    let totalNodes = 0;
 
     const workersToUse = Math.max(
         1,
@@ -99,12 +101,14 @@ function processSearch(message) {
 
         if (e.data.bestMove && e.data.bestMove !== "") {
             workerResults.push(e.data);
-
+            // Accumulate totals for stats reporting.
+            totalNodes += (e.data.nodes || 0);
             if (e.data.score > bestOverallScore) {
                 bestOverallScore = e.data.score;
-                bestOverallMove = e.data.bestMove;
-                bestPv = e.data.pv;
-                bestPonderFen = e.data.ponderFen;
+                bestOverallMove  = e.data.bestMove;
+                bestPv           = e.data.pv;
+                bestPonderFen    = e.data.ponderFen;
+                bestDepth        = e.data.depth || 0;
             }
         }
 
@@ -128,9 +132,13 @@ function processSearch(message) {
             if (currentSendResponse) {
                 currentSendResponse({
                     bestMove: bestOverallMove,
-                    pv: bestPv,
+                    pv:       bestPv,
                     ponderFen: bestPonderFen,
                     multiPv,
+                    score:   bestOverallScore,
+                    depth:   bestDepth,
+                    nodes:   totalNodes,
+                    timeMs:  Math.round(elapsed),
                 });
                 currentSendResponse = null;
             }
