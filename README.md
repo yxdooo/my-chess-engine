@@ -12,6 +12,7 @@
 - **Dual Modes (Analysis & Auto-Play)** – Choose between rendering best-move arrows (Analysis Mode) or letting the engine automatically play the best moves using pointer event simulation (Auto-Play Mode).
 - **Advanced Engine Heuristics** – 
   - Iterative Deepening with strict Aspiration Windows (±25cp).
+  - ProbCut (Probabilistic Cut) for deep pruning of statistically losing lines.
   - Static Exchange Evaluation (SEE) for tactical capture resolution and pruning.
   - Multi-Cut Pruning for rapid beta-cutoff detection.
   - Null Move Pruning, Reverse Futility Pruning, Razoring, and Late Move Reductions.

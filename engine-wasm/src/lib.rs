@@ -595,6 +595,19 @@ impl ChessEngine {
             }
         }
 
+        // ProbCut
+        if !is_check && depth >= 5 {
+            let prob_margin = 200;
+            let static_eval = pseudo_nnue_evaluate(board);
+            if static_eval + prob_margin >= beta {
+                let probcut_score = self.negamax(board, depth - 4, beta - 1, beta, ply.saturating_add(1));
+                if self.stop_search { return 0; }
+                if probcut_score >= beta {
+                    return beta;
+                }
+            }
+        }
+
         // Reuse the hash already computed at the top of this function.
         let mut tt_best_move = None;
         if let Some(entry) = self.tt.probe(hash, ply) {
