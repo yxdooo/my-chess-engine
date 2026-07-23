@@ -140,7 +140,7 @@ async function hasDocument() {
 function computeEngineTime(timeLeft, elo, increment = 0) {
     if (timeLeft !== null && timeLeft !== undefined) {
         // Safe target time calculation: base time fraction + majority of increment
-        const baseTime = timeLeft / 20; 
+        const baseTime = (timeLeft * 1000) / 20; 
         const incTime = increment * 1000 * 0.8;
         let targetTime = baseTime + incTime;
         
