@@ -650,3 +650,36 @@ window.addEventListener("message", (event) => {
         console.error("[Content] WebSocket message parse error:", e);
     }
 });
+
+// ---------------------------------------------------------------------------
+// Pondering Background Listener
+// ---------------------------------------------------------------------------
+chrome.runtime.onMessage.addListener((msg) => {
+    if (msg.type === "PONDER_RESULT") {
+        const response = msg.data;
+        if (response && response.cachedForFen) {
+            const norm = normalizeFen(response.cachedForFen);
+            ponderCache[norm] = response;
+            
+            // Queue premove on DOM
+            chrome.storage.local.get("engineMode", (res) => {
+                if (res.engineMode === "autoplay" && response.bestMove) {
+                    playMove(response.bestMove);
+                }
+            });
+
+            // Render arrows
+            let pvLines = [];
+            if (response.multiPv && response.multiPv.length > 0) {
+                pvLines = response.multiPv
+                    .map((m) => m.pv)
+                    .filter((p) => p && p.length > 0);
+            } else if (response.pv) {
+                pvLines = [response.pv];
+            }
+            if (pvLines.length > 0) {
+                renderArrows(pvLines, false);
+            }
+        }
+    }
+});

@@ -237,18 +237,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                                 sendResponse
                             );
                         });
-                } else {
-                    // Opponent's turn: start pondering (search opponent's position).
-                    callOffscreenEngine(
-                        message.fen,
-                        engineTime,
-                        elo,
-                        workerCount,
-                        false,
-                        message.history,
-                        hashSize,
-                        sendResponse
-                    );
                 }
             }
         );
@@ -284,31 +272,26 @@ function callOffscreenEngine(
             },
             (response) => {
                 if (chrome.runtime.lastError) {
-                    console.error(
-                        "[Background] Offscreen error:",
-                        chrome.runtime.lastError.message
-                    );
-                    sendResponse({ bestMove: null });
+                    console.error("[Background] Offscreen error:", chrome.runtime.lastError.message);
+                    if (sendResponse) sendResponse({ bestMove: null });
                     return;
                 }
 
                 if (isMyTurn) {
-                    // Persist stats for the popup stats panel.
                     if (response && response.score !== undefined) {
                         chrome.storage.local.set({
                             engineStats: {
-                                score:  response.score,
-                                depth:  response.depth,
-                                nodes:  response.nodes,
+                                score: response.score,
+                                depth: response.depth,
+                                nodes: response.nodes,
                                 timeMs: response.timeMs,
                             },
                         });
                     }
-                    sendResponse(response);
-                    return;
+                    if (sendResponse) sendResponse(response);
                 }
 
-                // Pondering: search the position after the opponent's expected move.
+                // Pondering: search the position after our expected move and the opponent's expected reply.
                 if (response && response.ponderFen) {
                     chrome.runtime.sendMessage(
                         {
@@ -322,19 +305,21 @@ function callOffscreenEngine(
                             hashSize,
                         },
                         (ponderResponse) => {
-                            if (
-                                !chrome.runtime.lastError &&
-                                ponderResponse &&
-                                sendResponse
-                            ) {
+                            if (!chrome.runtime.lastError && ponderResponse) {
                                 ponderResponse.cachedForFen = response.ponderFen;
-                                sendResponse(ponderResponse);
-                            } else {
-                                sendResponse(response);
+                                // Broadcast ponder result to all tabs
+                                chrome.tabs.query({url: ["*://*.chess.com/*", "*://*.lichess.org/*"]}, (tabs) => {
+                                    for (let tab of tabs) {
+                                        chrome.tabs.sendMessage(tab.id, {
+                                            type: "PONDER_RESULT",
+                                            data: ponderResponse
+                                        });
+                                    }
+                                });
                             }
                         }
                     );
-                } else {
+                } else if (!isMyTurn && sendResponse) {
                     sendResponse(response);
                 }
             }
