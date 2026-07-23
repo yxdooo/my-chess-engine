@@ -202,22 +202,24 @@ impl ChessEngine {
             pv.push(format!("\"{}\"", best_move.unwrap().to_string()));
         }
 
-        // Removed invalid block        let mut best_move_str = String::new();
+        let best_move_str = match best_move {
+            Some(m) => m.to_string(),
+            None => MoveGen::new_legal(&board).next().map(|m| m.to_string()).unwrap_or_default(),
+        };
+
         let mut ponder_fen = String::new();
         
         if let Some(m) = best_move {
-            best_move_str = m.to_uci();
-            let mut pv_board = board.clone();
-            pv_board.play_unchecked(&m);
+            let mut pv_board = board.make_move_new(m);
             
             // Extract the opponent's expected reply from the TT
             let hash = pv_board.get_hash();
             if let Some(entry) = self.tt.probe(hash, 0) {
                 if let Some(opp_m) = entry.best_move {
-                    pv_board.play_unchecked(&opp_m);
-                    ponder_fen = pv_board.to_string(); 
+                    pv_board = pv_board.make_move_new(opp_m);
                 }
             }
+            ponder_fen = pv_board.to_string(); 
         }
 
         let score_cp = if best_score > 20000 {
@@ -229,13 +231,13 @@ impl ChessEngine {
         };
 
         format!(
-            "{{\"bestMove\":\"{}\",\"ponderFen\":\"{}\",\"score\":{},\"depth\":{},\"nodes\":{},\"pv\":{}}}",
+            "{{\"bestMove\":\"{}\",\"ponderFen\":\"{}\",\"score\":{},\"depth\":{},\"nodes\":{},\"pv\":[{}]}}",
             best_move_str,
             ponder_fen,
             score_cp,
             depth_reached,
             self.nodes,
-            serde_json::to_string(&pv).unwrap()
+            pv.join(",")
         )
     }
 }
