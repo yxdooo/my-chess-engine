@@ -933,10 +933,6 @@ fn see_value(board: &Board, m: ChessMove) -> i32 {
     let mut attacker_val = board.piece_on(from).map_or(0, |p| piece_value_mg(p));
 
     loop {
-        d += 1;
-        if d >= 31 { break; }
-        gain[d] = attacker_val - gain[d - 1];
-
         // Find cheapest attacker for `stm`.
         let mut found_sq: Option<chess::Square> = None;
         let mut found_val = i32::MAX;
@@ -959,7 +955,11 @@ fn see_value(board: &Board, m: ChessMove) -> i32 {
             None => break, // No more attackers for this side.
         };
 
+        d += 1;
+        if d >= 31 { break; }
+        gain[d] = attacker_val - gain[d - 1];
         attacker_val = found_val;
+
         // Remove the attacker from occupied — may uncover X-ray sliders.
         occupied ^= BitBoard::from_square(attacker_sq);
         // Recompute attackers after the capture (catches X-ray).
@@ -1266,8 +1266,8 @@ mod tests {
 
     #[test]
     fn test_see_losing_capture() {
-        // QxR defended by king → queen loses material
-        let board = Board::from_str("4k3/8/8/3r4/8/8/3Q4/4K3 w - - 0 1").unwrap();
+        // QxR defended by king (king on d6 defends rook on d5) → queen loses material
+        let board = Board::from_str("8/8/3k4/3r4/8/8/3Q4/4K3 w - - 0 1").unwrap();
         let m = MoveGen::new_legal(&board)
             .find(|m| m.get_dest().to_string() == "d5")
             .expect("Queen d5 move should exist");
