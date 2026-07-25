@@ -190,6 +190,40 @@ document.addEventListener("DOMContentLoaded", () => {
     }
 
     // -----------------------------------------------------------------------
+    // Settings Live Update
+    // -----------------------------------------------------------------------
+
+    function saveAndApplySettings() {
+        const elo       = parseInt(eloSelect.value, 10);
+        const cpuMode   = cpuSelect.value;
+        const hashSize  = parseInt(hashSelect.value, 10);
+        const increment = parseInt(incrementInput.value, 10) || 0;
+        const targetWorkers = resolveWorkerCount(cpuMode);
+
+        chrome.storage.local.set({
+            elo, cpuMode, hashSize, increment, targetWorkers,
+        });
+
+        chrome.storage.local.get(["isActive"], (res) => {
+            if (res.isActive) {
+                chrome.runtime.sendMessage({
+                    type: "START_ENGINE",
+                    elo,
+                    targetWorkers,
+                    hashSize,
+                });
+                forceEvaluateActiveTab();
+            }
+        });
+    }
+
+    eloSelect.addEventListener("change", saveAndApplySettings);
+    cpuSelect.addEventListener("change", saveAndApplySettings);
+    hashSelect.addEventListener("change", saveAndApplySettings);
+    incrementInput.addEventListener("change", saveAndApplySettings);
+    incrementInput.addEventListener("input", saveAndApplySettings);
+
+    // -----------------------------------------------------------------------
     // Start / Stop
     // -----------------------------------------------------------------------
 

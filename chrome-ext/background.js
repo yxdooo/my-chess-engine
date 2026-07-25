@@ -187,7 +187,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
     if (message.type === "NEW_POSITION") {
         chrome.storage.local.get(
-            ["isActive", "elo", "targetWorkers", "hashSize"],
+            ["isActive", "elo", "targetWorkers", "hashSize", "increment"],
             (result) => {
                 if (!result.isActive) {
                     sendResponse({ bestMove: null });
