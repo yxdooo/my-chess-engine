@@ -13,24 +13,27 @@ export class ChessEngine {
     }
     /**
      * @param {string} fen
-     * @param {number} time_ms
+     * @param {number} time_limit_ms
      * @param {number} elo
      * @param {number} split_id
      * @param {number} split_count
+     * @param {string} history
      * @returns {string}
      */
-    get_best_move(fen, time_ms, elo, split_id, split_count) {
-        let deferred2_0;
-        let deferred2_1;
+    get_best_move(fen, time_limit_ms, elo, split_id, split_count, history) {
+        let deferred3_0;
+        let deferred3_1;
         try {
             const ptr0 = passStringToWasm0(fen, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
             const len0 = WASM_VECTOR_LEN;
-            const ret = wasm.chessengine_get_best_move(this.__wbg_ptr, ptr0, len0, time_ms, elo, split_id, split_count);
-            deferred2_0 = ret[0];
-            deferred2_1 = ret[1];
+            const ptr1 = passStringToWasm0(history, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+            const len1 = WASM_VECTOR_LEN;
+            const ret = wasm.chessengine_get_best_move(this.__wbg_ptr, ptr0, len0, time_limit_ms, elo, split_id, split_count, ptr1, len1);
+            deferred3_0 = ret[0];
+            deferred3_1 = ret[1];
             return getStringFromWasm0(ret[0], ret[1]);
         } finally {
-            wasm.__wbindgen_free(deferred2_0, deferred2_1, 1);
+            wasm.__wbindgen_free(deferred3_0, deferred3_1, 1);
         }
     }
     constructor() {
@@ -38,6 +41,12 @@ export class ChessEngine {
         this.__wbg_ptr = ret;
         ChessEngineFinalization.register(this, this.__wbg_ptr, this);
         return this;
+    }
+    /**
+     * @param {number} mb
+     */
+    set_hash_size(mb) {
+        wasm.chessengine_set_hash_size(this.__wbg_ptr, mb);
     }
 }
 if (Symbol.dispose) ChessEngine.prototype[Symbol.dispose] = ChessEngine.prototype.free;

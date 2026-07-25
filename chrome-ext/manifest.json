@@ -15,11 +15,6 @@
         "offscreen",
         "tabs"
     ],
-    "offscreen": {
-        "reasons": ["WORKERS"],
-        "justification": "Spawn Web Workers to run the WASM chess engine across multiple CPU cores (Lazy SMP).",
-        "urls": ["offscreen.html"]
-    },
     "host_permissions": [
         "*://*.chess.com/*",
         "*://*.lichess.org/*",

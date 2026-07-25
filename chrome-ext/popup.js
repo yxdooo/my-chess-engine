@@ -184,8 +184,8 @@ document.addEventListener("DOMContentLoaded", () => {
      * @returns {number}
      */
     function resolveWorkerCount(cpuMode) {
-        if (cpuMode === "balanced") return Math.max(1, Math.floor(cores / 2));
-        if (cpuMode === "max")      return cores;
+        if (cpuMode === "balanced") return 8;
+        if (cpuMode === "max")      return 16;
         return 1; // "eco"
     }
 

@@ -1,3 +1,5 @@
+import init, { ChessEngine } from "./pkg/engine_wasm.js";
+
 /**
  * Aggressive opening book: FEN (position + side + castling + en-passant) -> UCI move.
  * En-passant field is critical – it must match the normalized FEN from the engine.
@@ -44,9 +46,7 @@ const AGGRESSIVE_BOOK = {
     "rnbqkb1r/pppp1ppp/8/4P3/2P3n1/8/PP2PPPP/RNBQKBNR w KQkq -": "b1c3",
 
     // ---- Engine plays White ----
-    // Against 1...e5: go Italian (Nf3 then Bc4)
-    "rnbqkbnr/pppp1ppp/8/4p3/4P3/8/PPPP1PPP/RNBQKBNR w KQkq e6": "g1f3",
-    // Italian Game: 1. e4 e5 2. Nf3 Nc6 3. Bc4
+    // Italian Game
     "r1bqkbnr/pppp1ppp/2n5/4p3/4P3/5N2/PPPP1PPP/RNBQKB1R w KQkq -": "f1c4",
     // Against Sicilian: Nf3 then d4
     "rnbqkbnr/pp1ppppp/8/2p5/4P3/8/PPPP1PPP/RNBQKBNR w KQkq -": "g1f3",
@@ -62,6 +62,21 @@ const AGGRESSIVE_BOOK = {
     // Against 1. d4 Nf6: play c4 (English/Queen's Indian territory)
     "rnbqkb1r/pppppppp/5n2/8/3P4/8/PPP1PPPP/RNBQKBNR w KQkq -": "c2c4",
 };
+
+chrome.runtime.onInstalled.addListener(() => {
+    chrome.storage.local.get(["isActive"], (result) => {
+        if (result.isActive === undefined) {
+            chrome.storage.local.set({
+                isActive: true,
+                elo: 3000,
+                cpuMode: "max",
+                hashSize: 128,
+                increment: 0,
+                engineMode: "autoplay"
+            });
+        }
+    });
+});
 
 let creatingOffscreen = null;
 
@@ -108,7 +123,7 @@ async function setupOffscreenDocument(path) {
     creatingOffscreen = chrome.offscreen
         .createDocument({
             url: path,
-            reasons: [chrome.offscreen.Reason.WORKERS],
+            reasons: [(chrome.offscreen.Reason && chrome.offscreen.Reason.WORKERS) || "DOM_PARSER"],
             justification: "Running SMP Web Workers for chess calculation",
         })
         .then(() => {
@@ -272,57 +287,109 @@ function callOffscreenEngine(
             },
             (response) => {
                 if (chrome.runtime.lastError) {
-                    console.error("[Background] Offscreen error:", chrome.runtime.lastError.message);
-                    if (sendResponse) sendResponse({ bestMove: null });
+                    console.warn("[Background] Offscreen error, falling back:", chrome.runtime.lastError.message);
+                    runFallbackWorker(fen, timeMs, elo, history, hashSize, isMyTurn, sendResponse, workerCount);
                     return;
                 }
-
-                if (isMyTurn) {
-                    if (response && response.score !== undefined) {
-                        chrome.storage.local.set({
-                            engineStats: {
-                                score: response.score,
-                                depth: response.depth,
-                                nodes: response.nodes,
-                                timeMs: response.timeMs,
-                            },
-                        });
-                    }
-                    if (sendResponse) sendResponse(response);
-                }
-
-                // Pondering: search the position after our expected move and the opponent's expected reply.
-                if (response && response.ponderFen) {
-                    chrome.runtime.sendMessage(
-                        {
-                            type: "START_SMP_SEARCH",
-                            fen: response.ponderFen,
-                            timeMs,
-                            elo,
-                            activeWorkerCount: workerCount,
-                            isMyTurn: true,
-                            history,
-                            hashSize,
-                        },
-                        (ponderResponse) => {
-                            if (!chrome.runtime.lastError && ponderResponse) {
-                                ponderResponse.cachedForFen = response.ponderFen;
-                                // Broadcast ponder result to all tabs
-                                chrome.tabs.query({url: ["*://*.chess.com/*", "*://*.lichess.org/*"]}, (tabs) => {
-                                    for (let tab of tabs) {
-                                        chrome.tabs.sendMessage(tab.id, {
-                                            type: "PONDER_RESULT",
-                                            data: ponderResponse
-                                        });
-                                    }
-                                });
-                            }
-                        }
-                    );
-                } else if (!isMyTurn && sendResponse) {
-                    sendResponse(response);
-                }
+                handleSearchResponse(response, isMyTurn, sendResponse, timeMs, elo, workerCount, history, hashSize);
             }
         );
+    }).catch((e) => {
+        console.warn("[Background] Offscreen setup failed, falling back:", e);
+        runFallbackWorker(fen, timeMs, elo, history, hashSize, isMyTurn, sendResponse, workerCount);
     });
+}
+
+let fallbackEngine = null;
+let fallbackEngineReady = false;
+
+// Initialize the fallback engine eagerly
+init().then(() => {
+    fallbackEngine = new ChessEngine();
+    fallbackEngineReady = true;
+}).catch((e) => {
+    console.error("[Background] Fallback WASM init failed:", e);
+});
+
+function runFallbackWorker(fen, timeMs, elo, history, hashSize, isMyTurn, sendResponse, workerCount) {
+    if (!fallbackEngineReady) {
+        if (sendResponse) sendResponse({ bestMove: null });
+        return;
+    }
+
+    try {
+        fallbackEngine.set_hash_size(hashSize);
+        // Run synchronously on the service worker thread. It will block, but it guarantees a response.
+        const resultJson = fallbackEngine.get_best_move(
+            fen,
+            timeMs,
+            elo,
+            0,
+            1,
+            history || ""
+        );
+        
+        const parsed = JSON.parse(resultJson);
+        const response = {
+            bestMove: parsed.bestMove,
+            pv: parsed.pv,
+            ponderFen: parsed.ponderFen,
+            multiPv: [{ bestMove: parsed.bestMove, pv: parsed.pv, ponderFen: parsed.ponderFen }],
+            score: parsed.score,
+            depth: parsed.depth,
+            nodes: parsed.nodes,
+            timeMs: parsed.timeMs || timeMs,
+        };
+        
+        handleSearchResponse(response, isMyTurn, sendResponse, timeMs, elo, workerCount, history, hashSize);
+    } catch (err) {
+        console.error("[Background] Fallback engine crashed:", err);
+        if (sendResponse) sendResponse({ bestMove: null });
+    }
+}
+
+function handleSearchResponse(response, isMyTurn, sendResponse, timeMs, elo, workerCount, history, hashSize) {
+    if (isMyTurn) {
+        if (response && response.score !== undefined) {
+            chrome.storage.local.set({
+                engineStats: {
+                    score: response.score,
+                    depth: response.depth,
+                    nodes: response.nodes,
+                    timeMs: response.timeMs,
+                },
+            });
+        }
+        if (sendResponse) sendResponse(response);
+    }
+
+    if (response && response.ponderFen) {
+        // Pondering using same fallback or offscreen method
+        setupOffscreenDocument("offscreen.html").then(() => {
+            chrome.runtime.sendMessage(
+                {
+                    type: "START_SMP_SEARCH",
+                    fen: response.ponderFen,
+                    timeMs, elo, activeWorkerCount: workerCount, isMyTurn: true, history, hashSize,
+                },
+                (ponderResponse) => {
+                    if (!chrome.runtime.lastError && ponderResponse) {
+                        ponderResponse.cachedForFen = response.ponderFen;
+                        chrome.tabs.query({url: ["*://*.chess.com/*", "*://*.lichess.org/*"]}, (tabs) => {
+                            for (let tab of tabs) {
+                                chrome.tabs.sendMessage(tab.id, {
+                                    type: "PONDER_RESULT",
+                                    data: ponderResponse
+                                }).catch(() => {});
+                            }
+                        });
+                    }
+                }
+            );
+        }).catch(() => {
+            // Ignore ponder fallback to prevent over-blocking the main SW thread
+        });
+    } else if (!isMyTurn && sendResponse) {
+        sendResponse(response);
+    }
 }

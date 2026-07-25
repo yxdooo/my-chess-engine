@@ -14,6 +14,9 @@ let workers = [];
 /** @type {number} Count of workers that have reported READY. */
 let workersReady = 0;
 
+/** @type {number} Target number of workers to spawn. */
+let currentWorkerCount = 1;
+
 /** @type {object|null} Queued search message waiting for workers to be ready. */
 let messageQueue = null;
 
@@ -28,14 +31,15 @@ let activeHashSize = 128;
 // ---------------------------------------------------------------------------
 
 /**
- * Spawns MAX_WORKERS fresh worker threads and waits for all to report READY.
+ * Spawns workerCount fresh worker threads and waits for all to report READY.
  * After all workers are ready, processes any queued search message.
  */
-function initWorkers() {
+function initWorkers(workerCount) {
+    currentWorkerCount = workerCount;
     workersReady = 0;
     workers = [];
 
-    for (let i = 0; i < MAX_WORKERS; i++) {
+    for (let i = 0; i < workerCount; i++) {
         try {
             const worker = new Worker("worker.js", { type: "module" });
 
@@ -46,7 +50,7 @@ function initWorkers() {
                         size: activeHashSize,
                     });
                     workersReady++;
-                    if (workersReady === MAX_WORKERS && messageQueue) {
+                    if (workersReady === currentWorkerCount && messageQueue) {
                         processSearch(messageQueue);
                     }
                 }
@@ -55,7 +59,18 @@ function initWorkers() {
             workers.push(worker);
         } catch (e) {
             console.error("[Offscreen] Worker spawn failed:", e);
+            // If spawning fails, adjust the expected count to prevent hanging
+            currentWorkerCount--;
+            if (workersReady === currentWorkerCount && messageQueue && currentWorkerCount > 0) {
+                processSearch(messageQueue);
+            }
         }
+    }
+    
+    // If NO workers spawned successfully (e.g. Chrome block), send a fallback
+    if (currentWorkerCount === 0 && currentSendResponse) {
+        currentSendResponse({ bestMove: null });
+        currentSendResponse = null;
     }
 }
 
@@ -194,10 +209,10 @@ function startEngineSearch(message, sendResponse) {
     if (message.hashSize) activeHashSize = message.hashSize;
 
     // Respawn fresh worker pool (~5 ms overhead).
-    initWorkers();
+    initWorkers(message.activeWorkerCount || 4);
 }
 
 // ---------------------------------------------------------------------------
 // Initial Worker Pool
 // ---------------------------------------------------------------------------
-initWorkers();
+initWorkers(4);
