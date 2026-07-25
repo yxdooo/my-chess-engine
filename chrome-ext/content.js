@@ -426,12 +426,21 @@ function parseBoard() {
  * @returns {number|null} Seconds remaining, or null if not found.
  */
 function getMyTimeLeft() {
-    const activeClock = document.querySelector(
-        ".clock-component.clock-active, .clock-time-monospaced"
+    let myClock = document.querySelector(
+        ".clock-bottom .clock-time-monospaced, .clock-bottom.clock-component, [data-cy='clock-bottom'] .clock-time-monospaced, .clock-bottom, #board-layout-player-bottom .clock-time-monospaced"
     );
-    if (!activeClock) return null;
+    if (!myClock) {
+        // Fallback: if multiple clocks exist in DOM, we are always the bottom (last) clock!
+        const allClocks = document.querySelectorAll(".clock-component .clock-time-monospaced, .clock-component, .clock-time-monospaced");
+        if (allClocks && allClocks.length >= 2) {
+            myClock = allClocks[allClocks.length - 1];
+        } else if (allClocks && allClocks.length === 1) {
+            myClock = allClocks[0];
+        }
+    }
+    if (!myClock) return null;
 
-    const text = activeClock.innerText.trim();
+    const text = myClock.innerText.trim();
     try {
         if (text.includes(":")) {
             const parts = text.split(":");
@@ -571,13 +580,6 @@ function processPosition(networkFen = null) {
 
             // Play the move if it's our turn and in autoplay mode.
             if (isMyTurn && response.bestMove) {
-                chrome.storage.local.get("engineMode", (res) => {
-                    if (res.engineMode === "autoplay") {
-                        playMove(response.bestMove);
-                    }
-                });
-            } else if (!isMyTurn && response.bestMove) {
-                // PREMOVE logic: queue the ponder move on the DOM
                 chrome.storage.local.get("engineMode", (res) => {
                     if (res.engineMode === "autoplay") {
                         playMove(response.bestMove);
