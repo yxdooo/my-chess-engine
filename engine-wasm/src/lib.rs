@@ -63,7 +63,9 @@ impl ChessEngine {
         self.nodes = 0;
         self.stop_search = false;
         self.time_limit_ms = time_limit_ms;
-        self.hard_time_limit_ms = time_limit_ms * 3.0;
+        // Hard limit: absolute ceiling — check_time() stops the search when this is exceeded.
+        // 1.5x gives enough buffer for one extra depth without letting the search run wild.
+        self.hard_time_limit_ms = time_limit_ms * 1.5;
         self.elo = elo as u32;
         // Bump generation every search so old TT entries are more aggressively replaced.
         self.search_generation = self.search_generation.wrapping_add(1);
@@ -752,11 +754,9 @@ impl ChessEngine {
             let mut score;
             
             // Genuine Singular Extension:
-            // If TT says this move is the "only good" move at this position
-            // (i.e. all other moves fail low under tt_score - margin at reduced depth),
-            // extend it by 1 ply.
+            // Only at depth >= 10 to avoid expensive mini-searches on shallow nodes.
             let mut extension = 0u8;
-            if depth >= 8
+            if depth >= 10
                 && Some(m) == tt_best_move
                 && tt_depth_for_singular >= depth.saturating_sub(3)
                 && moves_evaluated == 0

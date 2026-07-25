@@ -165,10 +165,11 @@ function computeEngineTime(timeLeft, elo, increment = 0) {
         
         return Math.floor(targetTime);
     }
-    // No clock info – use ELO-based fallback
+    // No clock info (bot games, analysis) – use ELO-based fallback
     if (elo < 1000) return 300;
     if (elo < 2000) return 1000;
-    return 2500;
+    if (elo < 3000) return 2000;
+    return 3000; // God Mode: 3 seconds max
 }
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
