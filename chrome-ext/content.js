@@ -606,15 +606,38 @@ function processPosition(networkFen = null) {
 // MutationObserver – watch for DOM changes (chess.com)
 // ---------------------------------------------------------------------------
 
-const observer = new MutationObserver(() => {
-    clearTimeout(debounceTimer);
-    debounceTimer = setTimeout(processPosition, 400);
-});
+let activeObserver = null;
+function setupObserver() {
+    if (activeObserver) activeObserver.disconnect();
+    activeObserver = new MutationObserver(() => {
+        clearTimeout(debounceTimer);
+        debounceTimer = setTimeout(() => processPosition(), 200);
+    });
 
-observer.observe(document.body, { childList: true, subtree: true });
+    const board = document.querySelector("wc-chess-board, .board, #board-single");
+    const moveList = document.querySelector("wc-move-list, .move-list-container, .vertical-move-list");
+    
+    if (board) {
+        activeObserver.observe(board, { childList: true, subtree: true, attributes: true, attributeFilter: ["class", "style"] });
+    }
+    if (moveList) {
+        activeObserver.observe(moveList, { childList: true, subtree: true });
+    }
+    if (!board && !moveList) {
+        // Fallback if board not rendered yet
+        activeObserver.observe(document.body, { childList: true });
+    }
+}
+
+setupObserver();
+// Periodically re-check and attach to board if navigation occurred or SPA page updated
+setInterval(() => {
+    setupObserver();
+    processPosition();
+}, 2500);
 
 // Initial analysis after the board has had time to render.
-setTimeout(processPosition, 1000);
+setTimeout(() => processPosition(), 1000);
 
 // Force re-evaluation on demand (triggered by popup when engine is started).
 chrome.runtime.onMessage.addListener((msg) => {

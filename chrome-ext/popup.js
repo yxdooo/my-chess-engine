@@ -184,8 +184,9 @@ document.addEventListener("DOMContentLoaded", () => {
      * @returns {number}
      */
     function resolveWorkerCount(cpuMode) {
-        if (cpuMode === "balanced") return 8;
-        if (cpuMode === "max")      return 16;
+        const cores = navigator.hardwareConcurrency || 4;
+        if (cpuMode === "balanced") return Math.max(1, Math.floor(cores / 2));
+        if (cpuMode === "max")      return Math.max(1, cores - 1); // Leave 1 core free for browser UI & OS!
         return 1; // "eco"
     }
 
