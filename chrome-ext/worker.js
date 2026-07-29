@@ -16,7 +16,7 @@ onmessage = async (e) => {
 
     if (type === "INIT") {
         try {
-            await init({ module_or_path: new URL('./pkg/engine_wasm_bg.wasm', import.meta.url), memory });
+            await init({ module_or_path: new URL('./pkg/engine_wasm_bg.wasm', import.meta.url) });
             engine = new ChessEngine();
             postMessage({ type: "READY" });
         } catch (err) {

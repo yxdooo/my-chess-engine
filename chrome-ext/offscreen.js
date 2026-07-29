@@ -8,8 +8,6 @@
 
 const MAX_WORKERS = 16;
 
-const sharedWasmMemory = new WebAssembly.Memory({ initial: 2048, maximum: 16384, shared: true });
-
 /** @type {Worker[]} The active worker pool. */
 let workers = [];
 
@@ -46,7 +44,7 @@ function initWorkers(workerCount) {
     for (let i = initialLength; i < workerCount; i++) {
         try {
             const worker = new Worker("worker.js", { type: "module" });
-            worker.postMessage({ type: "INIT", memory: sharedWasmMemory });
+            worker.postMessage({ type: "INIT" });
 
             worker.onmessage = (e) => {
                 if (e.data.type === "READY") {
