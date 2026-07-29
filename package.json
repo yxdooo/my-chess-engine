@@ -18,7 +18,7 @@
     "url": "https://github.com/yxdooo/my-chess-engine/issues"
   },
   "homepage": "https://github.com/yxdooo/my-chess-engine#readme",
-  "dependencies": {
-    "javascript-obfuscator": "^5.5.0"
+  "devDependencies": {
+    "esbuild": "^0.28.1"
   }
 }

@@ -8,6 +8,8 @@
 
 const MAX_WORKERS = 16;
 
+const sharedWasmMemory = new WebAssembly.Memory({ initial: 2048, maximum: 16384, shared: true });
+
 /** @type {Worker[]} The active worker pool. */
 let workers = [];
 
@@ -26,6 +28,9 @@ let currentSendResponse = null;
 /** @type {number} Current transposition table size in MB. */
 let activeHashSize = 128;
 
+let abortFlag = null;
+let currentSearchId = 0;
+
 // ---------------------------------------------------------------------------
 // Worker Pool Management
 // ---------------------------------------------------------------------------
@@ -36,22 +41,22 @@ let activeHashSize = 128;
  */
 function initWorkers(workerCount) {
     currentWorkerCount = workerCount;
-    workersReady = 0;
-    workers = [];
 
-    for (let i = 0; i < workerCount; i++) {
+    const initialLength = workers.length;
+    for (let i = initialLength; i < workerCount; i++) {
         try {
             const worker = new Worker("worker.js", { type: "module" });
+            worker.postMessage({ type: "INIT", memory: sharedWasmMemory });
 
             worker.onmessage = (e) => {
                 if (e.data.type === "READY") {
                     worker.postMessage({
                         type: "SET_HASH_SIZE",
-                        size: activeHashSize,
+                        size: Math.max(1, Math.floor(activeHashSize / currentWorkerCount)),
                     });
                     workersReady++;
                     if (workersReady === currentWorkerCount && messageQueue) {
-                        processSearch(messageQueue);
+                        processSearch(messageQueue, currentSearchId, abortFlag);
                     }
                 }
             };
@@ -62,7 +67,7 @@ function initWorkers(workerCount) {
             // If spawning fails, adjust the expected count to prevent hanging
             currentWorkerCount--;
             if (workersReady === currentWorkerCount && messageQueue && currentWorkerCount > 0) {
-                processSearch(messageQueue);
+                processSearch(messageQueue, currentSearchId, abortFlag);
             }
         }
     }
@@ -84,8 +89,10 @@ function initWorkers(workerCount) {
  * The result with the highest score is selected as the overall best.
  *
  * @param {object} message - The START_SMP_SEARCH message payload.
+ * @param {number} searchId - The unique search ID.
+ * @param {Uint8Array} abortFlag - Shared array buffer for aborting.
  */
-function processSearch(message) {
+function processSearch(message, searchId, abortFlag) {
     messageQueue = null;
     const startTime = performance.now();
     let completed = 0;
@@ -110,7 +117,7 @@ function processSearch(message) {
      * @param {MessageEvent} e
      */
     const onWorkerResult = (e) => {
-        if (e.data.type !== "RESULT") return;
+        if (e.data.type !== "RESULT" || e.data.searchId !== searchId) return;
 
         completed++;
 
@@ -128,9 +135,6 @@ function processSearch(message) {
         }
 
         if (completed === workersToUse) {
-            // Detach handlers to prevent stale callbacks on next search.
-            for (const w of activeWorkers) w.onmessage = null;
-
             const elapsed = (performance.now() - startTime).toFixed(0);
             console.log(
                 `[Offscreen] SMP-${workersToUse} finished in ${elapsed}ms. Best: ${bestOverallMove}`
@@ -170,6 +174,8 @@ function processSearch(message) {
             splitId: i,
             splitCount: workersToUse,
             history: message.history || "",
+            searchId: searchId,
+            abortFlag: abortFlag,
         });
     }
 }
@@ -194,10 +200,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
  * @param {Function} sendResponse - Chrome messaging response callback.
  */
 function startEngineSearch(message, sendResponse) {
-    // Terminate all running workers to cancel any in-progress WASM search.
-    for (const w of workers) w.terminate();
+    // Gracefully abort any running search.
+    if (abortFlag) {
+        abortFlag[0] = 1;
+    }
 
-    // Reject the previous pending response if one exists.
+    currentSearchId++;
+
     if (currentSendResponse) {
         currentSendResponse({ bestMove: null });
         currentSendResponse = null;
@@ -205,11 +214,28 @@ function startEngineSearch(message, sendResponse) {
 
     messageQueue = message;
     currentSendResponse = sendResponse;
-
     if (message.hashSize) activeHashSize = message.hashSize;
 
-    // Respawn fresh worker pool (~5 ms overhead).
-    initWorkers(message.activeWorkerCount || 4);
+    const targetWorkers = message.activeWorkerCount || 4;
+    
+    // Allocate new abort flag using SharedArrayBuffer
+    try {
+        const sab = new SharedArrayBuffer(1);
+        abortFlag = new Uint8Array(sab);
+    } catch (e) {
+        // Fallback if SAB is disabled: must terminate and recreate workers
+        console.warn("SharedArrayBuffer not available, recreating workers to abort");
+        abortFlag = null;
+        for (const worker of workers) worker.terminate();
+        workers = [];
+        workersReady = 0;
+    }
+
+    if (targetWorkers > workers.length) {
+        initWorkers(targetWorkers);
+    } else {
+        processSearch(message, currentSearchId, abortFlag);
+    }
 }
 
 // ---------------------------------------------------------------------------

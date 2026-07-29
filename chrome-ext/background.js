@@ -1,4 +1,4 @@
-import init, { ChessEngine } from "./pkg/engine_wasm.js";
+
 
 /**
  * Aggressive opening book: FEN (position + side + castling + en-passant) -> UCI move.
@@ -79,6 +79,10 @@ chrome.runtime.onInstalled.addListener(() => {
     });
 });
 
+let engineActive = false;
+let globalTimeLimit = 3000;
+let globalHashSize = 32;
+
 let creatingOffscreen = null;
 
 /**
@@ -100,12 +104,10 @@ const normalizeFen = (fen) => {
  * @returns {Promise<Response>}
  */
 const fetchWithTimeout = (url, options, timeout = 1500) => {
-    return Promise.race([
-        fetch(url, options),
-        new Promise((_, reject) =>
-            setTimeout(() => reject(new Error("timeout")), timeout)
-        ),
-    ]);
+    const controller = new AbortController();
+    const id = setTimeout(() => controller.abort(), timeout);
+    return fetch(url, { ...options, signal: controller.signal })
+        .finally(() => clearTimeout(id));
 };
 
 /**
@@ -113,30 +115,42 @@ const fetchWithTimeout = (url, options, timeout = 1500) => {
  * @param {string} path
  */
 async function setupOffscreenDocument(path) {
-    if (await hasDocument()) return;
-
     if (creatingOffscreen) {
-        // Another call is already in progress – wait for it.
         await creatingOffscreen;
         return;
     }
 
-    creatingOffscreen = chrome.offscreen
-        .createDocument({
+    creatingOffscreen = (async () => {
+        if (await hasDocument()) return;
+        
+        await chrome.offscreen.createDocument({
             url: path,
             reasons: [(chrome.offscreen.Reason && chrome.offscreen.Reason.WORKERS) || "DOM_PARSER"],
             justification: "Running SMP Web Workers for chess calculation",
-        })
-        .then(() => {
-            // Wait for the document to spawn and register its listeners.
-            return new Promise((r) => setTimeout(r, 150));
-        })
-        .finally(() => {
-            creatingOffscreen = null;
         });
+        
+        // Wait for the document to spawn and register its listeners.
+        await new Promise((r) => setTimeout(r, 150));
+    })();
 
-    await creatingOffscreen;
+    try {
+        await creatingOffscreen;
+    } finally {
+        creatingOffscreen = null;
+    }
 }
+
+function resetOffscreenIdleTimeout() {
+    chrome.alarms.create("closeOffscreen", { delayInMinutes: 5 });
+}
+
+chrome.alarms.onAlarm.addListener(async (alarm) => {
+    if (alarm.name === "closeOffscreen") {
+        if (await hasDocument()) {
+            chrome.offscreen.closeDocument();
+        }
+    }
+});
 
 /**
  * Returns true if an offscreen document with offscreen.html is already open.
@@ -196,7 +210,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                 }
 
                 const elo = result.elo || 3000;
-                const workerCount  = result.targetWorkers || Math.max(1, (navigator.hardwareConcurrency || 4) - 1);
+                const workerCount  = Math.min(8, Math.max(1, result.targetWorkers || ((navigator.hardwareConcurrency || 4) - 1)));
                 const hashSize     = result.hashSize || 128;
                 const increment    = result.increment || 0;
                 const engineTime   = computeEngineTime(message.timeLeft, elo, increment);
@@ -275,6 +289,7 @@ function callOffscreenEngine(
     hashSize,
     sendResponse
 ) {
+    resetOffscreenIdleTimeout();
     setupOffscreenDocument("offscreen.html").then(() => {
         chrome.runtime.sendMessage(
             {
@@ -302,51 +317,107 @@ function callOffscreenEngine(
     });
 }
 
-let fallbackEngine = null;
-let fallbackEngineReady = false;
-
-// Initialize the fallback engine eagerly
-init().then(() => {
-    fallbackEngine = new ChessEngine();
-    fallbackEngineReady = true;
-}).catch((e) => {
-    console.error("[Background] Fallback WASM init failed:", e);
-});
+let fallbackWorker = null;
+let fallbackWorkerReady = false;
+let fallbackAbortFlag = null;
+let currentFallbackSearchId = 0;
 
 function runFallbackWorker(fen, timeMs, elo, history, hashSize, isMyTurn, sendResponse, workerCount) {
-    if (!fallbackEngineReady) {
-        if (sendResponse) sendResponse({ bestMove: null });
-        return;
+    let sabSupported = false;
+    try {
+        new SharedArrayBuffer(1);
+        sabSupported = true;
+    } catch (e) {
+        sabSupported = false;
     }
 
-    try {
-        fallbackEngine.set_hash_size(hashSize);
-        // Run synchronously on the service worker thread. It will block, but it guarantees a response.
-        const resultJson = fallbackEngine.get_best_move(
-            fen,
-            timeMs,
-            elo,
-            0,
-            1,
-            history || ""
-        );
-        
-        const parsed = JSON.parse(resultJson);
-        const response = {
-            bestMove: parsed.bestMove,
-            pv: parsed.pv,
-            ponderFen: parsed.ponderFen,
-            multiPv: [{ bestMove: parsed.bestMove, pv: parsed.pv, ponderFen: parsed.ponderFen }],
-            score: parsed.score,
-            depth: parsed.depth,
-            nodes: parsed.nodes,
-            timeMs: parsed.timeMs || timeMs,
-        };
-        
-        handleSearchResponse(response, isMyTurn, sendResponse, timeMs, elo, workerCount, history, hashSize);
-    } catch (err) {
-        console.error("[Background] Fallback engine crashed:", err);
+    if (fallbackWorker) {
+        if (!sabSupported) {
+            fallbackWorker.terminate();
+            fallbackWorker = null;
+            fallbackWorkerReady = false;
+        } else if (fallbackAbortFlag) {
+            fallbackAbortFlag[0] = 1;
+        }
+    }
+
+    if (sabSupported) {
+        fallbackAbortFlag = new Uint8Array(new SharedArrayBuffer(1));
+    } else {
+        fallbackAbortFlag = null;
+    }
+
+    currentFallbackSearchId++;
+    const searchId = currentFallbackSearchId;
+
+    if (!fallbackWorker) {
+        fallbackWorker = new Worker("worker.js", { type: "module" });
+        if (sabSupported) {
+            const fallbackMemory = new WebAssembly.Memory({ initial: 2048, maximum: 16384, shared: true });
+            fallbackWorker.postMessage({ type: "INIT", memory: fallbackMemory });
+        } else {
+            fallbackWorker.postMessage({ type: "INIT" });
+        }
+        fallbackWorkerReady = false;
+    }
+
+    fallbackWorker.onmessage = (e) => {
+        if (e.data.type === "READY") {
+            fallbackWorkerReady = true;
+            fallbackWorker.postMessage({
+                type: "SET_HASH_SIZE",
+                size: hashSize
+            });
+            fallbackWorker.postMessage({
+                type: "SEARCH",
+                fen, timeMs, elo,
+                splitId: 0,
+                splitCount: 1,
+                history: history || "",
+                abortFlag: fallbackAbortFlag,
+                searchId: searchId
+            });
+        } else if (e.data.type === "SEARCH_RESULT") {
+            if (e.data.searchId !== undefined && e.data.searchId !== searchId) return;
+            const parsed = e.data.data;
+            const response = {
+                bestMove: parsed.bestMove,
+                pv: parsed.pv,
+                ponderFen: parsed.ponderFen,
+                multiPv: [{ bestMove: parsed.bestMove, pv: parsed.pv, ponderFen: parsed.ponderFen }],
+                score: parsed.score,
+                depth: parsed.depth,
+                nodes: parsed.nodes,
+                timeMs: parsed.timeMs || timeMs,
+            };
+            handleSearchResponse(response, isMyTurn, sendResponse, timeMs, elo, workerCount, history, hashSize);
+        }
+    };
+    
+    fallbackWorker.onerror = (err) => {
+        console.error("[Background] Fallback worker crashed:", err);
         if (sendResponse) sendResponse({ bestMove: null });
+        if (fallbackWorker) {
+            fallbackWorker.terminate();
+            fallbackWorker = null;
+            fallbackWorkerReady = false;
+        }
+    };
+
+    if (fallbackWorkerReady) {
+        fallbackWorker.postMessage({
+            type: "SET_HASH_SIZE",
+            size: hashSize
+        });
+        fallbackWorker.postMessage({
+            type: "SEARCH",
+            fen, timeMs, elo,
+            splitId: 0,
+            splitCount: 1,
+            history: history || "",
+            abortFlag: fallbackAbortFlag,
+            searchId: searchId
+        });
     }
 }
 
@@ -367,6 +438,7 @@ function handleSearchResponse(response, isMyTurn, sendResponse, timeMs, elo, wor
 
     if (response && response.ponderFen) {
         // Pondering using same fallback or offscreen method
+        resetOffscreenIdleTimeout();
         setupOffscreenDocument("offscreen.html").then(() => {
             chrome.runtime.sendMessage(
                 {

@@ -20,6 +20,19 @@ let flipBoard = false;
 /** @type {number|null} Debounce timer ID for MutationObserver. */
 let debounceTimer = null;
 
+/** @type {string} Cached engine mode. */
+let currentEngineMode = "autoplay";
+
+chrome.storage.local.get("engineMode", (res) => {
+    if (res.engineMode) currentEngineMode = res.engineMode;
+});
+
+chrome.storage.onChanged.addListener((changes, area) => {
+    if (area === "local" && changes.engineMode) {
+        currentEngineMode = changes.engineMode.newValue;
+    }
+});
+
 /**
  * Normalizes a FEN string to its first 4 fields
  * (position, side-to-move, castling, en-passant).
@@ -56,9 +69,15 @@ function initOverlay() {
         boardEl.appendChild(overlayCanvas);
     }
 
-    flipBoard = boardEl.classList.contains("flipped");
-    overlayCanvas.width = boardEl.clientWidth;
-    overlayCanvas.height = boardEl.clientHeight;
+    const isFlipped = boardEl.classList.contains("flipped");
+    const boardWidth = boardEl.clientWidth;
+    const boardHeight = boardEl.clientHeight;
+
+    if (overlayCanvas.width !== boardWidth || overlayCanvas.height !== boardHeight || flipBoard !== isFlipped) {
+        flipBoard = isFlipped;
+        overlayCanvas.width = boardWidth;
+        overlayCanvas.height = boardHeight;
+    }
 }
 
 /**
@@ -258,18 +277,39 @@ function playMove(uci) {
     const from = squareToViewport(fromFile, fromRank);
     const to   = squareToViewport(toFile, toRank);
 
-    // Step 1: Click source square (piece selection)
-    simulateClick(from.x, from.y);
-
-    // Step 2: Click destination square after a short delay (natural timing)
+    // Step 1: Click source square (piece selection) with reaction delay
+    const reactionDelay = 200 + Math.floor(Math.random() * 300);
     setTimeout(() => {
-        simulateClick(to.x, to.y);
+        const boardElNow = document.querySelector("wc-chess-board, chess-board, cg-board");
+        if (!boardElNow) return;
+        const rectNow = boardElNow.getBoundingClientRect();
+        const sqSizeNow = rectNow.width / 8;
+        const fromNow = {
+            x: rectNow.left + (flipBoard ? 7 - fromFile : fromFile + 0.5) * sqSizeNow,
+            y: rectNow.top + (flipBoard ? fromRank : 7 - fromRank + 0.5) * sqSizeNow
+        };
+        simulateClick(fromNow.x, fromNow.y);
 
-        // Step 3: Handle promotion modal if needed
-        if (promotionChar) {
-            setTimeout(() => selectPromotion(promotionChar), 150);
-        }
-    }, 80);
+        // Step 2: Click destination square after a short delay (natural timing with jitter)
+        const delay = 150 + Math.floor(Math.random() * 200);
+        setTimeout(() => {
+            const boardElFinal = document.querySelector("wc-chess-board, chess-board, cg-board");
+            if (!boardElFinal) return;
+            const rectFinal = boardElFinal.getBoundingClientRect();
+            const sqSizeFinal = rectFinal.width / 8;
+            const toFinal = {
+                x: rectFinal.left + (flipBoard ? 7 - toFile : toFile + 0.5) * sqSizeFinal,
+                y: rectFinal.top + (flipBoard ? toRank : 7 - toRank + 0.5) * sqSizeFinal
+            };
+            simulateClick(toFinal.x, toFinal.y);
+
+            // Step 3: Handle promotion modal if needed
+            if (promotionChar) {
+                const promoDelay = 120 + Math.floor(Math.random() * 60);
+                setTimeout(() => selectPromotion(promotionChar), promoDelay);
+            }
+        }, delay);
+    }, reactionDelay);
 
     return true;
 }
@@ -514,6 +554,17 @@ function renderArrows(pvLines, isMyTurn) {
  * @param {string|null} networkFen - FEN from the WebSocket interceptor, or null to parse from DOM.
  */
 function processPosition(networkFen = null) {
+    if (!networkFen) {
+        // Fast-fail: check if piece count or ply changed before heavy parsing
+        const boardEl = document.querySelector("wc-chess-board, cg-board, .board");
+        if (boardEl) {
+            const ply = boardEl.getAttribute("data-ply") || "";
+            const numPieces = boardEl.querySelectorAll(".piece").length;
+            const stateHash = `${ply}-${numPieces}`;
+            if (window._lastBoardStateHash === stateHash) return;
+            window._lastBoardStateHash = stateHash;
+        }
+    }
     const fen = networkFen || parseBoard();
     if (!fen || fen === currentFEN) return;
 
@@ -531,6 +582,9 @@ function processPosition(networkFen = null) {
         fenHistory = [];
     }
     fenHistory.push(normFen);
+    if (fenHistory.length > 50) {
+        fenHistory.shift(); // Limit history to prevent payload bloat
+    }
     const historyStr = fenHistory.join("|");
 
     // Check if a ponder result is already cached for this position.
@@ -544,11 +598,10 @@ function processPosition(networkFen = null) {
             if (cached.pv && cached.pv.length > 0) {
                 renderArrows([cached.pv], true);
             }
-            chrome.storage.local.get("engineMode", (res) => {
-                if (res.engineMode === "autoplay") {
-                    setTimeout(() => playMove(cached.bestMove), 200);
-                }
-            });
+            if (currentEngineMode === "autoplay") {
+                const delay = 150 + Math.floor(Math.random() * 200);
+                setTimeout(() => playMove(cached.bestMove), delay);
+            }
         }
         return;
     }
@@ -579,12 +632,8 @@ function processPosition(networkFen = null) {
             }
 
             // Play the move if it's our turn and in autoplay mode.
-            if (isMyTurn && response.bestMove) {
-                chrome.storage.local.get("engineMode", (res) => {
-                    if (res.engineMode === "autoplay") {
-                        playMove(response.bestMove);
-                    }
-                });
+            if (isMyTurn && response.bestMove && currentEngineMode === "autoplay") {
+                playMove(response.bestMove);
             }
 
             // Collect PV lines to render as arrows.
@@ -609,26 +658,59 @@ function processPosition(networkFen = null) {
 // ---------------------------------------------------------------------------
 
 let activeObserver = null;
-function setupObserver() {
-    if (activeObserver) activeObserver.disconnect();
-    activeObserver = new MutationObserver(() => {
-        clearTimeout(debounceTimer);
-        debounceTimer = setTimeout(() => processPosition(), 200);
-    });
+let observedElements = [];
+let isProcessing = false;
+let lastProcessTime = 0;
 
+function setupObserver() {
     const board = document.querySelector("wc-chess-board, .board, #board-single");
     const moveList = document.querySelector("wc-move-list, .move-list-container, .vertical-move-list");
     
-    if (board) {
-        activeObserver.observe(board, { childList: true, subtree: true, attributes: true, attributeFilter: ["class", "style"] });
+    let targets = [];
+    if (board) targets.push(board);
+    if (moveList) targets.push(moveList);
+    if (targets.length === 0) targets.push(document.body);
+
+    // Skip if observing the exact same elements
+    if (observedElements.length === targets.length && observedElements.every((el, i) => el === targets[i])) {
+        return;
     }
-    if (moveList) {
-        activeObserver.observe(moveList, { childList: true, subtree: true });
+
+    if (activeObserver) activeObserver.disconnect();
+    
+    activeObserver = new MutationObserver((mutations) => {
+        // Optimization: Ignore pure style/class mutations (piece animations) if structural changes are rare
+        // but since pieces can move via style transform, we must be careful.
+        // We use a leading-edge + trailing-edge approach to prevent freeze.
+        const now = Date.now();
+        if (now - lastProcessTime > 100 && !isProcessing) {
+             isProcessing = true;
+             lastProcessTime = now;
+             processPosition();
+             isProcessing = false;
+        }
+
+        clearTimeout(debounceTimer);
+        debounceTimer = setTimeout(() => {
+             if (Date.now() - lastProcessTime > 100) {
+                 lastProcessTime = Date.now();
+                 processPosition();
+             }
+        }, 200);
+    });
+
+    for (const target of targets) {
+        if (target === document.body) {
+            activeObserver.observe(target, { childList: true });
+        } else if (target === board) {
+            // Drop 'attributes: true' to stop firing on every CSS transform tick during piece sliding
+            activeObserver.observe(target, { childList: true, subtree: true });
+        } else {
+            activeObserver.observe(target, { childList: true, subtree: true });
+        }
     }
-    if (!board && !moveList) {
-        // Fallback if board not rendered yet
-        activeObserver.observe(document.body, { childList: true });
-    }
+    
+    observedElements = targets;
 }
 
 setupObserver();
@@ -686,12 +768,7 @@ chrome.runtime.onMessage.addListener((msg) => {
             const norm = normalizeFen(response.cachedForFen);
             ponderCache[norm] = response;
             
-            // Queue premove on DOM
-            chrome.storage.local.get("engineMode", (res) => {
-                if (res.engineMode === "autoplay" && response.bestMove) {
-                    playMove(response.bestMove);
-                }
-            });
+            // (playMove is not called here; processPosition will pick it up on our turn)
 
             // Render arrows
             let pvLines = [];

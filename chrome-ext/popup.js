@@ -25,11 +25,20 @@ document.addEventListener("DOMContentLoaded", () => {
     const statNodes = document.getElementById("stat-nodes");
     const statTime  = document.getElementById("stat-time");
 
-    /** @type {number|null} Interval ID for stats polling. */
-    let statsInterval = null;
+
 
     const cores = navigator.hardwareConcurrency || 4;
     hwInfo.innerText = `Hardware Detected: ${cores} Logical Cores`;
+
+    if (typeof SharedArrayBuffer === "undefined") {
+        const warning = document.createElement("div");
+        warning.style.color = "#e74c3c";
+        warning.style.marginTop = "10px";
+        warning.style.fontSize = "12px";
+        warning.style.textAlign = "center";
+        warning.innerText = "⚠️ Missing SharedArrayBuffer support (COOP/COEP headers active?). Engine falling back to single-threaded mode.";
+        document.body.appendChild(warning);
+    }
 
     // -----------------------------------------------------------------------
     // Settings Restore
@@ -75,23 +84,17 @@ document.addEventListener("DOMContentLoaded", () => {
     // UI State
     // -----------------------------------------------------------------------
 
-    /**
-     * Updates the popup UI to reflect engine running or stopped state.
-     * @param {boolean} isActive
-     */
     function setUIActive(isActive) {
         if (isActive) {
             statusBox.className  = "status-box active";
             statusText.innerText = "Engine Running";
             btnStart.style.display = "none";
             btnStop.style.display  = "block";
-            startStatsPolling();
         } else {
             statusBox.className  = "status-box inactive";
             statusText.innerText = "Standby";
             btnStart.style.display = "block";
             btnStop.style.display  = "none";
-            stopStatsPolling();
         }
     }
 
@@ -141,27 +144,11 @@ document.addEventListener("DOMContentLoaded", () => {
         statTime.textContent  = stats.timeMs !== undefined ? `${stats.timeMs}ms` : "—";
     }
 
-    /**
-     * Starts polling chrome.storage every second for updated engine stats.
-     */
-    function startStatsPolling() {
-        if (statsInterval) return;
-        statsInterval = setInterval(() => {
-            chrome.storage.local.get("engineStats", (result) => {
-                if (result.engineStats) renderStats(result.engineStats);
-            });
-        }, 1000);
-    }
-
-    /**
-     * Stops the stats polling interval.
-     */
-    function stopStatsPolling() {
-        if (statsInterval) {
-            clearInterval(statsInterval);
-            statsInterval = null;
+    chrome.storage.onChanged.addListener((changes, namespace) => {
+        if (namespace === "local" && changes.engineStats) {
+            renderStats(changes.engineStats.newValue);
         }
-    }
+    });
 
     // -----------------------------------------------------------------------
     // Helpers
@@ -222,7 +209,6 @@ document.addEventListener("DOMContentLoaded", () => {
     cpuSelect.addEventListener("change", saveAndApplySettings);
     hashSelect.addEventListener("change", saveAndApplySettings);
     incrementInput.addEventListener("change", saveAndApplySettings);
-    incrementInput.addEventListener("input", saveAndApplySettings);
 
     // -----------------------------------------------------------------------
     // Start / Stop

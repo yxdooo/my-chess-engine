@@ -4,7 +4,7 @@
 export class ChessEngine {
     free(): void;
     [Symbol.dispose](): void;
-    get_best_move(fen: string, time_limit_ms: number, elo: number, split_id: number, split_count: number, history: string): string;
+    get_best_move(fen: string, time_limit_ms: number, elo: number, split_id: number, split_count: number, history: string, abort_flag?: Uint8Array | null): string;
     constructor();
     set_hash_size(mb: number): void;
 }
@@ -14,13 +14,14 @@ export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembl
 export interface InitOutput {
     readonly memory: WebAssembly.Memory;
     readonly __wbg_chessengine_free: (a: number, b: number) => void;
-    readonly chessengine_get_best_move: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number];
+    readonly chessengine_get_best_move: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number) => [number, number];
     readonly chessengine_new: () => number;
     readonly chessengine_set_hash_size: (a: number, b: number) => void;
     readonly __wbindgen_free: (a: number, b: number, c: number) => void;
     readonly __wbindgen_malloc: (a: number, b: number) => number;
     readonly __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;
     readonly __wbindgen_externrefs: WebAssembly.Table;
+    readonly __externref_table_alloc: () => number;
     readonly __wbindgen_start: () => void;
 }
 

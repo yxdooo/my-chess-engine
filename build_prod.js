@@ -1,10 +1,8 @@
 /**
  * build_prod.js – Production Build Script
  *
- * Copies the chrome-ext source directory to dist/, then obfuscates all
- * JavaScript files except:
- *   - engine_wasm.js  (WASM glue – uses specific identifier names)
- *   - worker.js       (ES module imports are incompatible with obfuscator)
+ * Copies the chrome-ext source directory to dist/, then minifies all
+ * JavaScript files using esbuild in parallel.
  *
  * Usage:
  *   npm install
@@ -15,13 +13,10 @@
 
 const fs   = require("fs");
 const path = require("path");
-const JavaScriptObfuscator = require("javascript-obfuscator");
+const esbuild = require("esbuild");
 
 const SRC_DIR  = path.join(__dirname, "chrome-ext");
 const DIST_DIR = path.join(__dirname, "dist");
-
-// Files that must NOT be obfuscated.
-const OBFUSCATION_EXCLUSIONS = new Set(["engine_wasm.js", "worker.js"]);
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -48,79 +43,68 @@ function copyDir(src, dest) {
 }
 
 /**
- * Recursively obfuscates all eligible .js files in a directory.
- * Skips files listed in OBFUSCATION_EXCLUSIONS.
+ * Recursively minifies all .js files in a directory using esbuild.
  * @param {string} directory
  */
-function obfuscateDirectory(directory) {
-    for (const file of fs.readdirSync(directory)) {
-        const fullPath = path.join(directory, file);
+async function minifyDirectory(directory) {
+    const jsFiles = [];
 
-        if (fs.statSync(fullPath).isDirectory()) {
-            obfuscateDirectory(fullPath);
-            continue;
+    function findJs(dir) {
+        for (const file of fs.readdirSync(dir)) {
+            const fullPath = path.join(dir, file);
+            if (fs.statSync(fullPath).isDirectory()) {
+                findJs(fullPath);
+            } else if (fullPath.endsWith(".js")) {
+                jsFiles.push(fullPath);
+            }
         }
+    }
 
-        if (!fullPath.endsWith(".js")) continue;
-        if (OBFUSCATION_EXCLUSIONS.has(file)) {
-            console.log(`  Skipped (excluded): ${file}`);
-            continue;
-        }
+    findJs(directory);
 
-        const code = fs.readFileSync(fullPath, "utf8");
-
-        const obfuscated = JavaScriptObfuscator.obfuscate(code, {
-            compact: true,
-            controlFlowFlattening: true,
-            controlFlowFlatteningThreshold: 0.75,
-            deadCodeInjection: true,
-            deadCodeInjectionThreshold: 0.4,
-            debugProtection: false,
-            debugProtectionInterval: 0,
-            disableConsoleOutput: true,
-            identifierNamesGenerator: "hexadecimal",
-            log: false,
-            numbersToExpressions: true,
-            renameGlobals: false,
-            selfDefending: true,
-            simplify: true,
-            splitStrings: true,
-            splitStringsChunkLength: 10,
-            stringArray: true,
-            stringArrayCallsTransform: true,
-            stringArrayCallsTransformThreshold: 0.5,
-            stringArrayEncoding: ["base64"],
-            stringArrayIndexShift: true,
-            stringArrayRotate: true,
-            stringArrayShuffle: true,
-            stringArrayWrappersCount: 1,
-            stringArrayWrappersChainedCalls: true,
-            stringArrayWrappersParametersMaxCount: 2,
-            stringArrayWrappersType: "variable",
-            stringArrayThreshold: 0.75,
-            unicodeEscapeSequence: false,
-        }).getObfuscatedCode();
-
-        fs.writeFileSync(fullPath, obfuscated);
-        console.log(`  Obfuscated: ${file}`);
+    try {
+        await esbuild.build({
+            entryPoints: jsFiles,
+            outdir: directory,
+            allowOverwrite: true,
+            minify: true,
+            target: 'es2020',
+        });
+        console.log(`  Successfully minified ${jsFiles.length} files in parallel.`);
+    } catch (e) {
+        console.error(`  Failed to minify files`, e);
     }
 }
 
-// ---------------------------------------------------------------------------
-// Build Steps
-// ---------------------------------------------------------------------------
+const { execSync } = require("child_process");
 
-console.log("=== Aether Engine – Production Build ===\n");
+async function build() {
+    console.log("=== Aether Engine – Production Build ===\n");
 
-// 1. Clean and copy source files.
-if (fs.existsSync(DIST_DIR)) {
-    fs.rmSync(DIST_DIR, { recursive: true, force: true });
+    console.log("[0/3] Building WebAssembly...");
+    try {
+        execSync("set RUSTUP_TOOLCHAIN=nightly&& wasm-pack build --target web --release", {
+            cwd: path.join(__dirname, "engine-wasm"),
+            stdio: "inherit",
+            env: { ...process.env, RUSTUP_TOOLCHAIN: "nightly" }
+        });
+    } catch (e) {
+        console.error("WASM build failed.");
+        process.exit(1);
+    }
+
+    // 1. Clean and copy source files.
+    if (fs.existsSync(DIST_DIR)) {
+        fs.rmSync(DIST_DIR, { recursive: true, force: true });
+    }
+    copyDir(SRC_DIR, DIST_DIR);
+    console.log(`[1/2] Copied source to dist/\n`);
+
+    // 2. Minify JavaScript files.
+    console.log("[2/2] Minifying JavaScript files...");
+    await minifyDirectory(DIST_DIR);
+
+    console.log("\n✓ Production build complete. Load the dist/ folder in Chrome.");
 }
-copyDir(SRC_DIR, DIST_DIR);
-console.log(`[1/2] Copied source to dist/\n`);
 
-// 2. Obfuscate eligible JavaScript files.
-console.log("[2/2] Obfuscating JavaScript files...");
-obfuscateDirectory(DIST_DIR);
-
-console.log("\n✓ Production build complete. Load the dist/ folder in Chrome.");
+build().catch(console.error);

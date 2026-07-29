@@ -24,6 +24,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "23b62fc65de8e4e7f52534fb52b0f3ed04746ae267519eef2a83941e8085068b"
 
 [[package]]
+name = "arrayvec"
+version = "0.7.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d3fb67a6e08acf24fdeccbac2cb6ac4305825bd1f117462e0e6f2f193345ad56"
+
+[[package]]
 name = "backtrace"
 version = "0.3.76"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -56,7 +62,7 @@ version = "3.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2ed299b171ec34f372945ad6726f7bc1d2afd5f59fb8380f64f48e2bab2f0ec8"
 dependencies = [
- "arrayvec",
+ "arrayvec 0.5.2",
  "failure",
  "nodrop",
  "rand",
@@ -76,10 +82,10 @@ dependencies = [
 name = "engine-wasm"
 version = "0.1.0"
 dependencies = [
+ "arrayvec 0.7.8",
  "chess",
  "console_error_panic_hook",
  "js-sys",
- "nnue-rs",
  "wasm-bindgen",
 ]
 
@@ -166,12 +172,6 @@ checksum = "1fa76a2c86f704bdb222d66965fb3d63269ce38518b83cb0575fca855ebb6316"
 dependencies = [
  "adler2",
 ]
-
-[[package]]
-name = "nnue-rs"
-version = "0.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f484047679d5f4ad45412bffb6e4e9ee8d8943fdaae65107ad9b9fa6ba32d916"
 
 [[package]]
 name = "nodrop"

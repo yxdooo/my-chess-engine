@@ -1,17 +1,124 @@
+#![feature(thread_local)]
+
 use wasm_bindgen::prelude::*;
 use chess::{Board, ChessMove, Color, Piece, MoveGen, BoardStatus};
 use std::collections::HashSet;
+use arrayvec::ArrayVec;
 use std::str::FromStr;
-use std::sync::LazyLock;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::OnceLock;
 
-static NNUE: LazyLock<Option<nnue_rs::Network>> = LazyLock::new(|| {
-    let bytes = include_bytes!("../nn-82215d0fd0df.nnue");
-    nnue_rs::Network::from_bytes(bytes).ok()
-});
+#[thread_local]
+#[no_mangle]
+pub static mut _DUMMY_TLS: u8 = 0;
+
+static GLOBAL_TT: OnceLock<TranspositionTable> = OnceLock::new();
+static GLOBAL_PAWN_HASH: OnceLock<PawnHashTable> = OnceLock::new();
+static LMR_TABLE: OnceLock<[[u8; 256]; 64]> = OnceLock::new();
+
+fn get_tt() -> &'static TranspositionTable {
+    GLOBAL_TT.get_or_init(|| TranspositionTable::new(1_000_000))
+}
+
+fn get_pawn_hash() -> &'static PawnHashTable {
+    GLOBAL_PAWN_HASH.get_or_init(|| PawnHashTable::new(131_072))
+}
+
+fn get_lmr(depth: u8, moves_evaluated: usize) -> u8 {
+    let table = LMR_TABLE.get_or_init(|| {
+        let mut t = [[0; 256]; 64];
+        for d in 0..64 {
+            for m in 0..256 {
+                if d >= 1 && m >= 1 {
+                    let r = 0.5 + ((d as f64).ln() * (m as f64).ln() / 2.25);
+                    t[d][m] = r as u8;
+                }
+            }
+        }
+        t
+    });
+    table[depth.min(63) as usize][moves_evaluated.min(255)]
+}
+
+fn pack_move(m: Option<ChessMove>) -> u16 {
+    if let Some(m) = m {
+        let src = m.get_source().to_index() as u16;
+        let dest = m.get_dest().to_index() as u16;
+        let promo = match m.get_promotion() {
+            None => 0,
+            Some(Piece::Knight) => 1,
+            Some(Piece::Bishop) => 2,
+            Some(Piece::Rook) => 3,
+            Some(Piece::Queen) => 4,
+            _ => 0,
+        };
+        (promo << 12) | (dest << 6) | src
+    } else {
+        0xFFFF
+    }
+}
+
+fn unpack_move(val: u16) -> Option<ChessMove> {
+    if val == 0xFFFF {
+        None
+    } else {
+        let src = unsafe { chess::Square::new((val & 0x3F) as u8) };
+        let dest = unsafe { chess::Square::new(((val >> 6) & 0x3F) as u8) };
+        let promo = match val >> 12 {
+            1 => Some(Piece::Knight),
+            2 => Some(Piece::Bishop),
+            3 => Some(Piece::Rook),
+            4 => Some(Piece::Queen),
+            _ => None,
+        };
+        Some(ChessMove::new(src, dest, promo))
+    }
+}
+
+struct PawnHashTable {
+    entries: Box<[AtomicU64]>,
+    mask: usize,
+}
+
+impl PawnHashTable {
+    fn new(capacity: usize) -> Self {
+        let size = capacity.next_power_of_two();
+        let mut entries = Vec::with_capacity(size);
+        for _ in 0..size {
+            entries.push(AtomicU64::new(0));
+        }
+        Self {
+            entries: entries.into_boxed_slice(),
+            mask: size - 1,
+        }
+    }
+
+    fn probe(&self, key: u64) -> Option<(i32, i32)> {
+        let index = (key as usize) & self.mask;
+        let stored = self.entries[index].load(Ordering::Relaxed);
+        if stored == 0 { return None; }
+        
+        if (stored & 0xFFFF_FFFF_0000_0000) == (key & 0xFFFF_FFFF_0000_0000) {
+            let data = (stored ^ key) & 0x0000_0000_FFFF_FFFF;
+            let w = (data as u16 as i16) as i32;
+            let b = ((data >> 16) as u16 as i16) as i32;
+            Some((w, b))
+        } else {
+            None
+        }
+    }
+
+    fn store(&self, key: u64, w_pawn_score: i32, b_pawn_score: i32) {
+        let index = (key as usize) & self.mask;
+        let data = (w_pawn_score as i16 as u16 as u64) | ((b_pawn_score as i16 as u16 as u64) << 16);
+        let signature = key & 0xFFFF_FFFF_0000_0000;
+        let stored = ((data ^ key) & 0x0000_0000_FFFF_FFFF) | signature;
+        self.entries[index].store(stored, Ordering::Relaxed);
+    }
+}
 
 #[wasm_bindgen]
 pub struct ChessEngine {
-    tt: TranspositionTable,
     killers: [[Option<ChessMove>; 2]; 128],
     /// Butterfly history table for move ordering heuristics.
     history: [[i32; 64]; 64],
@@ -28,6 +135,7 @@ pub struct ChessEngine {
     search_path: [u64; 128],
     /// Generation counter for TT age-based replacement.
     search_generation: u8,
+    abort_flag: Option<js_sys::Uint8Array>,
 }
 #[wasm_bindgen]
 impl ChessEngine {
@@ -36,7 +144,6 @@ impl ChessEngine {
         console_error_panic_hook::set_once();
         
         Self {
-            tt: TranspositionTable::new(1_000_000),
             killers: [[None; 2]; 128],
             history: [[0; 64]; 64],
             stop_search: false,
@@ -48,18 +155,18 @@ impl ChessEngine {
             history_hashes: HashSet::new(),
             search_path: [0; 128],
             search_generation: 0,
+            abort_flag: None,
         }
     }
 
     pub fn set_hash_size(&mut self, mb: usize) {
-        // 1 entry is 24 bytes (approx 32 with overhead). 
-        // mb * 1024 * 1024 / 24 = approx entries. We use next power of two.
-        let entries = (mb * 1024 * 1024) / std::mem::size_of::<TTEntry>();
-        self.tt = TranspositionTable::new(entries);
+        let entries = (mb * 1024 * 1024) / 8;
+        GLOBAL_TT.get_or_init(|| TranspositionTable::new(entries));
+        GLOBAL_PAWN_HASH.get_or_init(|| PawnHashTable::new(131_072));
     }
 
     #[wasm_bindgen]
-    pub fn get_best_move(&mut self, fen: String, time_limit_ms: f64, elo: f64, split_id: u8, split_count: u8, history: String) -> String {
+    pub fn get_best_move(&mut self, fen: &str, time_limit_ms: f64, elo: f64, split_id: u8, split_count: u8, history: &str, abort_flag: Option<js_sys::Uint8Array>) -> String {
         self.nodes = 0;
         self.stop_search = false;
         self.time_limit_ms = time_limit_ms;
@@ -67,6 +174,7 @@ impl ChessEngine {
         // 1.5x gives enough buffer for one extra depth without letting the search run wild.
         self.hard_time_limit_ms = time_limit_ms * 1.5;
         self.elo = elo as u32;
+        self.abort_flag = abort_flag;
         // Bump generation every search so old TT entries are more aggressively replaced.
         self.search_generation = self.search_generation.wrapping_add(1);
 
@@ -77,6 +185,7 @@ impl ChessEngine {
             }
         }
 
+        let halfmove_clock: u8 = fen.split_whitespace().nth(4).unwrap_or("0").parse().unwrap_or(0);
         let board = Board::from_str(&fen).unwrap_or(Board::default());
         
         // Rebuild the set of past position hashes for 3-fold repetition detection.
@@ -90,9 +199,14 @@ impl ChessEngine {
             }
         }
 
-        let moves: Vec<ChessMove> = MoveGen::new_legal(&board).collect();
+        let moves: ArrayVec<ChessMove, 256> = MoveGen::new_legal(&board).collect();
         if moves.len() == 1 {
             return format!("{{\"bestMove\":\"{}\",\"score\":0,\"pv\":[\"{}\"]}}", moves[0].to_string(), moves[0].to_string());
+        }
+        
+        let my_moves = moves.len();
+        if my_moves == 0 {
+            return format!("{{\"bestMove\":\"{}\",\"score\":0,\"pv\":[]}}", moves[0].to_string());
         }
 
         self.start_time = js_sys::Date::now();
@@ -101,6 +215,7 @@ impl ChessEngine {
         let mut best_score = -INF;
         let mut previous_best_score = -INF;
         let mut second_best_score = -INF;
+        let mut second_best_move = None;
         let mut depth_reached: u8 = 0;
         
         let max_depth = if self.elo < 500 { 1 } 
@@ -114,8 +229,10 @@ impl ChessEngine {
             self.time_limit_ms = f64::min(self.time_limit_ms * 2.0, self.hard_time_limit_ms);
         }
 
-        for depth in 1..=64u8 {
-            if depth > max_depth { break; }
+        let mut max_horizon = max_depth;
+        for base_depth in 1..=64u8 {
+            let depth = base_depth + (split_id % 2) as u8;
+            if depth > max_horizon { break; }
 
             // --------------- Gradual Aspiration Window ---------------
             // Start with tight window; on fail widen by 1.5x each time.
@@ -126,8 +243,8 @@ impl ChessEngine {
                 (best_score - 30, best_score + 30, 30i32)
             };
 
-            let (current_move, current_score, current_second) = loop {
-                let result = self.search_root(&board, depth, alpha, beta, split_id as u32, split_count as u32);
+            let (current_move, current_score, current_second_move, current_second_score) = loop {
+                let result = self.search_root(&board, depth, alpha, beta, split_id as u32, split_count as u32, halfmove_clock);
                 if self.stop_search { break result; }
 
                 if delta == INF {
@@ -154,7 +271,8 @@ impl ChessEngine {
 
             best_move = current_move;
             best_score = current_score;
-            second_best_score = current_second;
+            second_best_move = current_second_move;
+            second_best_score = current_second_score;
             depth_reached = depth;
             
             let elapsed = js_sys::Date::now() - self.start_time;
@@ -195,36 +313,25 @@ impl ChessEngine {
             let random = (js_sys::Math::random() * 100.0) as u32;
             
             if random < blunder_chance {
-                // Collect all root moves and score them properly via search.
-                // Use second_best_move from search_root (already stored in second_best_score).
-                // Find the move that actually produced second_best_score by re-ranking moves.
-                let mut moves: Vec<ChessMove> = MoveGen::new_legal(&board).collect();
-                self.sort_moves(&board, &mut moves, 0, best_move);
-                // Prefer actual second-best (scored), fallback to position-sorted list
-                let target_score = second_best_score;
-                let mut chosen = None;
-                for &m in &moves {
-                    if Some(m) == best_move { continue; }
-                    let next = board.make_move_new(m);
-                    let s = -pseudo_nnue_evaluate(&next);
-                    // Pick a move whose score is close to second_best (within 100cp)
-                    if (s - target_score).abs() < 150 {
-                        chosen = Some(m);
-                        break;
+                if let Some(m) = second_best_move {
+                    best_move = Some(m);
+                } else {
+                    let mut moves: ArrayVec<ChessMove, 256> = MoveGen::new_legal(&board).collect();
+                    let mut scores = self.score_moves(&board, &moves, 0, best_move);
+                    for i in 0..moves.len() {
+                        self.pick_move(&mut moves, &mut scores, i);
+                    }
+                    if moves.len() > 1 {
+                        best_move = moves.iter().find(|&&m| Some(m) != best_move).copied();
                     }
                 }
-                if chosen.is_none() && moves.len() > 1 {
-                    // Fallback: second move in ordering list (never the best)
-                    chosen = moves.iter().find(|&&m| Some(m) != best_move).copied();
-                }
-                if let Some(m) = chosen { best_move = Some(m); }
             }
         }
 
         let mut pv = Vec::new();
         let mut current_board = board.clone();
         for _ in 0..6 {
-            if let Some(entry) = self.tt.probe(current_board.get_hash(), 0) {
+            if let Some(entry) = get_tt().probe(current_board.get_hash(), 0) {
                 if let Some(pv_move) = entry.best_move {
                     if MoveGen::new_legal(&current_board).any(|m| m == pv_move) {
                         pv.push(format!("\"{}\"", pv_move.to_string()));
@@ -252,7 +359,7 @@ impl ChessEngine {
             
             // Extract the opponent's expected reply from the TT
             let hash = pv_board.get_hash();
-            if let Some(entry) = self.tt.probe(hash, 0) {
+            if let Some(entry) = get_tt().probe(hash, 0) {
                 if let Some(opp_m) = entry.best_move {
                     pv_board = pv_board.make_move_new(opp_m);
                 }
@@ -291,39 +398,74 @@ struct TTEntry {
     depth: u8,
     score: i32,
     flag: u8,
-    /// Generation counter for age-based replacement.
     generation: u8,
 }
 
 struct TranspositionTable {
-    entries: Vec<TTEntry>,
+    entries: Box<[AtomicU64]>,
     size: usize,
 }
 
 impl TranspositionTable {
     fn new(size: usize) -> Self {
+        let size = size.next_power_of_two();
+        let mut entries = Vec::with_capacity(size);
+        for _ in 0..size {
+            entries.push(AtomicU64::new(0));
+        }
         Self {
-            entries: vec![TTEntry { hash: 0, best_move: None, depth: 0, score: 0, flag: 0, generation: 0 }; size.next_power_of_two()],
-            size: size.next_power_of_two(),
+            entries: entries.into_boxed_slice(),
+            size,
         }
     }
-    fn store(&mut self, hash: u64, best_move: Option<ChessMove>, depth: u8, mut score: i32, flag: u8, ply: u8, generation: u8) {
+    fn store(&self, hash: u64, best_move: Option<ChessMove>, depth: u8, mut score: i32, flag: u8, ply: u8, generation: u8) {
         if score > MATE - 128 { score += ply as i32; } else if score < -MATE + 128 { score -= ply as i32; }
+        
         let index = (hash as usize) & (self.size - 1);
-        let entry = &self.entries[index];
-        // Replace if: empty, same position, stale generation, or new entry is deeper.
-        let is_stale = entry.generation != generation;
-        if entry.hash == 0 || entry.hash == hash || is_stale || depth >= entry.depth {
-            self.entries[index] = TTEntry { hash, best_move, depth, score, flag, generation };
+        let stored = self.entries[index].load(Ordering::Relaxed);
+        
+        let should_replace = if stored == 0 || (stored & 0xFFFF_0000_0000_0000) != (hash & 0xFFFF_0000_0000_0000) {
+            true // empty or collision
+        } else {
+            let data = (stored ^ hash) & 0x0000_FFFF_FFFF_FFFF;
+            let old_depth = ((data >> 32) & 0x3F) as u8;
+            let old_gen = ((data >> 40) & 0xFF) as u8;
+            old_gen != generation || depth >= old_depth
+        };
+
+        if should_replace {
+            let m_val = pack_move(best_move) as u64;
+            let s_val = (score as i16 as u16 as u64) << 16;
+            let d_val = ((depth as u64) & 0x3F) << 32;
+            let f_val = ((flag as u64) & 0x3) << 38;
+            let g_val = ((generation as u64) & 0xFF) << 40;
+            let data = m_val | s_val | d_val | f_val | g_val;
+            
+            let signature = hash & 0xFFFF_0000_0000_0000;
+            let new_stored = ((data ^ hash) & 0x0000_FFFF_FFFF_FFFF) | signature;
+            self.entries[index].store(new_stored, Ordering::Relaxed);
         }
     }
     fn probe(&self, hash: u64, ply: u8) -> Option<TTEntry> {
         let index = (hash as usize) & (self.size - 1);
-        let mut entry = self.entries[index];
-        if entry.hash == hash { 
-            if entry.score > MATE - 128 { entry.score -= ply as i32; } else if entry.score < -MATE + 128 { entry.score += ply as i32; }
-            Some(entry) 
-        } else { None }
+        let stored = self.entries[index].load(Ordering::Relaxed);
+        if stored == 0 { return None; }
+        
+        if (stored & 0xFFFF_0000_0000_0000) == (hash & 0xFFFF_0000_0000_0000) {
+            let data = (stored ^ hash) & 0x0000_FFFF_FFFF_FFFF;
+            let mut score = ((data >> 16) as u16 as i16) as i32;
+            if score > MATE - 128 { score -= ply as i32; } else if score < -MATE + 128 { score += ply as i32; }
+            Some(TTEntry {
+                hash,
+                best_move: unpack_move((data & 0xFFFF) as u16),
+                depth: ((data >> 32) & 0x3F) as u8,
+                score,
+                flag: ((data >> 38) & 0x3) as u8,
+                generation: ((data >> 40) & 0xFF) as u8,
+            })
+        } else {
+            None
+        }
     }
 }
 
@@ -463,6 +605,10 @@ impl ChessEngine {
     fn check_time(&mut self) {
         if js_sys::Date::now() - self.start_time >= self.hard_time_limit_ms {
             self.stop_search = true;
+        } else if let Some(flag) = &self.abort_flag {
+            if flag.get_index(0) == 1 {
+                self.stop_search = true;
+            }
         }
     }
 
@@ -487,48 +633,71 @@ impl ChessEngine {
         0
     }
 
-    fn sort_moves(&self, board: &Board, moves: &mut Vec<ChessMove>, ply: u8, tt_best_move: Option<ChessMove>) {
-        moves.sort_by_key(|m| -self.score_move(board, m, ply, tt_best_move));
+    fn score_moves(&self, board: &Board, moves: &[ChessMove], ply: u8, tt_best_move: Option<ChessMove>) -> ArrayVec<i32, 256> {
+        moves.iter().map(|&m| self.score_move(board, &m, ply, tt_best_move)).collect()
     }
 
-    fn search_root(&mut self, board: &Board, depth: u8, mut alpha: i32, beta: i32, split_id: u32, split_count: u32) -> (Option<ChessMove>, i32, i32) {
+    fn pick_move(&self, moves: &mut [ChessMove], scores: &mut [i32], start: usize) {
+        let mut best_idx = start;
+        let mut best_score = scores[start];
+        for i in (start + 1)..moves.len() {
+            if scores[i] > best_score {
+                best_score = scores[i];
+                best_idx = i;
+            }
+        }
+        moves.swap(start, best_idx);
+        scores.swap(start, best_idx);
+    }
+
+    fn search_root(&mut self, board: &Board, depth: u8, mut alpha: i32, beta: i32, split_id: u32, split_count: u32, halfmove_clock: u8) -> (Option<ChessMove>, i32, Option<ChessMove>, i32) {
         let mut best_move = None;
         let mut best_score = -INF;
+        let mut second_best_move = None;
         let mut second_best_score = -INF;
         let original_alpha = alpha;
         
         let hash = board.get_hash();
         self.search_path[0] = hash;
-        let tt_best_move = self.tt.probe(hash, 0).and_then(|entry| entry.best_move);
+        let tt_best_move = get_tt().probe(hash, 0).and_then(|entry| entry.best_move);
 
-        let mut moves: Vec<ChessMove> = MoveGen::new_legal(board).collect();
-        if moves.is_empty() { return (None, if board.status() == BoardStatus::Checkmate { -MATE } else { 0 }, -INF); }
+        let mut moves: ArrayVec<ChessMove, 256> = MoveGen::new_legal(board).collect();
+        if moves.is_empty() { return (None, if board.status() == BoardStatus::Checkmate { -MATE } else { 0 }, None, -INF); }
         
-        self.sort_moves(board, &mut moves, 0, tt_best_move);
+        let mut scores = self.score_moves(board, &moves, 0, tt_best_move);
         
-        let mut split_moves = Vec::new();
-        if split_count > 1 {
-            for (i, m) in moves.iter().enumerate() {
-                if (i as u32) % split_count == split_id { split_moves.push(*m); }
+        if split_count > 1 && split_id > 0 {
+            for i in 0..moves.len() {
+                if scores[i] < 50_000 {
+                    scores[i] += ((i as u32 * split_id as u32 * 17) % 31) as i32;
+                }
             }
-        } else {
-            split_moves = moves;
         }
-        if split_moves.is_empty() { return (None, -INF, -INF); }
+
+        for i in 0..moves.len() {
+            self.pick_move(&mut moves, &mut scores, i);
+        }
+        
+        let split_moves = moves;
+        if split_moves.is_empty() { return (None, -INF, None, -INF); }
 
         let mut b_search_pv = true;
 
         for m in split_moves {
             let next_board = board.make_move_new(m);
+            let is_capture = board.piece_on(m.get_dest()).is_some();
+            let is_pawn_move = board.piece_on(m.get_source()) == Some(Piece::Pawn);
+            let next_halfmove = if is_capture || is_pawn_move { 0 } else { halfmove_clock + 1 };
+            
             let mut score;
             
             if b_search_pv {
-                score = -self.negamax(&next_board, depth - 1, -beta, -alpha, 1);
+                score = -self.negamax(&next_board, depth - 1, -beta, -alpha, 1, next_halfmove);
                 b_search_pv = false;
             } else {
-                score = -self.negamax(&next_board, depth - 1, -alpha - 1, -alpha, 1);
-                if score > alpha && score < beta {
-                    score = -self.negamax(&next_board, depth - 1, -beta, -alpha, 1);
+                score = -self.negamax(&next_board, depth - 1, -alpha - 1, -alpha, 1, next_halfmove);
+                if score > alpha {
+                    score = -self.negamax(&next_board, depth - 1, -beta, -alpha, 1, next_halfmove);
                 }
             }
             
@@ -536,59 +705,60 @@ impl ChessEngine {
 
             if score > best_score {
                 second_best_score = best_score;
+                second_best_move = best_move;
                 best_score = score;
                 best_move = Some(m);
             } else if score > second_best_score {
                 second_best_score = score;
+                second_best_move = Some(m);
             }
             if score > alpha { alpha = score; }
         }
         if !self.stop_search {
             let flag = if best_score <= original_alpha { UPPERBOUND } else if best_score >= beta { LOWERBOUND } else { EXACT };
-            self.tt.store(hash, best_move, depth, best_score, flag, 0, self.search_generation);
+            get_tt().store(hash, best_move, depth, best_score, flag, 0, self.search_generation);
         }
-        (best_move, best_score, second_best_score)
+        (best_move, best_score, second_best_move, second_best_score)
     }
 
-    fn quiescence_search(&mut self, board: &Board, mut alpha: i32, beta: i32, ply: u8) -> i32 {
-        if ply >= 127 { return pseudo_nnue_evaluate(board); }
+    fn quiescence_search(&mut self, board: &Board, mut alpha: i32, beta: i32, ply: u8, halfmove_clock: u8) -> i32 {
+        if ply >= 127 { return self.evaluate_full(board); }
         self.nodes += 1;
-        if (self.nodes & 2047) == 0 { self.check_time(); }
+        if (self.nodes & 16383) == 0 { self.check_time(); }
         if self.stop_search { return 0; }
 
         let hash = board.get_hash();
-        if let Some(entry) = self.tt.probe(hash, ply) {
+        if let Some(entry) = get_tt().probe(hash, ply) {
             if entry.flag == EXACT { return entry.score; }
             if entry.flag == LOWERBOUND && entry.score >= beta { return entry.score; }
             if entry.flag == UPPERBOUND && entry.score <= alpha { return entry.score; }
         }
 
         let in_check = board.checkers().popcnt() > 0;
-        let stand_pat = pseudo_nnue_evaluate(board);
+        let stand_pat = self.evaluate_full(board);
         let original_alpha = alpha;
         
         if !in_check {
             if stand_pat >= beta { 
-                self.tt.store(hash, None, 0, stand_pat, LOWERBOUND, ply, self.search_generation);
+                get_tt().store(hash, None, 0, stand_pat, LOWERBOUND, ply, self.search_generation);
                 return beta; 
             }
             if stand_pat + 1225 < alpha { return alpha; }
             if alpha < stand_pat { alpha = stand_pat; }
         }
 
-        let mut moves: Vec<ChessMove> = if in_check {
+        let mut moves: ArrayVec<ChessMove, 256> = if in_check {
             MoveGen::new_legal(board).collect()
         } else {
             MoveGen::new_legal(board)
                 .filter(|m| {
                     board.piece_on(m.get_dest()).is_some() 
-                    || m.get_promotion().is_some() 
-                    || board.make_move_new(*m).checkers().popcnt() > 0
+                    || m.get_promotion().is_some()
                 })
                 .collect()
         };
             
-        self.sort_moves(board, &mut moves, ply, None);
+        let mut scores = self.score_moves(board, &moves, ply, None);
         
         if in_check && moves.is_empty() {
             return -MATE + ply as i32;
@@ -597,7 +767,9 @@ impl ChessEngine {
         let mut best_score = if in_check { -INF } else { stand_pat };
         let mut best_move = None;
 
-        for m in moves {
+        for i in 0..moves.len() {
+            self.pick_move(&mut moves, &mut scores, i);
+            let m = moves[i];
             // Full SEE filter for captures in quiescence search.
             if !in_check && m.get_promotion().is_none() && board.piece_on(m.get_dest()).is_some() {
                 let see = see_value(board, m);
@@ -609,7 +781,11 @@ impl ChessEngine {
             }
 
             let next_board = board.make_move_new(m);
-            let score = -self.quiescence_search(&next_board, -beta, -alpha, ply.saturating_add(1));
+            let is_capture = board.piece_on(m.get_dest()).is_some();
+            let is_pawn_move = board.piece_on(m.get_source()) == Some(Piece::Pawn);
+            let next_halfmove = if is_capture || is_pawn_move { 0 } else { halfmove_clock + 1 };
+            
+            let score = -self.quiescence_search(&next_board, -beta, -alpha, ply.saturating_add(1), next_halfmove);
             if self.stop_search { return 0; }
             
             if score > best_score {
@@ -622,15 +798,15 @@ impl ChessEngine {
         
         if !self.stop_search {
             let flag = if best_score <= original_alpha { UPPERBOUND } else if best_score >= beta { LOWERBOUND } else { EXACT };
-            self.tt.store(hash, best_move, 0, best_score, flag, ply, self.search_generation);
+            get_tt().store(hash, best_move, 0, best_score, flag, ply, self.search_generation);
         }
         best_score
     }
 
-    fn negamax(&mut self, board: &Board, mut depth: u8, mut alpha: i32, beta: i32, ply: u8) -> i32 {
-        if ply >= 127 { return pseudo_nnue_evaluate(board); }
+    fn negamax(&mut self, board: &Board, mut depth: u8, mut alpha: i32, beta: i32, ply: u8, halfmove_clock: u8) -> i32 {
+        if ply >= 127 { return self.evaluate_full(board); }
         self.nodes += 1;
-        if (self.nodes & 2047) == 0 { self.check_time(); }
+        if (self.nodes & 16383) == 0 { self.check_time(); }
         if self.stop_search { return 0; }
 
         if board.status() == BoardStatus::Checkmate { return -MATE + ply as i32; }
@@ -638,8 +814,9 @@ impl ChessEngine {
         
         let hash = board.get_hash();
         if self.history_hashes.contains(&hash) { return 0; }
-        if ply > 0 {
-            for i in 0..ply {
+        let limit = ply.saturating_sub(halfmove_clock);
+        if ply > limit {
+            for i in (limit..ply).rev().step_by(2) {
                 if self.search_path[i as usize] == hash {
                     return 0;
                 }
@@ -650,16 +827,15 @@ impl ChessEngine {
         }
         
         let is_check = board.checkers().popcnt() > 0;
-        if is_check && depth < 64 { depth += 1; }
         
-        if depth == 0 { return self.quiescence_search(board, alpha, beta, ply); }
+        if depth == 0 { return self.quiescence_search(board, alpha, beta, ply, halfmove_clock); }
 
         // ---- TT probe FIRST: if we have a sufficient hit, return early ----
         // (moved before static_eval to avoid computing eval when TT suffices)
         let mut tt_best_move = None;
         let mut tt_score_for_singular: Option<i32> = None;
         let mut tt_depth_for_singular: u8 = 0;
-        if let Some(entry) = self.tt.probe(hash, ply) {
+        if let Some(entry) = get_tt().probe(hash, ply) {
             tt_best_move = entry.best_move;
             tt_score_for_singular = Some(entry.score);
             tt_depth_for_singular = entry.depth;
@@ -672,13 +848,13 @@ impl ChessEngine {
 
         // Compute static eval once — shared by Razoring, RFP, Futility.
         // Only compute when we'll actually need it (not in check at depth > 3).
-        let static_eval = if !is_check { pseudo_nnue_evaluate(board) } else { 0 };
+        let static_eval = if !is_check { self.evaluate_full(board) } else { 0 };
 
         // Razoring: if even an optimistic score can't reach alpha, fall through to qsearch.
         if !is_check && depth <= 3 {
             let razor_margin = depth as i32 * 300;
             if static_eval + razor_margin <= alpha {
-                let q_score = self.quiescence_search(board, alpha - razor_margin, beta, ply);
+                let q_score = self.quiescence_search(board, alpha - razor_margin, beta, ply, halfmove_clock);
                 if q_score + razor_margin <= alpha {
                     return q_score;
                 }
@@ -699,9 +875,16 @@ impl ChessEngine {
             if let Some(null_board) = board.null_move() {
                 let r = 3 + depth / 4; // More aggressive reduction
                 let reduced_depth = if depth > r { depth - r - 1 } else { 0 };
-                let null_score = -self.negamax(&null_board, reduced_depth, -beta, -beta + 1, ply.saturating_add(1));
+                let null_score = -self.negamax(&null_board, reduced_depth, -beta, -beta + 1, ply.saturating_add(1), 0);
                 if self.stop_search { return 0; }
-                if null_score >= beta { return beta; }
+                if null_score >= beta {
+                    if null_score >= MATE - 128 {
+                        let verify_score = self.negamax(board, depth - 1, beta - 1, beta, ply, halfmove_clock);
+                        if verify_score >= beta { return verify_score; }
+                    } else {
+                        return beta;
+                    }
+                }
             }
         }
 
@@ -711,8 +894,8 @@ impl ChessEngine {
         let original_alpha = alpha;
         let is_pv_node = beta > alpha + 1;
 
-        let mut moves: Vec<ChessMove> = MoveGen::new_legal(board).collect();
-        self.sort_moves(board, &mut moves, ply, tt_best_move);
+        let mut moves: ArrayVec<ChessMove, 256> = MoveGen::new_legal(board).collect();
+        let mut scores = self.score_moves(board, &moves, ply, tt_best_move);
 
         // Multi-Cut Pruning: if several quick null-window searches at reduced depth
         // all cause a beta cutoff, the position is very likely a cut node – prune it.
@@ -720,10 +903,12 @@ impl ChessEngine {
         const MC_CUTS: usize = 2;
         if !is_check && depth >= 6 && has_pieces && !is_pv_node && moves.len() >= MC_TRIES {
             let mut cutoffs = 0usize;
-            for mc_m in moves.iter().take(MC_TRIES) {
+            for i in 0..MC_TRIES.min(moves.len()) {
+                self.pick_move(&mut moves, &mut scores, i);
+                let mc_m = moves[i];
                 if self.stop_search { break; }
-                let next = board.make_move_new(*mc_m);
-                let score = -self.negamax(&next, depth - 4, -beta, -beta + 1, ply.saturating_add(1));
+                let next = board.make_move_new(mc_m);
+                let score = -self.negamax(&next, depth - 4, -beta, -beta + 1, ply.saturating_add(1), halfmove_clock + 1);
                 if score >= beta {
                     cutoffs += 1;
                     if cutoffs >= MC_CUTS {
@@ -736,10 +921,21 @@ impl ChessEngine {
 
         let mut moves_evaluated = 0;
         let mut b_search_pv = true;
+        let mut quiet_moves: ArrayVec<ChessMove, 256> = ArrayVec::new();
 
-        for m in moves {
+        let mc_done = !is_check && depth >= 6 && has_pieces && !is_pv_node && moves.len() >= MC_TRIES;
+
+        for i in 0..moves.len() {
+            if !(mc_done && i < MC_TRIES) {
+                self.pick_move(&mut moves, &mut scores, i);
+            }
+            let m = moves[i];
             let is_capture = board.piece_on(m.get_dest()).is_some();
             let is_promotion = m.get_promotion().is_some();
+            
+            if !is_capture && !is_promotion {
+                quiet_moves.push(m);
+            }
 
             // Futility Pruning — use cached static_eval (no extra call)
             if depth <= 2 && !is_check && !is_capture && !is_promotion && moves_evaluated > 0 && best_score > -MATE + 128 {
@@ -751,11 +947,20 @@ impl ChessEngine {
 
             let next_board = board.make_move_new(m);
             
+            let is_capture = board.piece_on(m.get_dest()).is_some();
+            let is_pawn_move = board.piece_on(m.get_source()) == Some(Piece::Pawn);
+            let next_halfmove = if is_capture || is_pawn_move { 0 } else { halfmove_clock + 1 };
+            
             let mut score;
+            let gives_check = next_board.checkers().popcnt() > 0;
             
             // Genuine Singular Extension:
             // Only at depth >= 10 to avoid expensive mini-searches on shallow nodes.
             let mut extension = 0u8;
+            if gives_check && depth < 64 && see_value(board, m) >= 0 {
+                extension = 1;
+            }
+
             if depth >= 10
                 && Some(m) == tt_best_move
                 && tt_depth_for_singular >= depth.saturating_sub(3)
@@ -766,7 +971,7 @@ impl ChessEngine {
                     let s_beta = tt_s - s_margin;
                     if s_beta > -MATE + 128 {
                         let is_singular = self.is_singular_move(
-                            board, m, depth, s_beta, ply,
+                            board, m, depth, s_beta, ply, &moves, halfmove_clock
                         );
                         if is_singular { extension = 1; }
                     }
@@ -774,23 +979,29 @@ impl ChessEngine {
             }
 
             if b_search_pv {
-                score = -self.negamax(&next_board, depth - 1 + extension, -beta, -alpha, ply.saturating_add(1));
+                score = -self.negamax(&next_board, depth - 1 + extension, -beta, -alpha, ply.saturating_add(1), next_halfmove);
                 b_search_pv = false;
             } else {
-                if moves_evaluated >= 3 && depth >= 3 && !is_capture && next_board.status() != BoardStatus::Checkmate {
-                    // More aggressive LMR based on depth and move count
-                    let mut r = 1 + (depth / 4) + (moves_evaluated / 6) as u8;
-                    if r > depth - 2 { r = depth - 2; }
-                    score = -self.negamax(&next_board, depth - 1 - r + extension, -alpha - 1, -alpha, ply.saturating_add(1));
-                    if score > alpha { 
-                        score = -self.negamax(&next_board, depth - 1 + extension, -alpha - 1, -alpha, ply.saturating_add(1));
+                if moves_evaluated >= 3 && depth >= 3 && !is_capture && !gives_check && !is_promotion && next_board.status() != BoardStatus::Checkmate {
+                    // Logarithmic LMR based on Stockfish formula
+                    let mut r = get_lmr(depth, moves_evaluated);
+                    
+                    // History heuristic bonus/malus for LMR
+                    let history_score = self.history[m.get_source().to_index()][m.get_dest().to_index()];
+                    if history_score > 4000 {
+                        r = r.saturating_sub(1);
+                    } else if history_score < -4000 {
+                        r += 1;
                     }
+                    
+                    if r > depth - 2 { r = depth - 2; }
+                    score = -self.negamax(&next_board, depth - 1 - r + extension, -alpha - 1, -alpha, ply.saturating_add(1), next_halfmove);
                 } else {
-                    score = -self.negamax(&next_board, depth - 1 + extension, -alpha - 1, -alpha, ply.saturating_add(1));
+                    score = -self.negamax(&next_board, depth - 1 + extension, -alpha - 1, -alpha, ply.saturating_add(1), next_halfmove);
                 }
                 
                 if score > alpha && score < beta {
-                    score = -self.negamax(&next_board, depth - 1 + extension, -beta, -alpha, ply.saturating_add(1));
+                    score = -self.negamax(&next_board, depth - 1 + extension, -beta, -alpha, ply.saturating_add(1), next_halfmove);
                 }
             }
 
@@ -808,10 +1019,20 @@ impl ChessEngine {
             if score > alpha { alpha = score; }
             if alpha >= beta { 
                 if !is_capture && (ply as usize) < 128 {
-                    self.killers[ply as usize][1] = self.killers[ply as usize][0];
-                    self.killers[ply as usize][0] = Some(m);
+                    if Some(m) != self.killers[ply as usize][0] {
+                        self.killers[ply as usize][1] = self.killers[ply as usize][0];
+                        self.killers[ply as usize][0] = Some(m);
+                    }
+                    let bonus = (depth as i32) * (depth as i32);
                     let h = &mut self.history[m.get_source().to_index()][m.get_dest().to_index()];
-                    *h = (*h + (depth as i32) * (depth as i32)).min(20000);
+                    *h = (*h + bonus).min(20000);
+                    
+                    for &qm in &quiet_moves {
+                        if qm != m {
+                            let h2 = &mut self.history[qm.get_source().to_index()][qm.get_dest().to_index()];
+                            *h2 = (*h2 - bonus).max(-20000);
+                        }
+                    }
                 }
                 break; 
             }
@@ -819,7 +1040,7 @@ impl ChessEngine {
 
         let flag = if best_score <= original_alpha { UPPERBOUND } else if best_score >= beta { LOWERBOUND } else { EXACT };
         if !self.stop_search {
-            self.tt.store(hash, best_move, depth, best_score, flag, ply, self.search_generation);
+            get_tt().store(hash, best_move, depth, best_score, flag, ply, self.search_generation);
         }
         best_score
     }
@@ -834,15 +1055,21 @@ impl ChessEngine {
         depth: u8,
         s_beta: i32,
         ply: u8,
+        moves: &[ChessMove],
+        halfmove_clock: u8,
     ) -> bool {
         let s_depth = (depth - 1) / 2;
         let s_alpha = s_beta - 1;
-        let moves: Vec<ChessMove> = MoveGen::new_legal(board).collect();
-        for &m in &moves {
+        for &m in moves {
             if m == excluded_move { continue; }
             if self.stop_search { return false; }
+            
+            let is_capture = board.piece_on(m.get_dest()).is_some();
+            let is_pawn_move = board.piece_on(m.get_source()) == Some(Piece::Pawn);
+            let next_halfmove = if is_capture || is_pawn_move { 0 } else { halfmove_clock + 1 };
+            
             let next = board.make_move_new(m);
-            let score = -self.negamax(&next, s_depth, -s_beta, -s_alpha, ply.saturating_add(1));
+            let score = -self.negamax(&next, s_depth, -s_beta, -s_alpha, ply.saturating_add(1), next_halfmove);
             if score >= s_beta {
                 return false; // Another move is also good → not singular
             }
@@ -914,9 +1141,9 @@ fn see_value(board: &Board, m: ChessMove) -> i32 {
     let to = m.get_dest();
     let from = m.get_source();
 
-    let captured_val = match board.piece_on(to) {
+    let mut captured_val = match board.piece_on(to) {
         Some(p) => piece_value_mg(p),
-        None => return 0,
+        None => 0,
     };
 
     // gain[d] = material gain at depth d in the capture sequence.
@@ -930,7 +1157,14 @@ fn see_value(board: &Board, m: ChessMove) -> i32 {
     let mut attackers = get_all_attackers(board, to, occupied);
 
     // Value of the piece that just moved (will be captured by recapture).
-    let mut attacker_val = board.piece_on(from).map_or(0, |p| piece_value_mg(p));
+    let mut attacker_val = if let Some(prom) = m.get_promotion() {
+        let prom_val = piece_value_mg(prom);
+        let pawn_val = piece_value_mg(Piece::Pawn);
+        captured_val += prom_val - pawn_val;
+        prom_val
+    } else {
+        board.piece_on(from).map_or(0, |p| piece_value_mg(p))
+    };
 
     loop {
         // Find cheapest attacker for `stm`.
@@ -975,68 +1209,8 @@ fn see_value(board: &Board, m: ChessMove) -> i32 {
     gain[0]
 }
 
-// ---------------------------------------------------------------------------
-// NNUE Board Adapter
-// ---------------------------------------------------------------------------
-
-/// Adapter that bridges the `chess` crate's `Board` type to the interface
-/// expected by `nnue_rs::Network::evaluate`.
-struct NnueBoard<'a>(&'a Board);
-
-impl<'a> nnue_rs::Board for NnueBoard<'a> {
-    fn side_to_move(&self) -> nnue_rs::Color {
-        match self.0.side_to_move() {
-            Color::White => nnue_rs::Color::White,
-            Color::Black => nnue_rs::Color::Black,
-        }
-    }
-
-    fn king_square(&self, color: nnue_rs::Color) -> u8 {
-        let c = match color {
-            nnue_rs::Color::White => Color::White,
-            nnue_rs::Color::Black => Color::Black,
-        };
-        (self.0.pieces(Piece::King) & self.0.color_combined(c)).to_square().to_index() as u8
-    }
-
-    fn for_each_piece(&self, f: &mut dyn FnMut(u8, nnue_rs::Piece)) {
-        for color in [Color::White, Color::Black] {
-            let nnue_color = match color {
-                Color::White => nnue_rs::Color::White,
-                Color::Black => nnue_rs::Color::Black,
-            };
-            for piece in [
-                Piece::Pawn, Piece::Knight, Piece::Bishop,
-                Piece::Rook, Piece::Queen, Piece::King
-            ] {
-                let nnue_kind = match piece {
-                    Piece::Pawn => nnue_rs::PieceKind::Pawn,
-                    Piece::Knight => nnue_rs::PieceKind::Knight,
-                    Piece::Bishop => nnue_rs::PieceKind::Bishop,
-                    Piece::Rook => nnue_rs::PieceKind::Rook,
-                    Piece::Queen => nnue_rs::PieceKind::Queen,
-                    Piece::King => nnue_rs::PieceKind::King,
-                };
-                let nnue_piece = nnue_rs::Piece { color: nnue_color, kind: nnue_kind };
-                
-                let bitboard = self.0.pieces(piece) & self.0.color_combined(color);
-                for sq in bitboard {
-                    f(sq.to_index() as u8, nnue_piece);
-                }
-            }
-        }
-    }
-}
-
-fn pseudo_nnue_evaluate(board: &Board) -> i32 {
-    // We disable NNUE for now because it calculates from scratch and only does ~7,800 NPS
-    // which is far too slow for 1-minute bullet or 3-minute rapid games!
-    /*
-    if let Some(net) = NNUE.as_ref() {
-        return net.evaluate(&NnueBoard(board));
-    }
-    */
-
+impl ChessEngine {
+    fn evaluate_full(&mut self, board: &Board) -> i32 {
     let mut score = evaluate(board); // Base PeSTO evaluation
     
     // Advanced King Safety
@@ -1067,6 +1241,14 @@ fn pseudo_nnue_evaluate(board: &Board) -> i32 {
         } else {
             w_safety -= 50; // King is marching up the board
         }
+        let k_r = king_sq.get_rank().to_index() as i32;
+        let k_f = king_sq.get_file().to_index() as i32;
+        for sq in board.color_combined(Color::Black) & (board.pieces(Piece::Queen) | board.pieces(Piece::Rook) | board.pieces(Piece::Knight)) {
+            let r = sq.get_rank().to_index() as i32;
+            let f = sq.get_file().to_index() as i32;
+            let dist = (k_r - r).abs().max((k_f - f).abs());
+            w_safety -= (8 - dist) * 2;
+        }
     }
     
     let mut b_safety = 0;
@@ -1090,64 +1272,98 @@ fn pseudo_nnue_evaluate(board: &Board) -> i32 {
         } else {
             b_safety -= 50; // King is marching down the board
         }
+        let k_r = king_sq.get_rank().to_index() as i32;
+        let k_f = king_sq.get_file().to_index() as i32;
+        for sq in board.color_combined(Color::White) & (board.pieces(Piece::Queen) | board.pieces(Piece::Rook) | board.pieces(Piece::Knight)) {
+            let r = sq.get_rank().to_index() as i32;
+            let f = sq.get_file().to_index() as i32;
+            let dist = (k_r - r).abs().max((k_f - f).abs());
+            b_safety -= (8 - dist) * 2;
+        }
     }
     
     // Positional Pawn Evaluation (Passed, Isolated, Doubled)
-    let mut w_pawn_score = 0;
-    for sq in w_pawns {
-        let file = sq.get_file().to_index();
-        let rank = sq.get_rank().to_index();
-        let mut isolated = true;
-        let mut doubled = false;
-        let mut passed = true;
-        
-        for other_sq in w_pawns {
-            if other_sq == sq { continue; }
-            let other_file = other_sq.get_file().to_index();
-            let other_rank = other_sq.get_rank().to_index();
-            if (other_file as i32 - file as i32).abs() == 1 { isolated = false; }
-            if other_file == file && other_rank > rank { doubled = true; }
+    let w_pawns_bb = w_pawns.0;
+    let b_pawns_bb = b_pawns.0;
+    let pawn_hash_key = w_pawns_bb.wrapping_mul(0x9E3779B97F4A7C15) ^ b_pawns_bb.wrapping_mul(0xC6A4A7935BD1E995);
+    
+    let (w_pawn_score, b_pawn_score) = if let Some((w_score, b_score)) = get_pawn_hash().probe(pawn_hash_key) {
+        (w_score, b_score)
+    } else {
+        let mut w_score = 0;
+        for sq in w_pawns {
+            let file = sq.get_file().to_index();
+            let rank = sq.get_rank().to_index();
+            let file_mask = 0x0101010101010101_u64 << file;
+            let adj_files = (if file > 0 { 0x0101010101010101_u64 << (file - 1) } else { 0 }) |
+                            (if file < 7 { 0x0101010101010101_u64 << (file + 1) } else { 0 });
+            
+            let isolated = (w_pawns_bb & adj_files) == 0;
+            
+            let w_front_span = if rank < 7 { !0u64 << ((rank + 1) * 8) } else { 0 };
+            let doubled = (w_pawns_bb & file_mask & w_front_span) != 0;
+            
+            let passed_mask = (file_mask | adj_files) & w_front_span;
+            let passed = (b_pawns_bb & passed_mask) == 0;
+            
+            if isolated { w_score -= 15; }
+            if doubled { w_score -= 15; }
+            if passed { w_score += 20 + (rank as i32) * 15; }
         }
-        for enemy_sq in b_pawns {
-            let enemy_file = enemy_sq.get_file().to_index();
-            let enemy_rank = enemy_sq.get_rank().to_index();
-            if enemy_rank > rank && (enemy_file as i32 - file as i32).abs() <= 1 {
-                passed = false;
-                break;
+        
+        let mut b_score = 0;
+        for sq in b_pawns {
+            let file = sq.get_file().to_index();
+            let rank = sq.get_rank().to_index();
+            let file_mask = 0x0101010101010101_u64 << file;
+            let adj_files = (if file > 0 { 0x0101010101010101_u64 << (file - 1) } else { 0 }) |
+                            (if file < 7 { 0x0101010101010101_u64 << (file + 1) } else { 0 });
+            
+            let isolated = (b_pawns_bb & adj_files) == 0;
+            
+            let b_front_span = if rank > 0 { (1u64 << (rank * 8)) - 1 } else { 0 };
+            let doubled = (b_pawns_bb & file_mask & b_front_span) != 0;
+            
+            let passed_mask = (file_mask | adj_files) & b_front_span;
+            let passed = (w_pawns_bb & passed_mask) == 0;
+            
+            if isolated { b_score -= 15; }
+            if doubled { b_score -= 15; }
+            if passed { b_score += 20 + ((7 - rank) as i32) * 15; }
+        }
+        
+        get_pawn_hash().store(pawn_hash_key, w_score, b_score);
+        (w_score, b_score)
+    };
+
+    // Rook open-file bonuses
+    let w_rooks = board.pieces(Piece::Rook) & board.color_combined(Color::White);
+    let mut rook_score = 0;
+    for sq in w_rooks {
+        let file = sq.get_file().to_index();
+        let file_mask = 0x0101010101010101_u64 << file;
+        if (w_pawns_bb & file_mask) == 0 {
+            if (b_pawns_bb & file_mask) == 0 {
+                rook_score += 20; // Fully open
+            } else {
+                rook_score += 10; // Semi-open
             }
         }
-        if isolated { w_pawn_score -= 15; }
-        if doubled { w_pawn_score -= 15; }
-        if passed { w_pawn_score += 20 + (rank as i32) * 15; }
     }
     
-    let mut b_pawn_score = 0;
-    for sq in b_pawns {
+    let b_rooks = board.pieces(Piece::Rook) & board.color_combined(Color::Black);
+    for sq in b_rooks {
         let file = sq.get_file().to_index();
-        let rank = sq.get_rank().to_index();
-        let mut isolated = true;
-        let mut doubled = false;
-        let mut passed = true;
-        
-        for other_sq in b_pawns {
-            if other_sq == sq { continue; }
-            let other_file = other_sq.get_file().to_index();
-            let other_rank = other_sq.get_rank().to_index();
-            if (other_file as i32 - file as i32).abs() == 1 { isolated = false; }
-            if other_file == file && other_rank < rank { doubled = true; }
-        }
-        for enemy_sq in w_pawns {
-            let enemy_file = enemy_sq.get_file().to_index();
-            let enemy_rank = enemy_sq.get_rank().to_index();
-            if enemy_rank < rank && (enemy_file as i32 - file as i32).abs() <= 1 {
-                passed = false;
-                break;
+        let file_mask = 0x0101010101010101_u64 << file;
+        if (b_pawns_bb & file_mask) == 0 {
+            if (w_pawns_bb & file_mask) == 0 {
+                rook_score -= 20; // Fully open
+            } else {
+                rook_score -= 10; // Semi-open
             }
         }
-        if isolated { b_pawn_score -= 15; }
-        if doubled { b_pawn_score -= 15; }
-        if passed { b_pawn_score += 20 + ((7 - rank) as i32) * 15; }
     }
+    score += rook_score;
 
     // Bishop pair synergy
     let w_bishops = board.pieces(Piece::Bishop) & board.color_combined(Color::White);
@@ -1161,6 +1377,7 @@ fn pseudo_nnue_evaluate(board: &Board) -> i32 {
     score -= b_pawn_score;
     
     if board.side_to_move() == Color::White { score } else { -score }
+}
 }
 
 fn get_phase(board: &Board) -> i32 {
@@ -1226,33 +1443,6 @@ fn evaluate(board: &Board) -> i32 {
 mod tests {
     use super::*;
 
-    /// NNUE testleri şu an devre dışı (incremental update olmadan çok yavaş).
-    /// NNUE incremental update eklendiğinde #[ignore] kaldırılacak.
-    #[test]
-    #[ignore]
-    fn test_nnue_loads() {
-        assert!(NNUE.is_some(), "NNUE failed to load!");
-    }
-
-    #[test]
-    #[ignore]
-    fn test_nnue_scale() {
-        let board = Board::default();
-        let net = NNUE.as_ref().unwrap();
-        let eval = net.evaluate(&NnueBoard(&board));
-        println!("NNUE initial position eval: {}", eval);
-        
-        // E4 E5
-        let b2 = Board::from_str("rnbqkbnr/pppp1ppp/8/4p3/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 0 2").unwrap();
-        let eval2 = net.evaluate(&NnueBoard(&b2));
-        println!("NNUE after e4 e5 eval: {}", eval2);
-        
-        // White up a pawn
-        let b3 = Board::from_str("rnbqkbnr/pppp1ppp/8/4p3/3PP3/8/PPP2PPP/RNBQKBNR b KQkq - 0 2").unwrap();
-        let eval3 = net.evaluate(&NnueBoard(&b3));
-        println!("NNUE Black to move, White up a pawn eval: {}", eval3);
-    }
-
     #[test]
     fn test_see_basic() {
         // QxP should win material: queen takes pawn → positive SEE expected
@@ -1279,11 +1469,12 @@ mod tests {
     #[test]
     fn test_eval_speed() {
         let board = Board::default();
+        let mut engine = ChessEngine::new();
         let start = std::time::Instant::now();
         let mut sum = 0;
         let iters = 1_000_000;
         for _ in 0..iters {
-            sum += pseudo_nnue_evaluate(&board);
+            sum += engine.evaluate_full(&board);
         }
         let duration = start.elapsed();
         println!("Evaluated {} nodes in {:?} ({} NPS)", iters, duration,

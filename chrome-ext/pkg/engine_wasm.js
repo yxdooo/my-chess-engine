@@ -18,9 +18,10 @@ export class ChessEngine {
      * @param {number} split_id
      * @param {number} split_count
      * @param {string} history
+     * @param {Uint8Array | null} [abort_flag]
      * @returns {string}
      */
-    get_best_move(fen, time_limit_ms, elo, split_id, split_count, history) {
+    get_best_move(fen, time_limit_ms, elo, split_id, split_count, history, abort_flag) {
         let deferred3_0;
         let deferred3_1;
         try {
@@ -28,7 +29,7 @@ export class ChessEngine {
             const len0 = WASM_VECTOR_LEN;
             const ptr1 = passStringToWasm0(history, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
             const len1 = WASM_VECTOR_LEN;
-            const ret = wasm.chessengine_get_best_move(this.__wbg_ptr, ptr0, len0, time_limit_ms, elo, split_id, split_count, ptr1, len1);
+            const ret = wasm.chessengine_get_best_move(this.__wbg_ptr, ptr0, len0, time_limit_ms, elo, split_id, split_count, ptr1, len1, isLikeNone(abort_flag) ? 0 : addToExternrefTable0(abort_flag));
             deferred3_0 = ret[0];
             deferred3_1 = ret[1];
             return getStringFromWasm0(ret[0], ret[1]);
@@ -66,6 +67,10 @@ function __wbg_get_imports() {
             } finally {
                 wasm.__wbindgen_free(deferred0_0, deferred0_1, 1);
             }
+        },
+        __wbg_get_index_e68b01fac18aa799: function(arg0, arg1) {
+            const ret = arg0[arg1 >>> 0];
+            return ret;
         },
         __wbg_new_227d7c05414eb861: function() {
             const ret = new Error();
@@ -106,6 +111,12 @@ const ChessEngineFinalization = (typeof FinalizationRegistry === 'undefined')
     ? { register: () => {}, unregister: () => {} }
     : new FinalizationRegistry(ptr => wasm.__wbg_chessengine_free(ptr, 1));
 
+function addToExternrefTable0(obj) {
+    const idx = wasm.__externref_table_alloc();
+    wasm.__wbindgen_externrefs.set(idx, obj);
+    return idx;
+}
+
 let cachedDataViewMemory0 = null;
 function getDataViewMemory0() {
     if (cachedDataViewMemory0 === null || cachedDataViewMemory0.buffer.detached === true || (cachedDataViewMemory0.buffer.detached === undefined && cachedDataViewMemory0.buffer !== wasm.memory.buffer)) {
@@ -124,6 +135,10 @@ function getUint8ArrayMemory0() {
         cachedUint8ArrayMemory0 = new Uint8Array(wasm.memory.buffer);
     }
     return cachedUint8ArrayMemory0;
+}
+
+function isLikeNone(x) {
+    return x === undefined || x === null;
 }
 
 function passStringToWasm0(arg, malloc, realloc) {
