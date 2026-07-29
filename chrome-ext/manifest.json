@@ -13,7 +13,8 @@
         "scripting",
         "storage",
         "offscreen",
-        "tabs"
+        "tabs",
+        "alarms"
     ],
     "host_permissions": [
         "*://*.chess.com/*",
