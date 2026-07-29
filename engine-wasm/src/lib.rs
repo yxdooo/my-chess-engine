@@ -9,6 +9,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::OnceLock;
 
 #[thread_local]
+#[cfg(target_family = "wasm")]
 #[no_mangle]
 pub static mut _DUMMY_TLS: u8 = 0;
 
