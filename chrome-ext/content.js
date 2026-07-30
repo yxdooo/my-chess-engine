@@ -604,10 +604,9 @@ function processPosition(networkFen = null) {
             console.log("[Content] Ponder hit! Instantly displaying move:", cached.bestMove);
             renderArrows([cached.pv], isMyTurn);
             
-            // Send message to background to update popup stats with cached ponder result
-            chrome.runtime.sendMessage({
-                type: "UPDATE_STATS",
-                data: {
+            // Update popup stats with cached ponder result
+            chrome.storage.local.set({
+                engineStats: {
                     score: cached.score,
                     depth: cached.depth,
                     nodes: cached.nodes,
