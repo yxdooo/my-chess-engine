@@ -554,17 +554,6 @@ function renderArrows(pvLines, isMyTurn) {
  * @param {string|null} networkFen - FEN from the WebSocket interceptor, or null to parse from DOM.
  */
 function processPosition(networkFen = null) {
-    if (!networkFen) {
-        // Fast-fail: check if piece count or ply changed before heavy parsing
-        const boardEl = document.querySelector("wc-chess-board, cg-board, .board");
-        if (boardEl) {
-            const ply = boardEl.getAttribute("data-ply") || "";
-            const numPieces = boardEl.querySelectorAll(".piece").length;
-            const stateHash = `${ply}-${numPieces}`;
-            if (window._lastBoardStateHash === stateHash) return;
-            window._lastBoardStateHash = stateHash;
-        }
-    }
     const fen = networkFen || parseBoard();
     if (!fen || fen === currentFEN) return;
 
@@ -702,11 +691,9 @@ function setupObserver() {
     for (const target of targets) {
         if (target === document.body) {
             activeObserver.observe(target, { childList: true });
-        } else if (target === board) {
-            // Drop 'attributes: true' to stop firing on every CSS transform tick during piece sliding
-            activeObserver.observe(target, { childList: true, subtree: true });
         } else {
-            activeObserver.observe(target, { childList: true, subtree: true });
+            // Need attributes to detect piece sliding/class changes
+            activeObserver.observe(target, { childList: true, subtree: true, attributes: true, attributeFilter: ['class', 'style'] });
         }
     }
     

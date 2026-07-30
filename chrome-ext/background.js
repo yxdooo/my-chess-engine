@@ -168,7 +168,7 @@ async function hasDocument() {
  * @returns {number} milliseconds to think
  */
 function computeEngineTime(timeLeft, elo, increment = 0) {
-    if (timeLeft !== null && timeLeft !== undefined) {
+    if (timeLeft !== null && timeLeft !== undefined && !isNaN(timeLeft)) {
         // Safe target time calculation: base time fraction + majority of increment
         const baseTime = (timeLeft * 1000) / 20; 
         const incTime = increment * 1000 * 0.8;
@@ -178,7 +178,9 @@ function computeEngineTime(timeLeft, elo, increment = 0) {
         if (timeLeft < 15) return 100 + (increment > 0 ? incTime : 0);
         if (timeLeft < 45) return 500 + (increment > 0 ? incTime : 0);
         
-        return Math.floor(targetTime);
+        if (!isNaN(targetTime)) {
+            return Math.floor(targetTime);
+        }
     }
     // No clock info (bot games, analysis) – use ELO-based fallback
     if (elo < 1000) return 300;

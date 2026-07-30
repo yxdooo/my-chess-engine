@@ -170,10 +170,13 @@ impl ChessEngine {
     pub fn get_best_move(&mut self, fen: &str, time_limit_ms: f64, elo: f64, split_id: u8, split_count: u8, history: &str, abort_flag: Option<js_sys::Uint8Array>) -> String {
         self.nodes = 0;
         self.stop_search = false;
-        self.time_limit_ms = time_limit_ms;
-        // Hard limit: absolute ceiling — check_time() stops the search when this is exceeded.
-        // 1.5x gives enough buffer for one extra depth without letting the search run wild.
-        self.hard_time_limit_ms = time_limit_ms * 1.5;
+        if time_limit_ms.is_nan() {
+            self.time_limit_ms = 3000.0;
+            self.hard_time_limit_ms = 4500.0;
+        } else {
+            self.time_limit_ms = time_limit_ms;
+            self.hard_time_limit_ms = time_limit_ms * 1.5;
+        }
         self.elo = elo as u32;
         self.abort_flag = abort_flag;
         // Bump generation every search so old TT entries are more aggressively replaced.
