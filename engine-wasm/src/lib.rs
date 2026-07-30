@@ -182,14 +182,57 @@ impl ChessEngine {
         let mut bytes = vec![0; data.length() as usize];
         data.copy_to(&mut bytes[..]);
         
-        // This is where you would parse the actual NNUE file format (the `bytes` array).
-        // For now, we will just allocate the network struct to indicate success.
-        if bytes.len() > 100 {
-            self.network = Some(Box::new(Network::new()));
-            true
-        } else {
-            false
+        if bytes.len() < 21022697 { return false; }
+        
+        let mut offset = 0;
+        let version = u32::from_le_bytes(bytes[offset..offset+4].try_into().unwrap()); offset += 4;
+        let hash = u32::from_le_bytes(bytes[offset..offset+4].try_into().unwrap()); offset += 4;
+        let desc_len = u32::from_le_bytes(bytes[offset..offset+4].try_into().unwrap()) as usize; offset += 4;
+        
+        offset += desc_len; // skip desc
+        
+        let ft_hash = u32::from_le_bytes(bytes[offset..offset+4].try_into().unwrap()); offset += 4;
+        
+        let mut net = Box::new(Network::new());
+        
+        for i in 0..nnue::LAYER1_BIASES {
+            net.feature_biases[i] = i16::from_le_bytes(bytes[offset..offset+2].try_into().unwrap());
+            offset += 2;
         }
+        for i in 0..nnue::LAYER1_WEIGHTS {
+            net.feature_weights[i] = i16::from_le_bytes(bytes[offset..offset+2].try_into().unwrap());
+            offset += 2;
+        }
+        
+        let fc_hash = u32::from_le_bytes(bytes[offset..offset+4].try_into().unwrap()); offset += 4;
+        
+        for i in 0..32 {
+            net.fc0_biases[i] = i32::from_le_bytes(bytes[offset..offset+4].try_into().unwrap());
+            offset += 4;
+        }
+        for i in 0..(512 * 32) {
+            net.fc0_weights[i] = bytes[offset] as i8;
+            offset += 1;
+        }
+        
+        for i in 0..32 {
+            net.fc1_biases[i] = i32::from_le_bytes(bytes[offset..offset+4].try_into().unwrap());
+            offset += 4;
+        }
+        for i in 0..(32 * 32) {
+            net.fc1_weights[i] = bytes[offset] as i8;
+            offset += 1;
+        }
+        
+        net.fc2_biases[0] = i32::from_le_bytes(bytes[offset..offset+4].try_into().unwrap());
+        offset += 4;
+        for i in 0..32 {
+            net.fc2_weights[i] = bytes[offset] as i8;
+            offset += 1;
+        }
+        
+        self.network = Some(net);
+        true
     }
 
     pub fn set_hash_size(&mut self, mb: usize) {
@@ -827,7 +870,7 @@ impl ChessEngine {
                 }
             }
         }
-        if rep_count >= 2 { return 0; }
+        if rep_count >= 1 { return 0; }
 
         if let Some(entry) = tt.probe(hash, ply) {
             if entry.flag == EXACT { return entry.score; }
@@ -939,7 +982,7 @@ impl ChessEngine {
                 }
             }
         }
-        if rep_count >= 2 { return 0; }
+        if rep_count >= 1 { return 0; }
         if (ply as usize) < 128 {
             self.search_path[ply as usize] = hash;
         }

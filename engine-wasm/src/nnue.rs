@@ -1,15 +1,20 @@
 use chess::{Board, Color, Piece};
+use std::convert::TryInto;
 
 pub const HIDDEN_SIZE: usize = 256;
-pub const INPUT_SIZE: usize = 41024; // 64 king squares * 641 piece combinations
+pub const INPUT_SIZE: usize = 41024; 
 pub const LAYER1_WEIGHTS: usize = INPUT_SIZE * HIDDEN_SIZE;
 pub const LAYER1_BIASES: usize = HIDDEN_SIZE;
 
 pub struct Network {
     pub feature_weights: Vec<i16>,
     pub feature_biases: Vec<i16>,
-    pub output_weights: Vec<i16>,
-    pub output_bias: i16,
+    pub fc0_weights: Vec<i8>,
+    pub fc0_biases: Vec<i32>,
+    pub fc1_weights: Vec<i8>,
+    pub fc1_biases: Vec<i32>,
+    pub fc2_weights: Vec<i8>,
+    pub fc2_biases: Vec<i32>,
 }
 
 impl Network {
@@ -17,8 +22,12 @@ impl Network {
         Self {
             feature_weights: vec![0; LAYER1_WEIGHTS],
             feature_biases: vec![0; LAYER1_BIASES],
-            output_weights: vec![0; HIDDEN_SIZE * 2],
-            output_bias: 0,
+            fc0_weights: vec![0; 512 * 32],
+            fc0_biases: vec![0; 32],
+            fc1_weights: vec![0; 32 * 32],
+            fc1_biases: vec![0; 32],
+            fc2_weights: vec![0; 32 * 1],
+            fc2_biases: vec![0; 1],
         }
     }
 }
@@ -52,6 +61,13 @@ fn make_piece_code(piece: Piece, color: Color) -> usize {
 
 fn flip_piece_code(pc: usize) -> usize {
     if pc < 5 { pc + 5 } else { pc - 5 }
+}
+
+fn add_feature(acc: &mut [i16; HIDDEN_SIZE], weights: &[i16], feature: usize) {
+    let offset = feature * HIDDEN_SIZE;
+    for i in 0..HIDDEN_SIZE {
+        acc[i] = acc[i].wrapping_add(weights[offset + i]);
+    }
 }
 
 pub fn refresh_accumulator(network: &Network, acc: &mut Accumulator, board: &Board) {
@@ -98,24 +114,31 @@ pub fn update_accumulator(network: &Network, next_acc: &mut Accumulator, prev_ac
             let new_bb = new_board.pieces(piece) & new_board.color_combined(color);
             let diff = old_bb.0 ^ new_bb.0;
             if diff != 0 {
-                let pc = make_piece_code(piece, color);
-                let flip_pc = flip_piece_code(pc);
-                
+                // Iteration over changed pieces
                 let mut d = diff;
                 while d != 0 {
                     let sq_idx = d.trailing_zeros() as usize;
-                    d &= d - 1;
+                    d &= d - 1; // clear lowest bit
                     
-                    let is_add = (new_bb.0 & (1 << sq_idx)) != 0;
+                    let pc = make_piece_code(piece, color);
                     let feature_w = wk * 641 + pc * 64 + sq_idx;
-                    let feature_b = bk_flipped * 641 + flip_pc * 64 + (sq_idx ^ 56);
+                    let feature_b = bk_flipped * 641 + flip_piece_code(pc) * 64 + (sq_idx ^ 56);
                     
-                    if is_add {
-                        add_feature(&mut next_acc.white, &network.feature_weights, feature_w);
-                        add_feature(&mut next_acc.black, &network.feature_weights, feature_b);
+                    let offset_w = feature_w * HIDDEN_SIZE;
+                    let offset_b = feature_b * HIDDEN_SIZE;
+                    
+                    if new_bb.0 & (1u64 << sq_idx) != 0 {
+                        // Added piece
+                        for i in 0..HIDDEN_SIZE {
+                            next_acc.white[i] = next_acc.white[i].wrapping_add(network.feature_weights[offset_w + i]);
+                            next_acc.black[i] = next_acc.black[i].wrapping_add(network.feature_weights[offset_b + i]);
+                        }
                     } else {
-                        sub_feature(&mut next_acc.white, &network.feature_weights, feature_w);
-                        sub_feature(&mut next_acc.black, &network.feature_weights, feature_b);
+                        // Removed piece
+                        for i in 0..HIDDEN_SIZE {
+                            next_acc.white[i] = next_acc.white[i].wrapping_sub(network.feature_weights[offset_w + i]);
+                            next_acc.black[i] = next_acc.black[i].wrapping_sub(network.feature_weights[offset_b + i]);
+                        }
                     }
                 }
             }
@@ -123,41 +146,42 @@ pub fn update_accumulator(network: &Network, next_acc: &mut Accumulator, prev_ac
     }
 }
 
-fn sub_feature(acc: &mut [i16; HIDDEN_SIZE], weights: &[i16], feature_idx: usize) {
-    let offset = feature_idx * HIDDEN_SIZE;
-    if offset + HIDDEN_SIZE <= weights.len() {
-        for i in 0..HIDDEN_SIZE {
-            acc[i] = acc[i].wrapping_sub(weights[offset + i]);
-        }
-    }
-}
-
-fn add_feature(acc: &mut [i16; HIDDEN_SIZE], weights: &[i16], feature_idx: usize) {
-    let offset = feature_idx * HIDDEN_SIZE;
-    if offset + HIDDEN_SIZE <= weights.len() {
-        for i in 0..HIDDEN_SIZE {
-            acc[i] = acc[i].wrapping_add(weights[offset + i]);
-        }
-    }
-}
-
 pub fn evaluate(network: &Network, acc: &Accumulator, stm: Color) -> i32 {
-    let (us, them) = match stm {
-        Color::White => (&acc.white, &acc.black),
-        Color::Black => (&acc.black, &acc.white),
+    let (us, them) = if stm == Color::White {
+        (&acc.white, &acc.black)
+    } else {
+        (&acc.black, &acc.white)
     };
 
-    let mut sum: i32 = network.output_bias as i32;
-
-    // SCALAR implementation of Clipped ReLU (CReLU)
-    for i in 0..HIDDEN_SIZE {
-        let act_us = us[i].max(0).min(127) as i32;
-        let act_them = them[i].max(0).min(127) as i32;
-        
-        sum += act_us * network.output_weights[i] as i32;
-        sum += act_them * network.output_weights[HIDDEN_SIZE + i] as i32;
+    let mut input = [0i8; 512];
+    for i in 0..256 {
+        input[i] = us[i].clamp(0, 127) as i8;
+        input[256 + i] = them[i].clamp(0, 127) as i8;
     }
 
+    let mut fc0 = [0i32; 32];
+    for i in 0..32 {
+        let mut sum = network.fc0_biases[i];
+        for j in 0..512 {
+            sum += (input[j] as i32) * (network.fc0_weights[i * 512 + j] as i32);
+        }
+        fc0[i] = sum.clamp(0, 127 * 64) / 64;
+    }
+
+    let mut fc1 = [0i32; 32];
+    for i in 0..32 {
+        let mut sum = network.fc1_biases[i];
+        for j in 0..32 {
+            sum += fc0[j] * (network.fc1_weights[i * 32 + j] as i32);
+        }
+        fc1[i] = sum.clamp(0, 127 * 64) / 64;
+    }
+
+    let mut sum = network.fc2_biases[0];
+    for j in 0..32 {
+        sum += fc1[j] * (network.fc2_weights[j] as i32);
+    }
+    
     // Scale down from NNUE internal units to centipawns
     sum / 16
 }

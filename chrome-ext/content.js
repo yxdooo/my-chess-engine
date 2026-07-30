@@ -597,22 +597,31 @@ function processPosition(networkFen = null) {
     const historyStr = fenHistory.join("|");
 
     // Check if a ponder result is already cached for this position.
-    // If so, play the move instantly and show the arrow.
+    // If so, display arrows instantly. Play move if autoplay is on.
     if (isMyTurn && ponderCache[normFen]) {
         const cached = ponderCache[normFen];
-        ponderCache = {};
-
         if (cached.bestMove) {
-            // Show the arrow first, then conditionally play the move
-            if (cached.pv && cached.pv.length > 0) {
-                renderArrows([cached.pv], true);
-            }
+            console.log("[Content] Ponder hit! Instantly displaying move:", cached.bestMove);
+            renderArrows([cached.pv], isMyTurn);
+            
+            // Send message to background to update popup stats with cached ponder result
+            chrome.runtime.sendMessage({
+                type: "UPDATE_STATS",
+                data: {
+                    score: cached.score,
+                    depth: cached.depth,
+                    nodes: cached.nodes,
+                    timeMs: cached.timeMs,
+                }
+            });
+            
             if (currentEngineMode === "autoplay") {
-                const delay = 150 + Math.floor(Math.random() * 200);
-                setTimeout(() => playMove(cached.bestMove), delay);
+                playMove(cached.bestMove);
             }
+            
+            // Return early to prevent starting a new shallow search that would overwrite our deep ponder result!
+            return;
         }
-        return;
     }
     ponderCache = {};
 
