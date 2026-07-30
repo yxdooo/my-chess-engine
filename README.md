@@ -1,8 +1,8 @@
-# Aether Chess Engine v3.0.0
+# Aether Chess Engine v2.2
 
-**Aether** is a highly optimized, multi-threaded WebAssembly chess engine and Chrome extension written purely in Rust. With the v3.0.0 update, Aether transforms into a hybrid powerhouse combining **Deep Search Heuristics**, **Neural Networks (NNUE)**, and **Cloud Tablebases** for an estimated Elo of **3000+**.
+**Aether** is a highly optimized, multi-threaded WebAssembly chess engine and Chrome extension written purely in Rust. With the v2.2 update, Aether transforms into a hybrid powerhouse combining **Deep Search Heuristics**, **Neural Networks (NNUE)**, and **Cloud Tablebases** for an estimated Elo of **3000+**.
 
-## 🚀 Engine Features (v3.0.0)
+## 🚀 Engine Features (v2.2)
 
 - **Blazing-Fast WASM Core** – The entire chess engine is written in Rust and compiled to WebAssembly for near-native performance directly in your browser.
 - **Offline NNUE Evaluation (New!)** – Replaced PeSTO Piece-Square Tables with a state-of-the-art **HalfKP Architecture NNUE**. Evaluates positions with neural precision. Works 100% offline via embedded `.nnue` binary loaded into WASM memory.
