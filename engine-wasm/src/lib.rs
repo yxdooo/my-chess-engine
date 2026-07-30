@@ -709,7 +709,12 @@ impl ChessEngine {
         if let Some(flag) = &self.abort_flag {
             if flag.get_index(0) == 1 {
                 self.stop_search = true;
+                return;
             }
+        }
+        let now = js_sys::Date::now();
+        if now - self.start_time >= self.hard_time_limit_ms {
+            self.stop_search = true;
         }
     }
 
