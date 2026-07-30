@@ -54,7 +54,7 @@ function normalizeFen(fen) {
  * Also syncs canvas dimensions and flip state.
  */
 function initOverlay() {
-    const boardEl = document.querySelector("wc-chess-board, chess-board");
+    const boardEl = document.querySelector("wc-chess-board, chess-board, cg-board");
     if (!boardEl) return;
 
     if (!overlayCanvas) {
@@ -69,7 +69,7 @@ function initOverlay() {
         boardEl.appendChild(overlayCanvas);
     }
 
-    const isFlipped = boardEl.classList.contains("flipped");
+    const isFlipped = boardEl.classList.contains("flipped") || boardEl.classList.contains("orientation-black");
     const boardWidth = boardEl.clientWidth;
     const boardHeight = boardEl.clientHeight;
 
@@ -285,8 +285,8 @@ function playMove(uci) {
         const rectNow = boardElNow.getBoundingClientRect();
         const sqSizeNow = rectNow.width / 8;
         const fromNow = {
-            x: rectNow.left + (flipBoard ? 7 - fromFile : fromFile + 0.5) * sqSizeNow,
-            y: rectNow.top + (flipBoard ? fromRank : 7 - fromRank + 0.5) * sqSizeNow
+            x: rectNow.left + ((flipBoard ? 7 - fromFile : fromFile) + 0.5) * sqSizeNow,
+            y: rectNow.top + ((flipBoard ? fromRank : 7 - fromRank) + 0.5) * sqSizeNow
         };
         simulateClick(fromNow.x, fromNow.y);
 
@@ -298,8 +298,8 @@ function playMove(uci) {
             const rectFinal = boardElFinal.getBoundingClientRect();
             const sqSizeFinal = rectFinal.width / 8;
             const toFinal = {
-                x: rectFinal.left + (flipBoard ? 7 - toFile : toFile + 0.5) * sqSizeFinal,
-                y: rectFinal.top + (flipBoard ? toRank : 7 - toRank + 0.5) * sqSizeFinal
+                x: rectFinal.left + ((flipBoard ? 7 - toFile : toFile) + 0.5) * sqSizeFinal,
+                y: rectFinal.top + ((flipBoard ? toRank : 7 - toRank) + 0.5) * sqSizeFinal
             };
             simulateClick(toFinal.x, toFinal.y);
 
@@ -324,11 +324,12 @@ function playMove(uci) {
  * @returns {string|null}
  */
 function parseBoard() {
-    const boardEl = document.querySelector("wc-chess-board, chess-board");
+    const boardEl = document.querySelector("wc-chess-board, chess-board, cg-board, .cg-board, .board");
     if (!boardEl) return null;
 
-    flipBoard = boardEl.classList.contains("flipped");
+    flipBoard = boardEl.classList.contains("flipped") || boardEl.classList.contains("orientation-black");
     const pieces = boardEl.querySelectorAll(".piece");
+    const boardWidth = boardEl.clientWidth;
 
     const board = new Array(64).fill(null);
     let whiteKing = false;
@@ -342,7 +343,28 @@ function parseBoard() {
             if (/^square-[a-h1-8][1-8]$/.test(cls)) squareClass = cls;
         });
 
-        if (!pieceClass) return;
+        let char = null;
+        if (pieceClass) {
+            char = pieceClass[1];
+            if (pieceClass[0] === "w") char = char.toUpperCase();
+        } else {
+            const isWhite = p.classList.contains("white");
+            if (p.classList.contains("pawn")) char = isWhite ? "P" : "p";
+            else if (p.classList.contains("rook")) char = isWhite ? "R" : "r";
+            else if (p.classList.contains("knight")) char = isWhite ? "N" : "n";
+            else if (p.classList.contains("bishop")) char = isWhite ? "B" : "b";
+            else if (p.classList.contains("queen")) char = isWhite ? "Q" : "q";
+            else if (p.classList.contains("king")) char = isWhite ? "K" : "k";
+        }
+
+        if (!char) return;
+
+        // Ignore pieces that are fading out or hidden (e.g., captured pieces during animation)
+        const computedStyle = window.getComputedStyle(p);
+        if (parseFloat(computedStyle.opacity) < 1 || computedStyle.display === "none") return;
+        if (p.classList.contains("fade-out")) return;
+        // Ignore hints or highlights if any slipped in
+        if (p.classList.contains("highlight") || p.classList.contains("hint")) return;
 
         let file = -1;
         let rank = -1;
@@ -366,7 +388,7 @@ function parseBoard() {
                 const x = parseFloat(match[1]);
                 const y = parseFloat(match[2]);
                 const sqW = p.style.transform.includes("px")
-                    ? boardEl.clientWidth / 8
+                    ? boardWidth / 8
                     : 100;
                 file = Math.round(x / sqW);
                 rank = 7 - Math.round(y / sqW);
@@ -379,8 +401,6 @@ function parseBoard() {
 
         if (file < 0 || file > 7 || rank < 0 || rank > 7) return;
 
-        let char = pieceClass[1];
-        if (pieceClass[0] === "w") char = char.toUpperCase();
         board[rank * 8 + file] = char;
 
         if (char === "K") whiteKing = true;
@@ -410,7 +430,7 @@ function parseBoard() {
     // Determine side to move from move list
     let stm = "w";
     const moveNodes = document.querySelectorAll(
-        "wc-move-list .node:not(.icon-font-chess), .move-list-item .node"
+        "wc-move-list .node:not(.icon-font-chess), .move-list-item .node, l4x rm, l4x u32"
     );
 
     let maxPly = 0;
@@ -467,7 +487,7 @@ function parseBoard() {
  */
 function getMyTimeLeft() {
     let myClock = document.querySelector(
-        ".clock-bottom .clock-time-monospaced, .clock-bottom.clock-component, [data-cy='clock-bottom'] .clock-time-monospaced, .clock-bottom, #board-layout-player-bottom .clock-time-monospaced"
+        ".clock-bottom .clock-time-monospaced, .clock-bottom.clock-component, [data-cy='clock-bottom'] .clock-time-monospaced, .clock-bottom, #board-layout-player-bottom .clock-time-monospaced, .rclock-bottom .time, .cg-clock-bottom"
     );
     if (!myClock) {
         // Fallback: if multiple clocks exist in DOM, we are always the bottom (last) clock!
@@ -675,17 +695,23 @@ function setupObserver() {
         if (now - lastProcessTime > 100 && !isProcessing) {
              isProcessing = true;
              lastProcessTime = now;
-             processPosition();
-             isProcessing = false;
+             setTimeout(() => {
+                 processPosition();
+                 isProcessing = false;
+             }, 0);
         }
 
         clearTimeout(debounceTimer);
         debounceTimer = setTimeout(() => {
-             if (Date.now() - lastProcessTime > 100) {
+             if (Date.now() - lastProcessTime > 100 && !isProcessing) {
+                 isProcessing = true;
                  lastProcessTime = Date.now();
-                 processPosition();
+                 setTimeout(() => {
+                     processPosition();
+                     isProcessing = false;
+                 }, 0);
              }
-        }, 200);
+        }, 400);
     });
 
     for (const target of targets) {

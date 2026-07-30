@@ -1,42 +1,47 @@
-# Aether Chess Engine
+# Aether Chess Engine v3.0.0
 
-**Aether** is a highly optimized, multi-threaded WebAssembly chess engine written purely in Rust. It utilizes modern bitboard operations, k-less transposition tables, and aggressive pruning techniques to achieve high performance.
+**Aether** is a highly optimized, multi-threaded WebAssembly chess engine and Chrome extension written purely in Rust. With the v3.0.0 update, Aether transforms into a hybrid powerhouse combining **Deep Search Heuristics**, **Neural Networks (NNUE)**, and **Cloud Tablebases** for an estimated Elo of **3000+**.
 
-## 🚀 Engine Features
+## 🚀 Engine Features (v3.0.0)
 
 - **Blazing-Fast WASM Core** – The entire chess engine is written in Rust and compiled to WebAssembly for near-native performance directly in your browser.
-- **Lazy SMP (Symmetric Multiprocessing)** – Uses a dedicated Web Worker pool coordinated via a shared `TranspositionTable` backed by WebAssembly `SharedArrayBuffer` atomics to distribute the search tree across multiple CPU cores without locks.
+- **Offline NNUE Evaluation (New!)** – Replaced PeSTO Piece-Square Tables with a state-of-the-art **HalfKP Architecture NNUE**. Evaluates positions with neural precision. Works 100% offline via embedded `.nnue` binary loaded into WASM memory.
+  - Features real-time **Incremental Delta Updates** for massive NPS boosts.
+- **Endgame Mastery via Syzygy (New!)** – Integrates Lichess Syzygy Tablebases. For any position with 7 or fewer pieces, the engine intercepts the search and queries mathematically perfect mate/WDL moves in milliseconds.
 - **Advanced Engine Heuristics** – 
+  - **Futility Pruning (FP) & Reverse Futility Pruning (RFP)**
+  - **ProbCut & Singular Extensions**
+  - **History Malus, Countermove & Follow-up History Tables**
   - **Principal Variation Search (PVS/Negamax)** with strict Aspiration Windows.
-  - **Static Exchange Evaluation (SEE)** for tactical capture resolution, pruning, and check extension filtering.
-  - **Logarithmic Late Move Reductions (LMR)** with history heuristic integration for aggressive forward pruning.
-  - **Null Move Pruning (NMP)** with depth-1 verification search to prevent false horizon mates.
-  - **Singular Extensions** with dynamic halfmove clock detection to strictly honor 50-move draws.
-  - **Multi-Cut Pruning** for rapid beta-cutoff detection.
-- **Positional Evaluation** – 
-  - **O(1) Bitwise Pawn Structure Analysis** (Passed, Isolated, Doubled) for lightning-fast evaluation without looping.
-  - **King Safety Tropism** punishing enemy proximity (Manhattan/Chebyshev distance) to the King.
-  - **Rook Open/Semi-Open File Bonuses** and Bishop Pair synergies.
-  - Tapered Evaluation combining piece-square tables (PeSTO) dynamically blending Midgame and Endgame weights based on material phase.
-- **Transposition Table** – Lock-free, collision-resistant transposition tables utilizing upper 16-bit hash signatures.
+  - **Null Move Pruning (NMP)** with verification to prevent zugzwang bugs.
+  - **Static Exchange Evaluation (SEE)**
+- **Transposition Table** – Multi-threaded WASM data-race free TT utilizing 64-bit atomic split XOR hashing (`Ordering::Acquire`/`Release`).
 
-## 🛠️ Architecture
+## 🛠️ Architecture & Chrome Extension
+
+Aether isn't just an engine; it comes bundled with a powerful Chrome Extension that interacts directly with popular chess sites (e.g. Lichess).
+- Built with **Manifest V3**.
+- DOM Observers wrapped in `requestAnimationFrame` to prevent layout thrashing.
+- Background worker acts as the central coordinator between the Offscreen Document (WASM Motor) and the Active Tab.
 
 ```
 chess-engine/
+├── chrome-ext/        Manifest V3 Extension (Content scripts, workers, UI)
 ├── build_prod.js      Production bundler & minifier script (esbuild)
 ├── package.json       NPM scripts and dependencies
 └── engine-wasm/
     ├── src/lib.rs     Rust chess engine source (Bitboards, Negamax, SEE, Eval)
-    └── Cargo.toml     Rust dependencies (chess crate)
+    ├── src/nnue.rs    Neural Network (HalfKP) implementation
+    └── Cargo.toml     Rust dependencies
 ```
 
 ## 📦 Build Instructions
 
 ### Prerequisites
 
-- [Rust](https://rustup.rs/) (latest stable)
+- [Rust](https://rustup.rs/) (latest stable or nightly for WebAssembly)
 - Node.js (for building the production bundle)
+- wasm-pack
 
 ### Compile the Engine
 
@@ -48,7 +53,12 @@ npm install
 node build_prod.js
 ```
 
-> **Note:** The `build_prod.js` script automatically invokes Cargo to compile the Rust engine into WebAssembly, optimizes it, and bundles the result into a `dist/` directory.
+> **Note:** The `build_prod.js` script automatically invokes `wasm-pack` to compile the Rust engine, copies the generated WASM into the extension package, minifies the JS via esbuild, and outputs the production-ready extension into the `dist/` directory.
+
+### Install in Chrome
+1. Navigate to `chrome://extensions/`
+2. Enable **Developer mode**.
+3. Click **Load unpacked** and select the `dist/` directory.
 
 ## ⚖️ License
 

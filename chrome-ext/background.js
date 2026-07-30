@@ -217,35 +217,50 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                 const increment    = result.increment || 0;
                 const engineTime   = computeEngineTime(message.timeLeft, elo, increment);
                 const normFen      = normalizeFen(message.fen);
+                const pieceCount   = normFen.split(' ')[0].replace(/[\/0-9]/g, '').length;
 
-                // 1. Check aggressive opening book.
-                if (message.isMyTurn && AGGRESSIVE_BOOK[normFen]) {
-                    const trapMove = AGGRESSIVE_BOOK[normFen];
-                    sendResponse({ bestMove: trapMove, pv: [trapMove] });
-                    return;
-                }
+                const fallbackToEngine = () => {
+                    // 1. Check aggressive opening book.
+                    if (message.isMyTurn && AGGRESSIVE_BOOK[normFen]) {
+                        const trapMove = AGGRESSIVE_BOOK[normFen];
+                        sendResponse({ bestMove: trapMove, pv: [trapMove] });
+                        return;
+                    }
 
-                // 2. For our turn: try cloud resources before falling back to engine.
-                if (message.isMyTurn) {
-                    // Masters opening explorer (only for ELO >= 1600)
-                    fetchWithTimeout(
-                        "https://explorer.lichess.ovh/masters?fen=" +
-                            encodeURIComponent(message.fen),
-                        {},
-                        1000
-                    )
-                        .then((r) => r.json())
-                        .then((data) => {
-                            if (
-                                data.moves &&
-                                data.moves.length > 0 &&
-                                elo >= 1600
-                            ) {
-                                sendResponse({
-                                    bestMove: data.moves[0].uci,
-                                    pv: [data.moves[0].uci],
-                                });
-                            } else {
+                    // 2. For our turn: try cloud resources before falling back to engine.
+                    if (message.isMyTurn) {
+                        // Masters opening explorer (only for ELO >= 1600)
+                        fetchWithTimeout(
+                            "https://explorer.lichess.ovh/masters?fen=" +
+                                encodeURIComponent(message.fen),
+                            {},
+                            1000
+                        )
+                            .then((r) => r.json())
+                            .then((data) => {
+                                if (
+                                    data.moves &&
+                                    data.moves.length > 0 &&
+                                    elo >= 1600
+                                ) {
+                                    sendResponse({
+                                        bestMove: data.moves[0].uci,
+                                        pv: [data.moves[0].uci],
+                                    });
+                                } else {
+                                    callOffscreenEngine(
+                                        message.fen,
+                                        engineTime,
+                                        elo,
+                                        workerCount,
+                                        true,
+                                        message.history,
+                                        hashSize,
+                                        sendResponse
+                                    );
+                                }
+                            })
+                            .catch(() => {
                                 callOffscreenEngine(
                                     message.fen,
                                     engineTime,
@@ -256,21 +271,46 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                                     hashSize,
                                     sendResponse
                                 );
+                            });
+                    } else {
+                        // Pondering on opponent's turn.
+                        callOffscreenEngine(
+                            message.fen,
+                            engineTime,
+                            elo,
+                            workerCount,
+                            false,
+                            message.history,
+                            hashSize,
+                            sendResponse
+                        );
+                    }
+                };
+
+                // 0. Endgame Tablebases (7 pieces or fewer)
+                if (pieceCount <= 7) {
+                    fetchWithTimeout(
+                        "https://tablebase.lichess.ovh/standard?fen=" + encodeURIComponent(message.fen),
+                        {},
+                        2000
+                    )
+                        .then((r) => r.json())
+                        .then((data) => {
+                            if (data && data.moves && data.moves.length > 0) {
+                                // Lichess API returns moves sorted by optimal outcome (WDL and DTZ).
+                                sendResponse({
+                                    bestMove: data.moves[0].uci,
+                                    pv: [data.moves[0].uci],
+                                });
+                            } else {
+                                fallbackToEngine();
                             }
                         })
-                        .catch(() => {
-                            callOffscreenEngine(
-                                message.fen,
-                                engineTime,
-                                elo,
-                                workerCount,
-                                true,
-                                message.history,
-                                hashSize,
-                                sendResponse
-                            );
-                        });
+                        .catch(() => fallbackToEngine());
+                    return;
                 }
+
+                fallbackToEngine();
             }
         );
         return true; // Keep the message channel open for async response.
@@ -323,8 +363,32 @@ let fallbackWorker = null;
 let fallbackWorkerReady = false;
 let fallbackAbortFlag = null;
 let currentFallbackSearchId = 0;
+let fallbackMessageQueue = [];
+let fallbackIdleTimeoutId = null;
+let pendingFallbackResponse = null;
+
+function startFallbackIdleTimeout() {
+    if (fallbackIdleTimeoutId) clearTimeout(fallbackIdleTimeoutId);
+    fallbackIdleTimeoutId = setTimeout(() => {
+        if (fallbackWorker) {
+            console.log("[Background] Fallback worker idle for 2 minutes, terminating.");
+            fallbackWorker.terminate();
+            fallbackWorker = null;
+            fallbackWorkerReady = false;
+            fallbackMessageQueue = [];
+        }
+    }, 120000);
+}
+
+function clearFallbackIdleTimeout() {
+    if (fallbackIdleTimeoutId) {
+        clearTimeout(fallbackIdleTimeoutId);
+        fallbackIdleTimeoutId = null;
+    }
+}
 
 function runFallbackWorker(fen, timeMs, elo, history, hashSize, isMyTurn, sendResponse, workerCount) {
+    clearFallbackIdleTimeout();
     let sabSupported = false;
     try {
         new SharedArrayBuffer(1);
@@ -333,11 +397,17 @@ function runFallbackWorker(fen, timeMs, elo, history, hashSize, isMyTurn, sendRe
         sabSupported = false;
     }
 
+    if (pendingFallbackResponse && pendingFallbackResponse !== sendResponse) {
+        try { pendingFallbackResponse({ bestMove: null }); } catch(e) {}
+    }
+    pendingFallbackResponse = sendResponse;
+
     if (fallbackWorker) {
         if (!sabSupported) {
             fallbackWorker.terminate();
             fallbackWorker = null;
             fallbackWorkerReady = false;
+            fallbackMessageQueue = [];
         } else if (fallbackAbortFlag) {
             fallbackAbortFlag[0] = 1;
         }
@@ -366,20 +436,12 @@ function runFallbackWorker(fen, timeMs, elo, history, hashSize, isMyTurn, sendRe
     fallbackWorker.onmessage = (e) => {
         if (e.data.type === "READY") {
             fallbackWorkerReady = true;
-            fallbackWorker.postMessage({
-                type: "SET_HASH_SIZE",
-                size: hashSize
-            });
-            fallbackWorker.postMessage({
-                type: "SEARCH",
-                fen, timeMs, elo,
-                splitId: 0,
-                splitCount: 1,
-                history: history || "",
-                abortFlag: fallbackAbortFlag,
-                searchId: searchId
-            });
+            for (const msg of fallbackMessageQueue) {
+                fallbackWorker.postMessage(msg);
+            }
+            fallbackMessageQueue = [];
         } else if (e.data.type === "SEARCH_RESULT") {
+            startFallbackIdleTimeout();
             if (e.data.searchId !== undefined && e.data.searchId !== searchId) return;
             const parsed = e.data.data;
             const response = {
@@ -393,25 +455,32 @@ function runFallbackWorker(fen, timeMs, elo, history, hashSize, isMyTurn, sendRe
                 timeMs: parsed.timeMs || timeMs,
             };
             handleSearchResponse(response, isMyTurn, sendResponse, timeMs, elo, workerCount, history, hashSize);
+            if (pendingFallbackResponse === sendResponse) {
+                pendingFallbackResponse = null;
+            }
         }
     };
     
     fallbackWorker.onerror = (err) => {
         console.error("[Background] Fallback worker crashed:", err);
-        if (sendResponse) sendResponse({ bestMove: null });
+        if (pendingFallbackResponse) {
+            try { pendingFallbackResponse({ bestMove: null }); } catch(e) {}
+            pendingFallbackResponse = null;
+        }
         if (fallbackWorker) {
             fallbackWorker.terminate();
             fallbackWorker = null;
             fallbackWorkerReady = false;
+            fallbackMessageQueue = [];
         }
     };
 
-    if (fallbackWorkerReady) {
-        fallbackWorker.postMessage({
+    const searchMessages = [
+        {
             type: "SET_HASH_SIZE",
             size: hashSize
-        });
-        fallbackWorker.postMessage({
+        },
+        {
             type: "SEARCH",
             fen, timeMs, elo,
             splitId: 0,
@@ -419,7 +488,13 @@ function runFallbackWorker(fen, timeMs, elo, history, hashSize, isMyTurn, sendRe
             history: history || "",
             abortFlag: fallbackAbortFlag,
             searchId: searchId
-        });
+        }
+    ];
+
+    if (fallbackWorkerReady) {
+        searchMessages.forEach(msg => fallbackWorker.postMessage(msg));
+    } else {
+        fallbackMessageQueue.push(...searchMessages);
     }
 }
 

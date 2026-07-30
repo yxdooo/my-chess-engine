@@ -18,6 +18,17 @@ onmessage = async (e) => {
         try {
             await init({ module_or_path: new URL('./pkg/engine_wasm_bg.wasm', import.meta.url) });
             engine = new ChessEngine();
+            
+            try {
+                const nnueUrl = new URL('./net.nnue', import.meta.url);
+                const response = await fetch(nnueUrl);
+                const buffer = await response.arrayBuffer();
+                const success = engine.load_network(new Uint8Array(buffer));
+                console.log("[Worker] NNUE Loaded:", success);
+            } catch (err) {
+                console.error("[Worker] Failed to load NNUE:", err);
+            }
+            
             postMessage({ type: "READY" });
         } catch (err) {
             console.error("[Worker] WASM initialization failed:", err);

@@ -93,7 +93,14 @@ async function build() {
         process.exit(1);
     }
 
-    // 1. Clean and copy source files.
+    // 1. Copy compiled WASM to chrome-ext/pkg
+    const WASM_PKG_DIR = path.join(__dirname, "engine-wasm", "pkg");
+    const EXT_PKG_DIR = path.join(SRC_DIR, "pkg");
+    if (!fs.existsSync(EXT_PKG_DIR)) fs.mkdirSync(EXT_PKG_DIR, { recursive: true });
+    copyDir(WASM_PKG_DIR, EXT_PKG_DIR);
+    console.log(`[1/3] Copied WASM pkg to chrome-ext/pkg\n`);
+
+    // 2. Clean and copy source files.
     if (fs.existsSync(DIST_DIR)) {
         fs.rmSync(DIST_DIR, { recursive: true, force: true });
     }
