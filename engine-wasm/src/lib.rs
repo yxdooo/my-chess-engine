@@ -135,7 +135,7 @@ pub struct ChessEngine {
     hard_time_limit_ms: f64,
     start_time: f64,
     /// Total nodes visited across the current search.
-    nodes: u32,
+    nodes: u64,
     elo: u32,
     /// Zobrist hashes of previously seen positions for 3-fold repetition detection.
     history_hashes: HashMap<u64, u8>,
@@ -1028,9 +1028,9 @@ impl ChessEngine {
         // Only compute when we'll actually need it (not in check at depth > 3).
         let static_eval = if !is_check { self.evaluate_full(board, pawn_hash, ply) } else { 0 };
 
-        // Reverse Futility Pruning (RFP)
-        if !is_check && depth <= 3 {
-            let margin = depth as i32 * 120;
+        // Reverse Futility Pruning (RFP) — more aggressive depth range
+        if !is_check && depth <= 6 {
+            let margin = depth as i32 * 75;
             if static_eval - margin >= beta {
                 return static_eval;
             }
@@ -1127,10 +1127,22 @@ impl ChessEngine {
                 quiet_moves.push(m);
             }
 
-            // Futility Pruning
-            if depth <= 2 && !is_check && !is_capture && !is_promotion {
-                if static_eval + (120 * depth as i32) <= alpha {
+            // Futility Pruning — extended to depth <= 4
+            // Note: gives_check not available here (computed after make_move_new),
+            // so we skip pruning for promotions only (captures already excluded).
+            if depth <= 4 && !is_check && !is_capture && !is_promotion {
+                let fp_margin = 80 + 100 * depth as i32;
+                if static_eval + fp_margin <= alpha {
                     continue; 
+                }
+            }
+
+            // Late Move Pruning (LMP): at low depths, skip quiet moves beyond a threshold
+            static LMP_TABLE: [usize; 6] = [0, 8, 12, 16, 20, 24];
+            if !is_pv_node && !is_check && !is_capture && !is_promotion && depth <= 5 {
+                let lmp_limit = LMP_TABLE[depth.min(5) as usize];
+                if moves_evaluated > lmp_limit {
+                    continue;
                 }
             }
 
@@ -1442,7 +1454,9 @@ impl ChessEngine {
         }
 
         let mut score = evaluate(board); // Base PeSTO evaluation
-    let phase = get_phase(board);
+    // mg_phase: 24 in opening, 0 in endgame → king safety matters most in opening
+    let mg_phase = get_phase(board);
+    let eg_phase = 24 - mg_phase;
     
     // Advanced King Safety
     let w_king = board.pieces(Piece::King) & board.color_combined(Color::White);
@@ -1451,29 +1465,46 @@ impl ChessEngine {
     let w_pawns = board.pieces(Piece::Pawn) & board.color_combined(Color::White);
     let b_pawns = board.pieces(Piece::Pawn) & board.color_combined(Color::Black);
     
-    let mut w_safety = 0;
+    let mut w_safety = 0i32;
     if w_king.popcnt() > 0 {
         let king_sq = w_king.to_square();
         let rank = king_sq.get_rank().to_index() as i32;
         let file = king_sq.get_file().to_index() as i32;
-        if rank < 3 { // White king on 1st, 2nd, or 3rd rank
+
+        // Heavy penalty for king marching into the center (ranks 3-5 = 4th-6th rank, 0-indexed)
+        // This is the main fix: before this was -50 only for rank>=3, now much stronger
+        if rank >= 3 && rank <= 5 {
+            w_safety -= 180; // King is dangerously exposed in the center
+        } else if rank == 2 {
+            w_safety -= 60; // 3rd rank still risky
+        }
+
+        // Center file penalty — c/d/e file kings are very exposed
+        match file {
+            2 | 3 | 4 => w_safety -= 80, // c, d, e file → exposed center king
+            1 | 5     => w_safety -= 30, // b, f file → semi-exposed
+            _         => {}
+        }
+
+        // Pawn shield evaluation (only when king is on back ranks)
+        if rank < 3 {
             for f in (file - 1)..=(file + 1) {
                 if f >= 0 && f <= 7 {
                     let pawn_mask = 0x0101010101010101_u64 << f;
                     if (w_pawns.0 & pawn_mask) != 0 {
                         w_safety += 20; // Friendly pawn shields king
                     } else if (b_pawns.0 & pawn_mask) != 0 {
-                        w_safety -= 10; // Enemy pawn blocking file is okay but less safe
+                        w_safety -= 10; // Enemy pawn on file
                     } else {
-                        w_safety -= 30; // Open file near king!
+                        w_safety -= 30; // Open file near king
                     }
                 }
             }
-        } else {
-            w_safety -= 50; // King is marching up the board
         }
-        let k_r = king_sq.get_rank().to_index() as i32;
-        let k_f = king_sq.get_file().to_index() as i32;
+
+        // Enemy piece proximity penalty
+        let k_r = rank;
+        let k_f = file;
         for sq in board.color_combined(Color::Black) & (board.pieces(Piece::Queen) | board.pieces(Piece::Rook) | board.pieces(Piece::Knight)) {
             let r = sq.get_rank().to_index() as i32;
             let f = sq.get_file().to_index() as i32;
@@ -1482,29 +1513,44 @@ impl ChessEngine {
         }
     }
     
-    let mut b_safety = 0;
+    let mut b_safety = 0i32;
     if b_king.popcnt() > 0 {
         let king_sq = b_king.to_square();
         let rank = king_sq.get_rank().to_index() as i32;
         let file = king_sq.get_file().to_index() as i32;
-        if rank > 4 { // Black king on 6th, 7th, or 8th rank
+
+        // Heavy penalty for black king marching into center (ranks 2-4, 0-indexed)
+        if rank >= 2 && rank <= 4 {
+            b_safety -= 180;
+        } else if rank == 5 {
+            b_safety -= 60;
+        }
+
+        // Center file penalty
+        match file {
+            2 | 3 | 4 => b_safety -= 80,
+            1 | 5     => b_safety -= 30,
+            _         => {}
+        }
+
+        // Pawn shield evaluation (only when black king is on back ranks)
+        if rank > 4 {
             for f in (file - 1)..=(file + 1) {
                 if f >= 0 && f <= 7 {
                     let pawn_mask = 0x0101010101010101_u64 << f;
                     if (b_pawns.0 & pawn_mask) != 0 {
-                        b_safety += 20; // Friendly pawn shields king
+                        b_safety += 20;
                     } else if (w_pawns.0 & pawn_mask) != 0 {
-                        b_safety -= 10; // Enemy pawn blocking file is okay but less safe
+                        b_safety -= 10;
                     } else {
-                        b_safety -= 30; // Open file near king!
+                        b_safety -= 30;
                     }
                 }
             }
-        } else {
-            b_safety -= 50; // King is marching down the board
         }
-        let k_r = king_sq.get_rank().to_index() as i32;
-        let k_f = king_sq.get_file().to_index() as i32;
+
+        let k_r = rank;
+        let k_f = file;
         for sq in board.color_combined(Color::White) & (board.pieces(Piece::Queen) | board.pieces(Piece::Rook) | board.pieces(Piece::Knight)) {
             let r = sq.get_rank().to_index() as i32;
             let f = sq.get_file().to_index() as i32;
@@ -1602,26 +1648,66 @@ impl ChessEngine {
     if w_bishops.popcnt() >= 2 { score += 40; }
     if b_bishops.popcnt() >= 2 { score -= 40; }
 
-    score += w_safety * phase / 24;
-    score -= b_safety * phase / 24;
+    // King safety: scale by mg_phase (high in opening, 0 in endgame) — FIXED from old bug
+    score += w_safety * mg_phase / 24;
+    score -= b_safety * mg_phase / 24;
     score += w_pawn_score;
     score -= b_pawn_score;
+
+    // Mopup evaluation: in endgame, push enemy king to corner and bring ours closer
+    if eg_phase >= 16 {
+        if w_king.popcnt() > 0 && b_king.popcnt() > 0 {
+            let w_king_sq = w_king.to_square();
+            let b_king_sq = b_king.to_square();
+            let w_kr = w_king_sq.get_rank().to_index() as i32;
+            let w_kf = w_king_sq.get_file().to_index() as i32;
+            let b_kr = b_king_sq.get_rank().to_index() as i32;
+            let b_kf = b_king_sq.get_file().to_index() as i32;
+            
+            // Distance to center (0 = center, 4 = corner) — for enemy king
+            let b_center_dist = ((b_kr - 3).abs() + (b_kf - 3).abs()) as i32;
+            let w_center_dist = ((w_kr - 3).abs() + (w_kf - 3).abs()) as i32;
+            
+            // Proximity between kings
+            let king_dist = (w_kr - b_kr).abs() + (w_kf - b_kf).abs();
+            
+            // If we have winning material, push their king to corner
+            let material_advantage = score.signum();
+            if material_advantage > 0 {
+                // White winning: push black king to corner
+                score += b_center_dist * 8;
+                score -= king_dist * 4; // Get our king closer
+            } else if material_advantage < 0 {
+                // Black winning: push white king to corner
+                score -= w_center_dist * 8;
+                score += king_dist * 4;
+            }
+        }
+    }
     
     if board.side_to_move() == Color::White { score } else { -score }
 }
 }
 
+/// Returns middlegame phase weight: 24 at game start, 0 in pure endgame.
+/// This is the OPPOSITE of the old function — king safety should be
+/// maximally weighted in the opening/middlegame, not the endgame.
 fn get_phase(board: &Board) -> i32 {
     let knights = board.pieces(Piece::Knight).popcnt() as i32;
     let bishops = board.pieces(Piece::Bishop).popcnt() as i32;
     let rooks = board.pieces(Piece::Rook).popcnt() as i32;
     let queens = board.pieces(Piece::Queen).popcnt() as i32;
-    let phase = 24 - (knights * 1 + bishops * 1 + rooks * 2 + queens * 4);
-    if phase > 24 { 24 } else if phase < 0 { 0 } else { phase }
+    // mg_phase: high when many pieces remain (opening/middlegame)
+    let mg_phase = (knights * 1 + bishops * 1 + rooks * 2 + queens * 4).min(24);
+    mg_phase
 }
 
+
+
+
 fn evaluate(board: &Board) -> i32 {
-    let phase = get_phase(board);
+    let mg_phase = get_phase(board);     // High in opening (24), low in endgame (0)
+    let eg_phase = 24 - mg_phase;        // Low in opening (0), high in endgame (24)
     let mut mg_score = 0;
     let mut eg_score = 0;
     let white = board.color_combined(Color::White);
@@ -1667,7 +1753,8 @@ fn evaluate(board: &Board) -> i32 {
         }
     }
 
-    (mg_score * (24 - phase) + eg_score * phase) / 24
+    // Correctly interpolate: mg weighted by mg_phase (24=opening), eg by eg_phase (24=endgame)
+    (mg_score * mg_phase + eg_score * eg_phase) / 24
 }
 
 #[cfg(test)]
