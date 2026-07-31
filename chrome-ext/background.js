@@ -510,8 +510,10 @@ function handleSearchResponse(response, isMyTurn, sendResponse, timeMs, elo, wor
                 },
             });
         }
-        if (sendResponse) sendResponse(response);
     }
+    
+    // Always respond so the content script doesn't hang.
+    if (sendResponse) sendResponse(response);
 
     if (response && response.ponderFen) {
         // Pondering using same fallback or offscreen method

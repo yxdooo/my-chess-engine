@@ -1,7 +1,7 @@
 {
     "manifest_version": 3,
     "name": "Aether Chess Engine",
-    "version": "2.3.0",
+    "version": "2.2.0",
     "description": "A highly optimized, multi-threaded WebAssembly (Rust) chess engine. Real-time best-move arrows directly on Chess.com and Lichess.",
     "icons": {
         "16": "icon.png",
