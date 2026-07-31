@@ -370,7 +370,6 @@ impl ChessEngine {
 
             best_move = current_move;
             best_score = current_best_score;
-            previous_best_score = current_best_score;
             second_best_move = current_second_move;
             depth_reached = depth;
             
