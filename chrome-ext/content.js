@@ -327,7 +327,26 @@ function parseBoard() {
     const boardEl = document.querySelector("wc-chess-board, chess-board, cg-board, .cg-board, .board");
     if (!boardEl) return null;
 
+    // Detect board flip (am I playing as black?)
+    // Method 1: class-based
     flipBoard = boardEl.classList.contains("flipped") || boardEl.classList.contains("orientation-black");
+    // Method 2: chess.com online — look for the player panel at the bottom
+    // If current user's username appears in the bottom player section, they are white (not flipped)
+    // If in a live game, chess.com sets data-user or data-player-color on the board element
+    if (!flipBoard) {
+        const boardColor = boardEl.getAttribute("data-player-color") ||
+                           boardEl.getAttribute("data-user-color");
+        if (boardColor === "black") flipBoard = true;
+    }
+    // Method 3: Look at the bottom clock player name vs top clock player name
+    // chess.com live games: bottom = me. Check if I castled on my right side (queenside) to infer color
+    // Fallback: look for "flipped" class on board wrapper
+    if (!flipBoard) {
+        const wrapper = boardEl.closest(".board-component, .board-layout, wc-chess-board");
+        if (wrapper && (wrapper.classList.contains("flipped") || wrapper.getAttribute("board-orientation") === "black")) {
+            flipBoard = true;
+        }
+    }
     const pieces = boardEl.querySelectorAll(".piece");
     const boardWidth = boardEl.clientWidth;
 
@@ -443,6 +462,17 @@ function parseBoard() {
         stm = maxPly % 2 === 1 ? "b" : "w";
     } else if (moveNodes && moveNodes.length > 0) {
         stm = moveNodes.length % 2 === 1 ? "b" : "w";
+    } else {
+        // Fallback for online games: count all played move elements
+        // chess.com live uses move elements with .move-san or .node inside wc-move-list
+        const allMoves = document.querySelectorAll(
+            "wc-move-list .move, wc-move-list .node, " +
+            ".move-list .move, .vertical-move-list .move, " +
+            ".rmoves .move, [data-ply]"
+        );
+        if (allMoves.length > 0) {
+            stm = allMoves.length % 2 === 1 ? "b" : "w";
+        }
     }
 
     // Determine castling rights by checking if kings or rooks have moved
@@ -582,9 +612,27 @@ function processPosition(networkFen = null) {
 
     const timeLeft = getMyTimeLeft();
     const stm = fen.split(" ")[1];
-    const myColor = flipBoard ? "b" : "w";
+    
+    // Better color detection for online games:
+    // If flipBoard detection is uncertain, try to infer from pawn structure
+    // White pawns start on rank 2, black on rank 7
+    // If our board is "normal" orientation (not flipped), we play as white
+    let myColor = flipBoard ? "b" : "w";
+    
+    // Additional check: look for chess.com player color attribute
+    const boardEl = document.querySelector("wc-chess-board, chess-board");
+    if (boardEl) {
+        const orient = boardEl.getAttribute("board-orientation") ||
+                       boardEl.getAttribute("data-orientation");
+        if (orient === "black") myColor = "b";
+        else if (orient === "white") myColor = "w";
+    }
+    
     const isMyTurn = stm === myColor;
     const normFen = normalizeFen(fen);
+    
+    console.log(`[Aether] FEN: ${fen.substring(0, 50)}... | myColor=${myColor} | stm=${stm} | isMyTurn=${isMyTurn} | flipBoard=${flipBoard}`);
+
 
     // Reset FEN history on a new game.
     if (fen.startsWith("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w")) {
@@ -680,8 +728,13 @@ let isProcessing = false;
 let lastProcessTime = 0;
 
 function setupObserver() {
-    const board = document.querySelector("wc-chess-board, .board, #board-single");
-    const moveList = document.querySelector("wc-move-list, .move-list-container, .vertical-move-list");
+    // For online games, chess.com uses #board-layout-main or .board-layout-main
+    const board = document.querySelector(
+        "wc-chess-board, .board, #board-single, #board-layout-main, .board-layout-main, .board-board, [data-cy='chess-board']"
+    );
+    const moveList = document.querySelector(
+        "wc-move-list, .move-list-container, .vertical-move-list, .move-list, [data-cy='move-list']"
+    );
     
     let targets = [];
     if (board) targets.push(board);
