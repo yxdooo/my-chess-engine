@@ -190,6 +190,7 @@ impl ChessEngine {
         let desc_len = u32::from_le_bytes(bytes[offset..offset+4].try_into().unwrap()) as usize; offset += 4;
         
         offset += desc_len; // skip desc
+        if offset + 4 > bytes.len() { return false; }
         
         let ft_hash = u32::from_le_bytes(bytes[offset..offset+4].try_into().unwrap()); offset += 4;
         
@@ -238,10 +239,14 @@ impl ChessEngine {
     pub fn set_hash_size(&mut self, mb: usize) {
         let entries = (mb * 1024 * 1024) / 16;
         let mut tt_lock = GLOBAL_TT.get_or_init(|| RwLock::new(Arc::new(TranspositionTable::new(entries)))).write().unwrap();
-        *tt_lock = Arc::new(TranspositionTable::new(entries));
+        if tt_lock.entries.len() != entries {
+            *tt_lock = Arc::new(TranspositionTable::new(entries));
+        }
         
         let mut pawn_lock = GLOBAL_PAWN_HASH.get_or_init(|| RwLock::new(Arc::new(PawnHashTable::new(131_072)))).write().unwrap();
-        *pawn_lock = Arc::new(PawnHashTable::new(131_072));
+        if pawn_lock.entries.len() != 131_072 {
+            *pawn_lock = Arc::new(PawnHashTable::new(131_072));
+        }
     }
 
     #[wasm_bindgen]
@@ -273,7 +278,7 @@ impl ChessEngine {
         let halfmove_clock: u8 = fen.split_whitespace().nth(4).unwrap_or("0").parse().unwrap_or(0);
         let board = match Board::from_str(&fen) {
             Ok(b) => b,
-            Err(_) => return "{\"bestMove\":\"\",\"score\":0,\"pv\":[]}".to_string(),
+            Err(_) => return "{\"bestMove\":\"\",\"ponderFen\":\"\",\"score\":0,\"depth\":0,\"nodes\":0,\"pv\":[]}".to_string(),
         };
         
         // Rebuild the set of past position hashes for 3-fold repetition detection.
@@ -293,14 +298,14 @@ impl ChessEngine {
                 nnue::refresh_accumulator(network, &mut self.accumulators[0], &board);
             }
             let score = self.evaluate_full(&board, &pawn_hash, 0);
-            return format!("{{\"bestMove\":\"{}\",\"score\":{},\"pv\":[\"{}\"]}}", moves[0].to_string(), score, moves[0].to_string());
+            return format!("{{\"bestMove\":\"{}\",\"ponderFen\":\"\",\"score\":{},\"depth\":1,\"nodes\":1,\"pv\":[\"{}\"]}}", moves[0].to_string(), score, moves[0].to_string());
         }
         
         let my_moves = moves.len();
         if my_moves == 0 {
             let is_check = board.checkers().popcnt() > 0;
             let score = if is_check { -MATE } else { 0 };
-            return format!("{{\"bestMove\":\"\",\"score\":{},\"pv\":[]}}", score);
+            return format!("{{\"bestMove\":\"\",\"ponderFen\":\"\",\"score\":{},\"depth\":0,\"nodes\":0,\"pv\":[]}}", score);
         }
 
         self.start_time = js_sys::Date::now();
@@ -876,7 +881,9 @@ impl ChessEngine {
         }
         if rep_count >= 1 { return 0; }
 
+        let mut tt_move = None;
         if let Some(entry) = tt.probe(hash, ply) {
+            tt_move = entry.best_move;
             if entry.flag == EXACT { return entry.score; }
             if entry.flag == LOWERBOUND && entry.score >= beta { return entry.score; }
             if entry.flag == UPPERBOUND && entry.score <= alpha { return entry.score; }
@@ -909,7 +916,7 @@ impl ChessEngine {
             }).collect()
         };
             
-        let mut scores = self.score_moves(board, &moves, ply, None);
+        let mut scores = self.score_moves(board, &moves, ply, tt_move);
         
         if moves.is_empty() {
             if in_check {
@@ -1090,7 +1097,8 @@ impl ChessEngine {
                 if self.stop_search { break; }
                 let next = board.make_move_new(mc_m);
                 self.update_nnue(ply, board, &next);
-                let score = -self.negamax(&next, depth - 4, -beta, -beta + 1, ply.saturating_add(1), halfmove_clock + 1, tt, pawn_hash);
+                let mc_next_halfmove = if mc_m.get_promotion().is_some() || board.piece_on(mc_m.get_dest()).is_some() || board.piece_on(mc_m.get_source()) == Some(Piece::Pawn) { 0 } else { halfmove_clock + 1 };
+                let score = -self.negamax(&next, depth - 4, -beta, -beta + 1, ply.saturating_add(1), mc_next_halfmove, tt, pawn_hash);
                 if score >= beta {
                     cutoffs += 1;
                     if cutoffs >= MC_CUTS {
@@ -1136,7 +1144,7 @@ impl ChessEngine {
             let gives_check = next_board.checkers().popcnt() > 0;
             
             // Genuine Singular Extension:
-            // Only at depth >= 10 to avoid expensive mini-searches on shallow nodes.
+            // Only at depth >= 8 to avoid expensive mini-searches on shallow nodes.
             let mut extension = 0u8;
             if gives_check && depth < 64 && see_value(board, m) >= 0 {
                 extension = 1;
