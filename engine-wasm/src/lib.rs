@@ -350,6 +350,13 @@ impl ChessEngine {
             let (current_move, current_best_score, current_second_move, current_second_score) = loop {
                 let result = self.search_root(&board, depth, alpha, beta, split_id as u32, split_count as u32, halfmove_clock, &tt, &pawn_hash);
                 if self.stop_search { break result; }
+                
+                // Hard time check inside aspiration retry to prevent infinite re-searches
+                let elapsed_check = js_sys::Date::now() - self.start_time;
+                if elapsed_check >= self.hard_time_limit_ms {
+                    self.stop_search = true;
+                    break result;
+                }
 
                 if delta == INF {
                     // Full-window search, accept result unconditionally.
@@ -409,10 +416,12 @@ impl ChessEngine {
             previous_best_score = best_score;
         }
         
-        // Blunder simulation: for weaker Elo, sometimes play the second-best scored move
-        // rather than picking from move-ordering (which could still be a good move).
+        // Blunder simulation: for weaker Elo, sometimes play a suboptimal move.
+        // IMPORTANT: Only activate for elo < 2500. For elo >= 2500 NEVER blunder.
         if elo < 2500.0 {
-            let blunder_chance = ((2500.0 - elo) / 50.0) as u32;
+            // Clamp to [0.0, 2500.0] before subtraction to prevent negative → u32 overflow
+            let effective_elo = elo.min(2499.0).max(0.0);
+            let blunder_chance = ((2500.0 - effective_elo) / 50.0) as u32; // max 50 at elo=0
             let random = (js_sys::Math::random() * 100.0) as u32;
             
             if random < blunder_chance {
@@ -430,6 +439,7 @@ impl ChessEngine {
                 }
             }
         }
+        // elo >= 2500: always play the best found move, no blunder simulation.
 
         let mut pv = Vec::new();
         let mut current_board = board.clone();

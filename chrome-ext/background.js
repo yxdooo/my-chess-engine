@@ -512,11 +512,11 @@ function handleSearchResponse(response, isMyTurn, sendResponse, timeMs, elo, wor
         }
     }
     
-    // Always respond so the content script doesn't hang.
+    // Always respond once so the content script doesn't hang.
     if (sendResponse) sendResponse(response);
 
-    if (response && response.ponderFen) {
-        // Pondering using same fallback or offscreen method
+    if (response && response.ponderFen && isMyTurn) {
+        // Pondering: only ponder after our move (we know the position after our move)
         resetOffscreenIdleTimeout();
         setupOffscreenDocument("offscreen.html").then(() => {
             chrome.runtime.sendMessage(
@@ -540,9 +540,8 @@ function handleSearchResponse(response, isMyTurn, sendResponse, timeMs, elo, wor
                 }
             );
         }).catch(() => {
-            // Ignore ponder fallback to prevent over-blocking the main SW thread
+            // Ignore ponder failure
         });
-    } else if (!isMyTurn && sendResponse) {
-        sendResponse(response);
     }
 }
+
