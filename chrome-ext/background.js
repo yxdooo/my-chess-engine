@@ -1,4 +1,4 @@
-
+import { log } from "./logger.js";
 
 /**
  * Aggressive opening book: FEN (position + side + castling + en-passant) -> UCI move.
@@ -135,6 +135,9 @@ async function setupOffscreenDocument(path) {
 
     try {
         await creatingOffscreen;
+        log.debug('Background', 'Offscreen document created or already exists');
+    } catch (e) {
+        log.error('Background', 'Failed to create offscreen document', e);
     } finally {
         creatingOffscreen = null;
     }
@@ -147,6 +150,7 @@ function resetOffscreenIdleTimeout() {
 chrome.alarms.onAlarm.addListener(async (alarm) => {
     if (alarm.name === "closeOffscreen") {
         if (await hasDocument()) {
+            log.info('Background', 'Closing idle offscreen document');
             chrome.offscreen.closeDocument();
         }
     }
@@ -190,14 +194,14 @@ function computeEngineTime(timeLeft, elo, increment = 0) {
 }
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-    // Pre-warm the offscreen document when the engine is started.
     if (message.type === "START_ENGINE") {
+        log.info('Background', 'Received START_ENGINE message');
         setupOffscreenDocument("offscreen.html");
         return false;
     }
 
-    // Stop the engine: update storage so content scripts stop requesting analysis.
     if (message.type === "STOP_ENGINE") {
+        log.info('Background', 'Received STOP_ENGINE message');
         chrome.storage.local.set({ isActive: false });
         return false;
     }
@@ -207,6 +211,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             ["isActive", "elo", "targetWorkers", "hashSize", "increment"],
             (result) => {
                 if (!result.isActive) {
+                    log.debug('Background', 'Engine is inactive, dropping NEW_POSITION');
                     sendResponse({ bestMove: null });
                     return;
                 }
@@ -219,17 +224,18 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                 const normFen      = normalizeFen(message.fen);
                 const pieceCount   = normFen.split(' ')[0].replace(/[\/0-9]/g, '').length;
 
+                log.info('Background', `NEW_POSITION received: turn=${message.isMyTurn} clock=${message.timeLeft}s timeToThink=${engineTime}ms pieces=${pieceCount}`);
+                log.debug('Background', `FEN: ${message.fen}`);
+
                 const fallbackToEngine = () => {
-                    // 1. Check aggressive opening book.
                     if (message.isMyTurn && AGGRESSIVE_BOOK[normFen]) {
                         const trapMove = AGGRESSIVE_BOOK[normFen];
+                        log.info('Background', `Played book trap move: ${trapMove}`);
                         sendResponse({ bestMove: trapMove, pv: [trapMove] });
                         return;
                     }
 
-                    // 2. For our turn: try cloud resources before falling back to engine.
                     if (message.isMyTurn) {
-                        // Masters opening explorer (only for ELO >= 1600)
                         fetchWithTimeout(
                             "https://explorer.lichess.ovh/masters?fen=" +
                                 encodeURIComponent(message.fen),
@@ -243,6 +249,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                                     data.moves.length > 0 &&
                                     elo >= 1600
                                 ) {
+                                    log.info('Background', `Played opening master book move: ${data.moves[0].uci}`);
                                     sendResponse({
                                         bestMove: data.moves[0].uci,
                                         pv: [data.moves[0].uci],
@@ -260,7 +267,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                                     );
                                 }
                             })
-                            .catch(() => {
+                            .catch((err) => {
+                                log.warn('Background', 'Explorer API failed, falling back to engine', err);
                                 callOffscreenEngine(
                                     message.fen,
                                     engineTime,
@@ -273,7 +281,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                                 );
                             });
                     } else {
-                        // Pondering on opponent's turn.
                         callOffscreenEngine(
                             message.fen,
                             engineTime,
@@ -287,7 +294,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                     }
                 };
 
-                // 0. Endgame Tablebases (7 pieces or fewer)
                 if (pieceCount <= 7) {
                     fetchWithTimeout(
                         "https://tablebase.lichess.ovh/standard?fen=" + encodeURIComponent(message.fen),
@@ -297,7 +303,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                         .then((r) => r.json())
                         .then((data) => {
                             if (data && data.moves && data.moves.length > 0) {
-                                // Lichess API returns moves sorted by optimal outcome (WDL and DTZ).
+                                log.info('Background', `Played syzygy TB move: ${data.moves[0].uci}`);
                                 sendResponse({
                                     bestMove: data.moves[0].uci,
                                     pv: [data.moves[0].uci],
@@ -306,14 +312,17 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                                 fallbackToEngine();
                             }
                         })
-                        .catch(() => fallbackToEngine());
+                        .catch((err) => {
+                            log.warn('Background', 'TB API failed, falling back to engine', err);
+                            fallbackToEngine();
+                        });
                     return;
                 }
 
                 fallbackToEngine();
             }
         );
-        return true; // Keep the message channel open for async response.
+        return true; 
     }
 });
 
@@ -346,7 +355,7 @@ function callOffscreenEngine(
             },
             (response) => {
                 if (chrome.runtime.lastError) {
-                    console.warn("[Background] Offscreen error, falling back:", chrome.runtime.lastError.message);
+                    log.warn('Background', `Offscreen error (sending to fallback): ${chrome.runtime.lastError.message}`);
                     runFallbackWorker(fen, timeMs, elo, history, hashSize, isMyTurn, sendResponse, workerCount);
                     return;
                 }
@@ -354,7 +363,7 @@ function callOffscreenEngine(
             }
         );
     }).catch((e) => {
-        console.warn("[Background] Offscreen setup failed, falling back:", e);
+        log.error('Background', 'Offscreen setup failed, routing to fallback', e);
         runFallbackWorker(fen, timeMs, elo, history, hashSize, isMyTurn, sendResponse, workerCount);
     });
 }
@@ -371,7 +380,7 @@ function startFallbackIdleTimeout() {
     if (fallbackIdleTimeoutId) clearTimeout(fallbackIdleTimeoutId);
     fallbackIdleTimeoutId = setTimeout(() => {
         if (fallbackWorker) {
-            console.log("[Background] Fallback worker idle for 2 minutes, terminating.");
+            log.info('Background', 'Fallback worker idle for 2 minutes, terminating.');
             fallbackWorker.terminate();
             fallbackWorker = null;
             fallbackWorkerReady = false;
@@ -462,7 +471,7 @@ function runFallbackWorker(fen, timeMs, elo, history, hashSize, isMyTurn, sendRe
     };
     
     fallbackWorker.onerror = (err) => {
-        console.error("[Background] Fallback worker crashed:", err);
+        log.error('Background', 'Fallback worker crashed:', err);
         if (pendingFallbackResponse) {
             try { pendingFallbackResponse({ bestMove: null }); } catch(e) {}
             pendingFallbackResponse = null;
@@ -528,6 +537,7 @@ function handleSearchResponse(response, isMyTurn, sendResponse, timeMs, elo, wor
                 (ponderResponse) => {
                     if (!chrome.runtime.lastError && ponderResponse) {
                         ponderResponse.cachedForFen = response.ponderFen;
+                        log.info('Background', `Ponder search returned best move for next turn: ${ponderResponse.bestMove}`);
                         chrome.tabs.query({url: ["*://*.chess.com/*", "*://*.lichess.org/*"]}, (tabs) => {
                             for (let tab of tabs) {
                                 chrome.tabs.sendMessage(tab.id, {
@@ -536,11 +546,13 @@ function handleSearchResponse(response, isMyTurn, sendResponse, timeMs, elo, wor
                                 }).catch(() => {});
                             }
                         });
+                    } else if (chrome.runtime.lastError) {
+                        log.error('Background', 'Ponder search error', chrome.runtime.lastError);
                     }
                 }
             );
-        }).catch(() => {
-            // Ignore ponder failure
+        }).catch((err) => {
+            log.warn('Background', 'Pondering failed to setup offscreen', err);
         });
     }
 }

@@ -69,7 +69,8 @@
             "resources": [
                 "engine_wasm_bg.wasm",
                 "pkg/*",
-                "icon.png"
+                "icon.png",
+                "logger.js"
             ],
             "matches": [
                 "*://*.chess.com/*",

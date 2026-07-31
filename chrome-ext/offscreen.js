@@ -5,6 +5,7 @@
  * each loading the WASM chess engine. Distributes search tasks across workers
  * (Lazy SMP) and aggregates results.
  */
+import { log } from "./logger.js";
 
 const MAX_WORKERS = 16;
 
@@ -39,6 +40,7 @@ let currentSearchId = 0;
  */
 function initWorkers(workerCount) {
     currentWorkerCount = workerCount;
+    log.info('Pool', `Spawning ${workerCount} workers (${workers.length} already exist)`);
 
     const initialLength = workers.length;
     for (let i = initialLength; i < workerCount; i++) {
@@ -53,15 +55,25 @@ function initWorkers(workerCount) {
                         size: Math.max(1, Math.floor(activeHashSize / currentWorkerCount)),
                     });
                     workersReady++;
+                    log.info('Pool', `Worker #${workersReady}/${currentWorkerCount} ready`);
                     if (workersReady === currentWorkerCount && messageQueue) {
+                        log.info('Pool', 'All workers ready — starting queued search');
                         processSearch(messageQueue, currentSearchId, abortFlag);
                     }
                 }
             };
 
+            worker.onerror = (err) => {
+                log.error('Pool', `Worker crashed!`, err);
+                currentWorkerCount--;
+                if (workersReady >= currentWorkerCount && messageQueue && currentWorkerCount > 0) {
+                    processSearch(messageQueue, currentSearchId, abortFlag);
+                }
+            };
+
             workers.push(worker);
         } catch (e) {
-            console.error("[Offscreen] Worker spawn failed:", e);
+            log.error('Pool', `Worker spawn failed`, e);
             // If spawning fails, adjust the expected count to prevent hanging
             currentWorkerCount--;
             if (workersReady === currentWorkerCount && messageQueue && currentWorkerCount > 0) {
@@ -72,6 +84,7 @@ function initWorkers(workerCount) {
     
     // If NO workers spawned successfully (e.g. Chrome block), send a fallback
     if (currentWorkerCount === 0 && currentSendResponse) {
+        log.error('Pool', 'CRITICAL: No workers spawned! Sending null response.');
         currentSendResponse({ bestMove: null });
         currentSendResponse = null;
     }
@@ -107,21 +120,27 @@ function processSearch(message, searchId, abortFlag) {
     );
     const activeWorkers = workers.slice(0, workersToUse);
 
+    log.info('SMP', `Starting search — workers=${workersToUse} elo=${message.elo} timeMs=${message.timeMs}`);
+    log.debug('SMP', `FEN: ${(message.fen || '').substring(0, 50)}...`);
+
+    // Freeze detector: if we don’t get results within timeMs*2+5s, log a freeze warning
+    const freezeTimeout = setTimeout(() => {
+        if (completed < workersToUse) {
+            log.error('SMP', `🥶 FREEZE DETECTED! Only ${completed}/${workersToUse} workers responded after ${message.timeMs * 2 + 5000}ms`, { message });
+        }
+    }, (message.timeMs || 3000) * 2 + 5000);
+
     /** @type {Array<{bestMove: string, pv: string[], ponderFen: string, score: number}>} */
     let workerResults = [];
 
-    /**
-     * Handles a RESULT message from a worker.
-     * @param {MessageEvent} e
-     */
     const onWorkerResult = (e) => {
         if (e.data.type !== "RESULT" || e.data.searchId !== searchId) return;
 
         completed++;
+        log.debug('SMP', `Worker result ${completed}/${workersToUse}: move=${e.data.bestMove} score=${e.data.score}cp depth=${e.data.depth}`);
 
         if (e.data.bestMove && e.data.bestMove !== "") {
             workerResults.push(e.data);
-            // Accumulate totals for stats reporting.
             totalNodes += (e.data.nodes || 0);
             if (e.data.score > bestOverallScore) {
                 bestOverallScore = e.data.score;
@@ -133,12 +152,11 @@ function processSearch(message, searchId, abortFlag) {
         }
 
         if (completed === workersToUse) {
+            clearTimeout(freezeTimeout);
             const elapsed = (performance.now() - startTime).toFixed(0);
-            console.log(
-                `[Offscreen] SMP-${workersToUse} finished in ${elapsed}ms. Best: ${bestOverallMove}`
-            );
+            const nps = elapsed > 0 ? Math.round(totalNodes / (elapsed / 1000)).toLocaleString() : '?';
+            log.info('SMP', `Done in ${elapsed}ms | best=${bestOverallMove} score=${bestOverallScore}cp depth=${bestDepth} nodes=${totalNodes.toLocaleString()} nps=${nps}`);
 
-            // Build multiPv from unique worker results sorted by score.
             workerResults.sort((a, b) => b.score - a.score);
             const multiPv = workerResults.slice(0, 3).map((r) => ({
                 bestMove: r.bestMove,
@@ -158,6 +176,8 @@ function processSearch(message, searchId, abortFlag) {
                     timeMs:  Math.round(elapsed),
                 });
                 currentSendResponse = null;
+            } else {
+                log.warn('SMP', 'Search done but sendResponse is already null (request was cancelled?)');
             }
         }
     };
@@ -198,14 +218,18 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
  * @param {Function} sendResponse - Chrome messaging response callback.
  */
 function startEngineSearch(message, sendResponse) {
+    log.info('SMP', `New search request received | elo=${message.elo} timeMs=${message.timeMs} workers=${message.activeWorkerCount}`);
+    
     // Gracefully abort any running search.
     if (abortFlag) {
+        log.debug('SMP', 'Aborting previous search via abortFlag');
         abortFlag[0] = 1;
     }
 
     currentSearchId++;
 
     if (currentSendResponse) {
+        log.warn('SMP', 'Previous search was not resolved — sending null to prevent hang');
         currentSendResponse({ bestMove: null });
         currentSendResponse = null;
     }
@@ -220,9 +244,9 @@ function startEngineSearch(message, sendResponse) {
     try {
         const sab = new SharedArrayBuffer(1);
         abortFlag = new Uint8Array(sab);
+        log.debug('SAB', 'SharedArrayBuffer abort flag allocated');
     } catch (e) {
-        // Fallback if SAB is disabled: must terminate and recreate workers
-        console.warn("SharedArrayBuffer not available, recreating workers to abort");
+        log.warn('SAB', 'SharedArrayBuffer not available — recreating workers to abort', e);
         abortFlag = null;
         for (const worker of workers) worker.terminate();
         workers = [];
@@ -230,6 +254,7 @@ function startEngineSearch(message, sendResponse) {
     }
 
     if (targetWorkers > workers.length) {
+        log.info('Pool', `Need ${targetWorkers} workers, have ${workers.length} — spawning more`);
         initWorkers(targetWorkers);
     } else {
         processSearch(message, currentSearchId, abortFlag);

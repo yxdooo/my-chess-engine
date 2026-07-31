@@ -1,3 +1,28 @@
+let logBuffer = [];
+export let log = {
+    debug: (...args) => logBuffer && logBuffer.push(['debug', args]),
+    info:  (...args) => logBuffer && logBuffer.push(['info', args]),
+    warn:  (...args) => logBuffer && logBuffer.push(['warn', args]),
+    error: (...args) => logBuffer && logBuffer.push(['error', args]),
+    time:  (...args) => logBuffer && logBuffer.push(['time', args]),
+    timeEnd: (...args) => logBuffer && logBuffer.push(['timeEnd', args]),
+    engineResult: (...args) => logBuffer && logBuffer.push(['engineResult', args]),
+};
+
+(async () => {
+    try {
+        const mod = await import(chrome.runtime.getURL('logger.js'));
+        log = mod.log;
+        if (logBuffer) {
+            logBuffer.forEach(([lvl, args]) => log[lvl](...args));
+            logBuffer = null;
+        }
+        log.info('Content', 'Logger initialized');
+    } catch(e) {
+        console.error("Failed to load logger.js in content script:", e);
+    }
+})();
+
 /** @type {string} The last FEN position that was sent for analysis. */
 let currentFEN = "";
 
@@ -243,7 +268,7 @@ function playMove(uci) {
         fromFile < 0 || fromFile > 7 || fromRank < 0 || fromRank > 7 ||
         toFile   < 0 || toFile   > 7 || toRank   < 0 || toRank   > 7
     ) {
-        console.warn("[Content] playMove: invalid UCI coordinates:", uci);
+        log.warn('Move', `Invalid UCI coordinates: ${uci}`);
         return false;
     }
 
@@ -251,7 +276,7 @@ function playMove(uci) {
         "wc-chess-board, chess-board, cg-board"
     );
     if (!boardEl) {
-        console.warn("[Content] playMove: board element not found");
+        log.warn('Move', 'Board element not found for move simulation');
         return false;
     }
 
@@ -631,8 +656,7 @@ function processPosition(networkFen = null) {
     const isMyTurn = stm === myColor;
     const normFen = normalizeFen(fen);
     
-    console.log(`[Aether] FEN: ${fen.substring(0, 50)}... | myColor=${myColor} | stm=${stm} | isMyTurn=${isMyTurn} | flipBoard=${flipBoard}`);
-
+    log.debug('Board', `Parsed FEN`, { fenShort: fen.substring(0, 50), myColor, stm, isMyTurn, flipBoard });
 
     // Reset FEN history on a new game.
     if (fen.startsWith("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w")) {
@@ -649,7 +673,7 @@ function processPosition(networkFen = null) {
     if (isMyTurn && ponderCache[normFen]) {
         const cached = ponderCache[normFen];
         if (cached.bestMove) {
-            console.log("[Content] Ponder hit! Instantly displaying move:", cached.bestMove);
+            log.info('Engine', `Ponder hit! Instantly displaying move: ${cached.bestMove}`);
             renderArrows([cached.pv], isMyTurn);
             
             // Update popup stats with cached ponder result
@@ -682,10 +706,7 @@ function processPosition(networkFen = null) {
         },
         (response) => {
             if (chrome.runtime.lastError) {
-                console.error(
-                    "[Content] Messaging error:",
-                    chrome.runtime.lastError.message
-                );
+                log.error('Background', 'Messaging error', chrome.runtime.lastError);
                 return;
             }
             if (!response) return;
