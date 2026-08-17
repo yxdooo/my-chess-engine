@@ -633,7 +633,7 @@ impl TranspositionTable {
             if score1 > MATE - 128 { score1 -= ply as i32; } else if score1 < -MATE + 128 { score1 += ply as i32; }
             let depth1 = ((data1 >> 32) & 0x3F) as u8;
             
-            if best_res.is_none() || depth1 > best_res.unwrap().depth {
+            if best_res.as_ref().map_or(true, |r| depth1 > r.depth) {
                 best_res = Some(TTProbeResult {
                     hash,
                     best_move: unpack_move((data1 & 0xFFFF) as u16),
@@ -815,7 +815,7 @@ impl ChessEngine {
         let (is_capture, is_ep, _is_pawn_move) = get_move_props(board, *m);
         if is_capture {
             let see = see_value(board, *m);
-            let victim = if is_ep { Piece::Pawn } else { board.piece_on(m.get_dest()).unwrap() };
+            let victim = if is_ep { Piece::Pawn } else { board.piece_on(m.get_dest()).unwrap_or(Piece::Pawn) };
             let attacker = board.piece_on(m.get_source()).unwrap_or(Piece::Pawn);
             let mvv_lva = piece_value_mg(victim) * 10 - piece_value_mg(attacker);
             return if see >= 0 { 100_000 + mvv_lva } else { -50_000 + mvv_lva };
@@ -900,8 +900,7 @@ impl ChessEngine {
             
             let next_board = board.make_move_new(m);
             self.update_nnue(0, board, &next_board);
-            let is_capture = board.piece_on(m.get_dest()).is_some();
-            let is_pawn_move = board.piece_on(m.get_source()) == Some(Piece::Pawn);
+            let (is_capture, _is_ep, is_pawn_move) = get_move_props(board, m);
             let next_halfmove = if is_capture || is_pawn_move { 0 } else { halfmove_clock + 1 };
             
             let mut score;
@@ -1028,7 +1027,7 @@ impl ChessEngine {
             self.pick_move(&mut moves, &mut scores, i);
             let m = moves[i];
             
-            let (is_capture, is_ep, _is_pawn_move) = get_move_props(board, m);
+            let (is_capture, is_ep, is_pawn_move) = get_move_props(board, m);
 
             if !in_check && stand_pat + 1225 < alpha && m.get_promotion().is_none() {
                 continue;
@@ -1046,8 +1045,6 @@ impl ChessEngine {
 
             let next_board = board.make_move_new(m);
             self.update_nnue(ply, board, &next_board);
-            let is_capture = board.piece_on(m.get_dest()).is_some();
-            let is_pawn_move = board.piece_on(m.get_source()) == Some(Piece::Pawn);
             let next_halfmove = if is_capture || is_pawn_move { 0 } else { halfmove_clock + 1 };
             
             let score = -self.quiescence_search(&next_board, -beta, -alpha, ply.saturating_add(1), next_halfmove, tt, pawn_hash);

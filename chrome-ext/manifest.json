@@ -69,6 +69,7 @@
             "resources": [
                 "engine_wasm_bg.wasm",
                 "pkg/*",
+                "net.nnue",
                 "icon.png",
                 "logger.js"
             ],
