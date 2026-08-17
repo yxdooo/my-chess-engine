@@ -56,7 +56,7 @@ function initWorkers(workerCount) {
                     });
                     workersReady++;
                     log.info('Pool', `Worker #${workersReady}/${currentWorkerCount} ready`);
-                    if (workersReady === currentWorkerCount && messageQueue) {
+                    if (messageQueue && workersReady >= Math.min(MAX_WORKERS, Math.max(1, messageQueue.activeWorkerCount || 1), workers.length)) {
                         log.info('Pool', 'All workers ready — starting queued search');
                         processSearch(messageQueue, currentSearchId, abortFlag);
                     }
@@ -116,7 +116,7 @@ function processSearch(message, searchId, abortFlag) {
 
     const workersToUse = Math.max(
         1,
-        Math.min(message.activeWorkerCount, workersReady)
+        Math.min(MAX_WORKERS, message.activeWorkerCount || 1, workersReady, workers.length)
     );
     const activeWorkers = workers.slice(0, workersToUse);
 
@@ -142,7 +142,10 @@ function processSearch(message, searchId, abortFlag) {
         if (e.data.bestMove && e.data.bestMove !== "") {
             workerResults.push(e.data);
             totalNodes += (e.data.nodes || 0);
-            if (e.data.score > bestOverallScore) {
+            const isBetter = e.data.depth > bestDepth || 
+                             (e.data.depth === bestDepth && e.data.score > bestOverallScore) ||
+                             (bestDepth === 0);
+            if (isBetter) {
                 bestOverallScore = e.data.score;
                 bestOverallMove  = e.data.bestMove;
                 bestPv           = e.data.pv;
@@ -229,7 +232,7 @@ function startEngineSearch(message, sendResponse) {
     currentSearchId++;
 
     if (currentSendResponse) {
-        log.warn('SMP', 'Previous search was not resolved — sending null to prevent hang');
+        log.info('SMP', 'Previous search was not resolved — sending null to prevent hang');
         currentSendResponse({ bestMove: null });
         currentSendResponse = null;
     }
@@ -238,7 +241,7 @@ function startEngineSearch(message, sendResponse) {
     currentSendResponse = sendResponse;
     if (message.hashSize) activeHashSize = message.hashSize;
 
-    const targetWorkers = message.activeWorkerCount || 4;
+    const targetWorkers = Math.min(MAX_WORKERS, Math.max(1, message.activeWorkerCount || 4));
     
     // Allocate new abort flag using SharedArrayBuffer
     try {
@@ -256,8 +259,10 @@ function startEngineSearch(message, sendResponse) {
     if (targetWorkers > workers.length) {
         log.info('Pool', `Need ${targetWorkers} workers, have ${workers.length} — spawning more`);
         initWorkers(targetWorkers);
-    } else {
+    } else if (workersReady >= targetWorkers) {
         processSearch(message, currentSearchId, abortFlag);
+    } else {
+        log.debug('Pool', `Waiting for ${targetWorkers - workersReady} worker(s) before starting search`);
     }
 }
 

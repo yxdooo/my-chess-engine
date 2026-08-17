@@ -4,7 +4,7 @@
   "description": "A highly optimized, multi-threaded WebAssembly (Rust) chess engine disguised as a Chrome Extension. Built specifically for providing real-time best move visual arrows directly on live chess boards like Chess.com.",
   "main": "build_prod.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "cargo test --target x86_64-pc-windows-msvc --manifest-path engine-wasm/Cargo.toml test_see --lib"
   },
   "repository": {
     "type": "git",

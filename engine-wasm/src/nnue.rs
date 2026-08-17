@@ -1,5 +1,4 @@
 use chess::{Board, Color, Piece};
-use std::convert::TryInto;
 
 pub const HIDDEN_SIZE: usize = 256;
 pub const INPUT_SIZE: usize = 41024; 
@@ -47,7 +46,7 @@ impl Accumulator {
     }
 }
 
-fn make_piece_code(piece: Piece, color: Color) -> usize {
+pub fn make_piece_code(piece: Piece, color: Color) -> usize {
     let pt = match piece {
         Piece::Pawn => 0,
         Piece::Knight => 1,
@@ -56,11 +55,13 @@ fn make_piece_code(piece: Piece, color: Color) -> usize {
         Piece::Queen => 4,
         _ => 0,
     };
-    if color == Color::White { pt } else { pt + 5 }
+    // Stockfish HalfKP maps W_PAWN (Us) to 0, B_PAWN (Them) to 1, etc.
+    pt * 2 + (if color == Color::White { 0 } else { 1 })
 }
 
-fn flip_piece_code(pc: usize) -> usize {
-    if pc < 5 { pc + 5 } else { pc - 5 }
+pub fn flip_piece_code(pc: usize) -> usize {
+    // Flip perspective: Us becomes Them, Them becomes Us.
+    pc ^ 1
 }
 
 fn add_feature(acc: &mut [i16; HIDDEN_SIZE], weights: &[i16], feature: usize) {
@@ -70,32 +71,43 @@ fn add_feature(acc: &mut [i16; HIDDEN_SIZE], weights: &[i16], feature: usize) {
     }
 }
 
+#[allow(dead_code)]
+fn sub_feature(acc: &mut [i16; HIDDEN_SIZE], weights: &[i16], feature: usize) {
+    let offset = feature * HIDDEN_SIZE;
+    for i in 0..HIDDEN_SIZE {
+        acc[i] = acc[i].wrapping_sub(weights[offset + i]);
+    }
+}
+
 pub fn refresh_accumulator(network: &Network, acc: &mut Accumulator, board: &Board) {
     acc.white.copy_from_slice(&network.feature_biases);
     acc.black.copy_from_slice(&network.feature_biases);
 
     let wk = board.king_square(Color::White).to_index();
     let bk = board.king_square(Color::Black).to_index();
-    let bk_flipped = bk ^ 56;
+    
+    // HalfKP uses orient(perspective, sq) = sq ^ 63 for Black!
+    let bk_flipped = bk ^ 63;
 
-    for sq in *board.color_combined(!Color::White) | *board.color_combined(Color::White) {
+    for sq in *board.color_combined(Color::White) | *board.color_combined(Color::Black) {
         if let Some(piece) = board.piece_on(sq) {
-            let color = board.color_on(sq).unwrap();
             if piece == Piece::King { continue; }
+            let color = board.color_on(sq).unwrap();
+            let sq_idx = sq.to_index();
             
             let pc = make_piece_code(piece, color);
-            let sq_idx = sq.to_index();
-
+            
             // White perspective
-            let feature_w = wk * 641 + pc * 64 + sq_idx;
+            let feature_w = wk * 641 + 1 + pc * 64 + sq_idx;
             add_feature(&mut acc.white, &network.feature_weights, feature_w);
-
+            
             // Black perspective
-            let feature_b = bk_flipped * 641 + flip_piece_code(pc) * 64 + (sq_idx ^ 56);
+            let feature_b = bk_flipped * 641 + 1 + flip_piece_code(pc) * 64 + (sq_idx ^ 63);
             add_feature(&mut acc.black, &network.feature_weights, feature_b);
         }
     }
 }
+
 
 pub fn update_accumulator(network: &Network, next_acc: &mut Accumulator, prev_acc: &Accumulator, old_board: &Board, new_board: &Board) {
     if old_board.king_square(Color::White) != new_board.king_square(Color::White) || 
@@ -106,7 +118,7 @@ pub fn update_accumulator(network: &Network, next_acc: &mut Accumulator, prev_ac
     *next_acc = *prev_acc;
     let wk = new_board.king_square(Color::White).to_index();
     let bk = new_board.king_square(Color::Black).to_index();
-    let bk_flipped = bk ^ 56;
+    let bk_flipped = bk ^ 63;
 
     for color in [Color::White, Color::Black] {
         for piece in [Piece::Pawn, Piece::Knight, Piece::Bishop, Piece::Rook, Piece::Queen] {
@@ -121,8 +133,8 @@ pub fn update_accumulator(network: &Network, next_acc: &mut Accumulator, prev_ac
                     d &= d - 1; // clear lowest bit
                     
                     let pc = make_piece_code(piece, color);
-                    let feature_w = wk * 641 + pc * 64 + sq_idx;
-                    let feature_b = bk_flipped * 641 + flip_piece_code(pc) * 64 + (sq_idx ^ 56);
+                    let feature_w = wk * 641 + 1 + pc * 64 + sq_idx;
+                    let feature_b = bk_flipped * 641 + 1 + flip_piece_code(pc) * 64 + (sq_idx ^ 63);
                     
                     let offset_w = feature_w * HIDDEN_SIZE;
                     let offset_b = feature_b * HIDDEN_SIZE;
@@ -172,16 +184,17 @@ pub fn evaluate(network: &Network, acc: &Accumulator, stm: Color) -> i32 {
     for i in 0..32 {
         let mut sum = network.fc1_biases[i];
         for j in 0..32 {
-            sum += fc0[j] * (network.fc1_weights[i * 32 + j] as i32);
+            let act = fc0[j].clamp(0, 127) as i8;
+            sum += (act as i32) * (network.fc1_weights[i * 32 + j] as i32);
         }
-        fc1[i] = sum.clamp(0, 127 * 64) / 64;
+        fc1[i] = sum / 64;
     }
 
-    let mut sum = network.fc2_biases[0];
+    let mut output = network.fc2_biases[0];
     for j in 0..32 {
-        sum += fc1[j] * (network.fc2_weights[j] as i32);
+        let act = fc1[j].clamp(0, 127) as i8;
+        output += (act as i32) * (network.fc2_weights[j] as i32);
     }
     
-    // Scale down from NNUE internal units to centipawns
-    sum / 16
+    output / 16
 }

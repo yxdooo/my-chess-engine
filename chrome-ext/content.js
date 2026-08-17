@@ -1,27 +1,49 @@
-let logBuffer = [];
-export let log = {
-    debug: (...args) => logBuffer && logBuffer.push(['debug', args]),
-    info:  (...args) => logBuffer && logBuffer.push(['info', args]),
-    warn:  (...args) => logBuffer && logBuffer.push(['warn', args]),
-    error: (...args) => logBuffer && logBuffer.push(['error', args]),
-    time:  (...args) => logBuffer && logBuffer.push(['time', args]),
-    timeEnd: (...args) => logBuffer && logBuffer.push(['timeEnd', args]),
-    engineResult: (...args) => logBuffer && logBuffer.push(['engineResult', args]),
+const LEVEL = { DEBUG: 0, INFO: 1, WARN: 2, ERROR: 3 };
+const MIN_LEVEL = LEVEL.DEBUG;
+const CTX = 'Content';
+const STYLES = {
+    DEBUG: 'color:#7f8c8d;font-weight:normal',
+    INFO:  'color:#27ae60;font-weight:bold',
+    WARN:  'color:#f39c12;font-weight:bold',
+    ERROR: 'color:#e74c3c;font-weight:bold',
+};
+const BADGE = { DEBUG: '🔍', INFO: '✅', WARN: '⚠️', ERROR: '🔴' };
+
+function _log(level, module, message, data) {
+    if (LEVEL[level] < MIN_LEVEL) return;
+    const ts = new Date().toISOString().slice(11, 23);
+    const header = `%c${BADGE[level]} [Aether·${CTX}][${ts}][${module}] ${message}`;
+
+    if (data !== undefined) {
+        console[level === 'ERROR' ? 'error' : level === 'WARN' ? 'warn' : 'log'](header, STYLES[level], data);
+    } else {
+        console[level === 'ERROR' ? 'error' : level === 'WARN' ? 'warn' : 'log'](header, STYLES[level]);
+    }
+}
+
+const _timers = {};
+
+const log = {
+    debug: (module, msg, data) => _log('DEBUG', module, msg, data),
+    info:  (module, msg, data) => _log('INFO',  module, msg, data),
+    warn:  (module, msg, data) => _log('WARN',  module, msg, data),
+    error: (module, msg, data) => _log('ERROR', module, msg, data),
+    time: (label) => { _timers[label] = performance.now(); },
+    timeEnd: (label) => {
+        const elapsed = _timers[label] !== undefined ? (performance.now() - _timers[label]).toFixed(1) : '?';
+        delete _timers[label];
+        _log('DEBUG', 'Timer', `${label} → ${elapsed}ms`);
+        return parseFloat(elapsed);
+    },
+    engineResult: (result, label = '') => {
+        if (!result) { _log('ERROR', 'Engine', `${label} null result`); return; }
+        const { bestMove, score, depth, nodes, timeMs } = result;
+        const nps = timeMs > 0 ? Math.round((nodes || 0) / (timeMs / 1000)).toLocaleString() : '?';
+        _log('INFO', 'Engine', `${label}move=${bestMove ?? 'null'} score=${score ?? '?'}cp depth=${depth ?? '?'} nodes=${(nodes||0).toLocaleString()} nps=${nps} time=${timeMs ?? '?'}ms`);
+    }
 };
 
-(async () => {
-    try {
-        const mod = await import(chrome.runtime.getURL('logger.js'));
-        log = mod.log;
-        if (logBuffer) {
-            logBuffer.forEach(([lvl, args]) => log[lvl](...args));
-            logBuffer = null;
-        }
-        log.info('Content', 'Logger initialized');
-    } catch(e) {
-        console.error("Failed to load logger.js in content script:", e);
-    }
-})();
+log.info('Content', 'Logger initialized');
 
 /** @type {string} The last FEN position that was sent for analysis. */
 let currentFEN = "";
@@ -67,6 +89,7 @@ chrome.storage.onChanged.addListener((changes, area) => {
  */
 function normalizeFen(fen) {
     if (!fen) return "";
+    // Keep every position field that can change legal moves.
     return fen.split(" ").slice(0, 4).join(" ");
 }
 
@@ -214,16 +237,156 @@ function simulateClick(clientX, clientY) {
 }
 
 /**
+ * Promotion picker UI state.
+ * @type {{ resolve: Function|null, el: HTMLElement|null }}
+ */
+const _promoUI = { resolve: null, el: null };
+
+/**
+ * Shows a stylish promotion piece picker overlay and resolves with the chosen piece char.
+ * @param {string} engineChar - The engine's preferred piece ('q', 'r', 'b', 'n')
+ * @returns {Promise<string>} Resolves with the chosen char
+ */
+function showPromotionPicker(engineChar) {
+    return new Promise((resolve) => {
+        // Remove any existing picker
+        if (_promoUI.el) _promoUI.el.remove();
+
+        const boardEl = document.querySelector('wc-chess-board, chess-board, cg-board');
+        const rect = boardEl ? boardEl.getBoundingClientRect() : { left: window.innerWidth / 2 - 100, top: 100 };
+
+        const pieces = [
+            { char: 'q', label: '♛', name: 'Queen' },
+            { char: 'r', label: '♜', name: 'Rook' },
+            { char: 'b', label: '♝', name: 'Bishop' },
+            { char: 'n', label: '♞', name: 'Knight' },
+        ];
+
+        const container = document.createElement('div');
+        container.id = 'aether-promo-picker';
+        container.style.cssText = `
+            position: fixed;
+            z-index: 999999;
+            left: ${Math.min(rect.left + 8, window.innerWidth - 280)}px;
+            top: ${Math.max(rect.top - 110, 8)}px;
+            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+            border: 1px solid rgba(102,126,234,0.6);
+            border-radius: 14px;
+            box-shadow: 0 8px 32px rgba(0,0,0,0.7), 0 0 0 1px rgba(255,255,255,0.05);
+            padding: 10px 12px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 8px;
+            font-family: 'Segoe UI', Arial, sans-serif;
+            animation: aetherPromoIn 0.18s cubic-bezier(0.34, 1.56, 0.64, 1) both;
+            backdrop-filter: blur(8px);
+            -webkit-backdrop-filter: blur(8px);
+        `;
+
+        const style = document.createElement('style');
+        style.textContent = `
+            @keyframes aetherPromoIn {
+                from { opacity: 0; transform: scale(0.82) translateY(-10px); }
+                to   { opacity: 1; transform: scale(1) translateY(0); }
+            }
+            #aether-promo-picker .aether-promo-title {
+                font-size: 11px; color: rgba(255,255,255,0.5); letter-spacing: 1.5px;
+                text-transform: uppercase; font-weight: 600; margin-bottom: 2px;
+            }
+            #aether-promo-picker .aether-promo-row {
+                display: flex; gap: 8px;
+            }
+            #aether-promo-picker .aether-promo-btn {
+                width: 52px; height: 52px;
+                background: rgba(255,255,255,0.06);
+                border: 1px solid rgba(255,255,255,0.12);
+                border-radius: 10px;
+                cursor: pointer;
+                display: flex; flex-direction: column; align-items: center; justify-content: center;
+                gap: 2px;
+                transition: background 0.15s, border-color 0.15s, transform 0.1s, box-shadow 0.15s;
+                color: white;
+            }
+            #aether-promo-picker .aether-promo-btn .piece-icon {
+                font-size: 26px; line-height: 1;
+            }
+            #aether-promo-picker .aether-promo-btn .piece-name {
+                font-size: 9px; opacity: 0.55; letter-spacing: 0.5px;
+            }
+            #aether-promo-picker .aether-promo-btn:hover {
+                background: rgba(102,126,234,0.35);
+                border-color: rgba(102,126,234,0.8);
+                transform: translateY(-2px) scale(1.05);
+                box-shadow: 0 4px 16px rgba(102,126,234,0.4);
+            }
+            #aether-promo-picker .aether-promo-btn.engine-pick {
+                border-color: rgba(102,234,140,0.6);
+                background: rgba(102,234,140,0.12);
+            }
+            #aether-promo-picker .aether-promo-btn.engine-pick .piece-icon {
+                filter: drop-shadow(0 0 6px rgba(102,234,140,0.7));
+            }
+            #aether-promo-picker .aether-promo-btn:active {
+                transform: translateY(0) scale(0.97);
+            }
+        `;
+        document.head.appendChild(style);
+
+        const title = document.createElement('div');
+        title.className = 'aether-promo-title';
+        title.textContent = '⚡ Promote Pawn';
+
+        const row = document.createElement('div');
+        row.className = 'aether-promo-row';
+
+        pieces.forEach(({ char, label, name }) => {
+            const btn = document.createElement('button');
+            btn.className = 'aether-promo-btn' + (char === engineChar ? ' engine-pick' : '');
+            btn.title = name + (char === engineChar ? ' (Engine pick)' : '');
+            btn.innerHTML = `<span class="piece-icon">${label}</span><span class="piece-name">${name}</span>`;
+            btn.addEventListener('click', () => {
+                container.style.animation = 'none';
+                container.style.opacity = '0';
+                setTimeout(() => { container.remove(); style.remove(); }, 150);
+                _promoUI.el = null;
+                _promoUI.resolve = null;
+                resolve(char);
+            });
+            row.appendChild(btn);
+        });
+
+        container.appendChild(title);
+        container.appendChild(row);
+        document.body.appendChild(container);
+        _promoUI.el = container;
+        _promoUI.resolve = resolve;
+
+        // Auto-resolve with engine's choice after 8 seconds if user doesn't pick
+        setTimeout(() => {
+            if (_promoUI.resolve) {
+                _promoUI.resolve(engineChar);
+                _promoUI.resolve = null;
+                container.remove();
+                style.remove();
+                _promoUI.el = null;
+            }
+        }, 8000);
+    });
+}
+
+/**
  * Selects a promotion piece in the promotion modal.
  * Tries Chess.com and generic modal approaches.
  * Defaults to queen promotion if nothing else is found.
  * @param {string} promotionChar - One of 'q', 'r', 'b', 'n'
  */
 function selectPromotion(promotionChar) {
+    if (!promotionChar) promotionChar = 'q';
+    
     // Chess.com promotion modal
     const chessComModal = document.querySelector(
-        ".promotion-piece-" + promotionChar +
-        ", [data-promotion-piece=\"" + promotionChar + "\"]"
+        `.promotion-piece.w${promotionChar}, .promotion-piece.b${promotionChar}, .promotion-piece-${promotionChar}, [data-promotion-piece="${promotionChar}"], .promotion-menu .w${promotionChar}, .promotion-menu .b${promotionChar}, .promotion-window .${promotionChar}`
     );
     if (chessComModal) {
         chessComModal.click();
@@ -231,9 +394,10 @@ function selectPromotion(promotionChar) {
     }
 
     // Lichess promotion modal
+    const charToName = { 'q': 'queen', 'r': 'rook', 'b': 'bishop', 'n': 'knight' };
+    const pName = charToName[promotionChar] || 'queen';
     const lichessModal = document.querySelector(
-        "cg-board .promotion-choice ." + promotionChar +
-        ", .lichess-promotion ." + promotionChar
+        `cg-board .promotion-choice .${pName}, .lichess-promotion .${pName}, #promotion-choice piece.${pName}`
     );
     if (lichessModal) {
         lichessModal.click();
@@ -328,10 +492,15 @@ function playMove(uci) {
             };
             simulateClick(toFinal.x, toFinal.y);
 
-            // Step 3: Handle promotion modal if needed
+            // Step 3: Handle promotion — show picker UI so user can choose the piece
             if (promotionChar) {
-                const promoDelay = 120 + Math.floor(Math.random() * 60);
-                setTimeout(() => selectPromotion(promotionChar), promoDelay);
+                // Show the picker UI after a short delay so the board's modal can appear
+                const promoDelay = 150 + Math.floor(Math.random() * 50);
+                setTimeout(async () => {
+                    const chosenChar = await showPromotionPicker(promotionChar);
+                    // After user picks, click on the board's modal piece
+                    setTimeout(() => selectPromotion(chosenChar), 80);
+                }, promoDelay);
             }
         }, delay);
     }, reactionDelay);
@@ -349,8 +518,9 @@ function playMove(uci) {
  * @returns {string|null}
  */
 function parseBoard() {
-    const boardEl = document.querySelector("wc-chess-board, chess-board, cg-board, .cg-board, .board");
-    if (!boardEl) return null;
+    try {
+        const boardEl = document.querySelector("wc-chess-board, chess-board, cg-board, .cg-board, .board");
+        if (!boardEl) return null;
 
     // Detect board flip (am I playing as black?)
     // Method 1: class-based
@@ -372,7 +542,7 @@ function parseBoard() {
             flipBoard = true;
         }
     }
-    const pieces = boardEl.querySelectorAll(".piece");
+    const pieces = boardEl.querySelectorAll(".piece, piece, [class*='piece']");
     const boardWidth = boardEl.clientWidth;
 
     const board = new Array(64).fill(null);
@@ -530,6 +700,10 @@ function parseBoard() {
     if (castling === "") castling = "-";
 
     return `${fenPlacement} ${stm} ${castling} - 0 1`;
+    } catch (e) {
+        log.error('Board', 'Error parsing board DOM', e);
+        return null;
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -629,10 +803,17 @@ function renderArrows(pvLines, isMyTurn) {
  * @param {string|null} networkFen - FEN from the WebSocket interceptor, or null to parse from DOM.
  */
 function processPosition(networkFen = null) {
-    const fen = networkFen || parseBoard();
-    if (!fen || fen === currentFEN) return;
+    try {
+        const fen = networkFen || parseBoard();
+        if (!fen) {
+            // This is completely normal during page load or when waiting for a match.
+            // We use debug instead of warn to avoid spamming the console.
+            log.debug('Board', 'Failed to parse FEN from DOM (parseBoard returned null)');
+            return;
+        }
+        if (fen === currentFEN) return;
 
-    currentFEN = fen;
+        currentFEN = fen;
     clearOverlay();
 
     const timeLeft = getMyTimeLeft();
@@ -710,6 +891,12 @@ function processPosition(networkFen = null) {
                 return;
             }
             if (!response) return;
+            
+            // Abort if the board has already changed (e.g. late ponder hit already played)
+            if (currentFEN !== fen) {
+                log.info('Engine', 'Ignoring stale search response because board has changed');
+                return;
+            }
 
             // Cache ponder result for our next turn.
             if (response.cachedForFen) {
@@ -737,6 +924,9 @@ function processPosition(networkFen = null) {
             }
         }
     );
+    } catch (e) {
+        log.error('Board', 'Error during processPosition', e);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -863,8 +1053,6 @@ chrome.runtime.onMessage.addListener((msg) => {
             const norm = normalizeFen(response.cachedForFen);
             ponderCache[norm] = response;
             
-            // (playMove is not called here; processPosition will pick it up on our turn)
-
             // Render arrows
             let pvLines = [];
             if (response.multiPv && response.multiPv.length > 0) {
@@ -876,6 +1064,32 @@ chrome.runtime.onMessage.addListener((msg) => {
             }
             if (pvLines.length > 0) {
                 renderArrows(pvLines, false);
+            }
+
+            // Late ponder hit: If it's already our turn and the board matches the ponder FEN, play it immediately
+            if (currentFEN && normalizeFen(currentFEN) === norm) {
+                const stm = currentFEN.split(" ")[1];
+                let myColor = flipBoard ? "b" : "w";
+                const boardEl = document.querySelector("wc-chess-board, chess-board");
+                if (boardEl) {
+                    const orient = boardEl.getAttribute("board-orientation") || boardEl.getAttribute("data-orientation");
+                    if (orient === "black") myColor = "b";
+                    else if (orient === "white") myColor = "w";
+                }
+                if (stm === myColor) {
+                    log.info('Engine', `Late Ponder hit! Instantly displaying move: ${response.bestMove}`);
+                    chrome.storage.local.set({
+                        engineStats: {
+                            score: response.score,
+                            depth: response.depth,
+                            nodes: response.nodes,
+                            timeMs: response.timeMs,
+                        }
+                    });
+                    if (currentEngineMode === "autoplay") {
+                        playMove(response.bestMove);
+                    }
+                }
             }
         }
     }

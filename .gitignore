@@ -12,6 +12,11 @@ engine-wasm/pkg/
 
 # Release binaries (distribute via GitHub Releases, not source control)
 Aether-Engine.zip
+*.zip
+stockfish/
+sf14/
+test_shift.*
+engine-wasm/out.txt
 
 # IDEs and Editors
 .vscode/

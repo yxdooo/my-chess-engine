@@ -93,6 +93,7 @@ let creatingOffscreen = null;
  */
 const normalizeFen = (fen) => {
     if (!fen) return "";
+    // Piece placement, side to move, castling, and en-passant all affect move legality.
     return fen.split(" ").slice(0, 4).join(" ");
 };
 
@@ -173,24 +174,25 @@ async function hasDocument() {
  */
 function computeEngineTime(timeLeft, elo, increment = 0) {
     if (timeLeft !== null && timeLeft !== undefined && !isNaN(timeLeft)) {
-        // Safe target time calculation: base time fraction + majority of increment
-        const baseTime = (timeLeft * 1000) / 20; 
+        // Safe target time calculation: 1/30th of remaining time
+        const baseTime = (timeLeft * 1000) / 30; 
         const incTime = increment * 1000 * 0.8;
         let targetTime = baseTime + incTime;
         
         // Strict limits for low time
-        if (timeLeft < 15) return 100 + (increment > 0 ? incTime : 0);
-        if (timeLeft < 45) return 500 + (increment > 0 ? incTime : 0);
+        if (timeLeft < 10) return Math.max(100, incTime); // Panic mode
+        if (timeLeft < 30) return Math.floor(Math.min(targetTime, 500 + incTime)); // Fast mode
         
         if (!isNaN(targetTime)) {
-            return Math.floor(targetTime);
+            // Cap soft limit at 2000ms (Rust engine will stretch this up to 6000ms if needed via hard limit)
+            return Math.floor(Math.min(targetTime, 2000));
         }
     }
     // No clock info (bot games, analysis) – use ELO-based fallback
     if (elo < 1000) return 300;
-    if (elo < 2000) return 1000;
-    if (elo < 3000) return 2000;
-    return 3000; // God Mode: 3 seconds max
+    if (elo < 2000) return 800;
+    if (elo < 3000) return 1500;
+    return 2000;
 }
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
@@ -242,7 +244,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                             {},
                             1000
                         )
-                            .then((r) => r.json())
+                            .then((r) => {
+                                if (!r.ok) throw new Error("Explorer API failed");
+                                if (!r.headers.get("content-type")?.includes("application/json")) {
+                                    throw new Error("Invalid content type");
+                                }
+                                return r.json();
+                            })
                             .then((data) => {
                                 if (
                                     data.moves &&
@@ -449,19 +457,18 @@ function runFallbackWorker(fen, timeMs, elo, history, hashSize, isMyTurn, sendRe
                 fallbackWorker.postMessage(msg);
             }
             fallbackMessageQueue = [];
-        } else if (e.data.type === "SEARCH_RESULT") {
+        } else if (e.data.type === "RESULT") {
             startFallbackIdleTimeout();
             if (e.data.searchId !== undefined && e.data.searchId !== searchId) return;
-            const parsed = e.data.data;
             const response = {
-                bestMove: parsed.bestMove,
-                pv: parsed.pv,
-                ponderFen: parsed.ponderFen,
-                multiPv: [{ bestMove: parsed.bestMove, pv: parsed.pv, ponderFen: parsed.ponderFen }],
-                score: parsed.score,
-                depth: parsed.depth,
-                nodes: parsed.nodes,
-                timeMs: parsed.timeMs || timeMs,
+                bestMove: e.data.bestMove,
+                pv: e.data.pv,
+                ponderFen: e.data.ponderFen,
+                multiPv: [{ bestMove: e.data.bestMove, pv: e.data.pv, ponderFen: e.data.ponderFen }],
+                score: e.data.score,
+                depth: e.data.depth,
+                nodes: e.data.nodes,
+                timeMs: e.data.timeMs || timeMs,
             };
             handleSearchResponse(response, isMyTurn, sendResponse, timeMs, elo, workerCount, history, hashSize);
             if (pendingFallbackResponse === sendResponse) {
