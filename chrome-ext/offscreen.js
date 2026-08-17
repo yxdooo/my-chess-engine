@@ -161,6 +161,14 @@ function processSearch(message, searchId, abortFlag) {
             log.info('SMP', `Done in ${elapsed}ms | best=${bestOverallMove} score=${bestOverallScore}cp depth=${bestDepth} nodes=${totalNodes.toLocaleString()} nps=${nps}`);
 
             workerResults.sort((a, b) => b.score - a.score);
+            if (workerResults.length > 0) {
+                bestOverallScore = workerResults[0].score;
+                bestOverallMove  = workerResults[0].bestMove;
+                bestPv           = workerResults[0].pv;
+                bestPonderFen    = workerResults[0].ponderFen;
+                bestDepth        = workerResults[0].depth;
+            }
+
             const multiPv = workerResults.slice(0, 3).map((r) => ({
                 bestMove: r.bestMove,
                 pv: r.pv,
