@@ -86,7 +86,7 @@ async function build() {
         execSync("set RUSTUP_TOOLCHAIN=nightly&& wasm-pack build --target web --release", {
             cwd: path.join(__dirname, "engine-wasm"),
             stdio: "inherit",
-            env: { ...process.env, RUSTUP_TOOLCHAIN: "nightly", RUSTFLAGS: "-C target-feature=+atomics,+bulk-memory" }
+            env: { ...process.env, RUSTUP_TOOLCHAIN: "nightly", RUSTFLAGS: "-C target-feature=+simd128,+atomics,+bulk-memory" }
         });
     } catch (e) {
         console.error("WASM build failed.");

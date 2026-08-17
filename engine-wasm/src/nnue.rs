@@ -64,18 +64,51 @@ pub fn flip_piece_code(pc: usize) -> usize {
     pc ^ 1
 }
 
+#[inline(always)]
 fn add_feature(acc: &mut [i16; HIDDEN_SIZE], weights: &[i16], feature: usize) {
     let offset = feature * HIDDEN_SIZE;
-    for i in 0..HIDDEN_SIZE {
-        acc[i] = acc[i].wrapping_add(weights[offset + i]);
+    #[cfg(target_arch = "wasm32")]
+    unsafe {
+        use core::arch::wasm32::*;
+        let mut acc_ptr = acc.as_mut_ptr() as *mut v128;
+        let mut w_ptr = weights.as_ptr().add(offset) as *const v128;
+        for _ in 0..(HIDDEN_SIZE / 8) {
+            let a = v128_load(acc_ptr);
+            let w = v128_load(w_ptr);
+            v128_store(acc_ptr, i16x8_add(a, w));
+            acc_ptr = acc_ptr.add(1);
+            w_ptr = w_ptr.add(1);
+        }
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        for i in 0..HIDDEN_SIZE {
+            acc[i] = acc[i].wrapping_add(weights[offset + i]);
+        }
     }
 }
 
-#[allow(dead_code)]
+#[inline(always)]
 fn sub_feature(acc: &mut [i16; HIDDEN_SIZE], weights: &[i16], feature: usize) {
     let offset = feature * HIDDEN_SIZE;
-    for i in 0..HIDDEN_SIZE {
-        acc[i] = acc[i].wrapping_sub(weights[offset + i]);
+    #[cfg(target_arch = "wasm32")]
+    unsafe {
+        use core::arch::wasm32::*;
+        let mut acc_ptr = acc.as_mut_ptr() as *mut v128;
+        let mut w_ptr = weights.as_ptr().add(offset) as *const v128;
+        for _ in 0..(HIDDEN_SIZE / 8) {
+            let a = v128_load(acc_ptr);
+            let w = v128_load(w_ptr);
+            v128_store(acc_ptr, i16x8_sub(a, w));
+            acc_ptr = acc_ptr.add(1);
+            w_ptr = w_ptr.add(1);
+        }
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        for i in 0..HIDDEN_SIZE {
+            acc[i] = acc[i].wrapping_sub(weights[offset + i]);
+        }
     }
 }
 
@@ -136,21 +169,14 @@ pub fn update_accumulator(network: &Network, next_acc: &mut Accumulator, prev_ac
                     let feature_w = wk * 641 + 1 + pc * 64 + sq_idx;
                     let feature_b = bk_flipped * 641 + 1 + flip_piece_code(pc) * 64 + (sq_idx ^ 63);
                     
-                    let offset_w = feature_w * HIDDEN_SIZE;
-                    let offset_b = feature_b * HIDDEN_SIZE;
-                    
                     if new_bb.0 & (1u64 << sq_idx) != 0 {
                         // Added piece
-                        for i in 0..HIDDEN_SIZE {
-                            next_acc.white[i] = next_acc.white[i].wrapping_add(network.feature_weights[offset_w + i]);
-                            next_acc.black[i] = next_acc.black[i].wrapping_add(network.feature_weights[offset_b + i]);
-                        }
+                        add_feature(&mut next_acc.white, &network.feature_weights, feature_w);
+                        add_feature(&mut next_acc.black, &network.feature_weights, feature_b);
                     } else {
                         // Removed piece
-                        for i in 0..HIDDEN_SIZE {
-                            next_acc.white[i] = next_acc.white[i].wrapping_sub(network.feature_weights[offset_w + i]);
-                            next_acc.black[i] = next_acc.black[i].wrapping_sub(network.feature_weights[offset_b + i]);
-                        }
+                        sub_feature(&mut next_acc.white, &network.feature_weights, feature_w);
+                        sub_feature(&mut next_acc.black, &network.feature_weights, feature_b);
                     }
                 }
             }

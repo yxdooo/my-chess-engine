@@ -351,6 +351,18 @@ impl ChessEngine {
         let mut second_best_move = None;
         
         let mut depth_reached: u8 = 0;
+
+        let legal_moves: ArrayVec<ChessMove, 256> = MoveGen::new_legal(&board).collect();
+        if legal_moves.len() == 1 {
+            let only_move = legal_moves[0];
+            let next_board = board.make_move_new(only_move);
+            return format!(
+                "{{\"bestMove\":\"{}\",\"ponderFen\":\"{}\",\"score\":0,\"depth\":1,\"nodes\":1,\"pv\":[\"{}\"]}}",
+                only_move.to_string(),
+                next_board.to_string(),
+                only_move.to_string()
+            );
+        }
         
         let max_depth = if self.elo < 500 { 1 } 
                         else if self.elo < 1000 { 2 } 
@@ -1241,6 +1253,13 @@ impl ChessEngine {
                 let fp_margin = 80 + 100 * depth as i32;
                 if static_eval + fp_margin <= alpha {
                     continue; 
+                }
+            }
+
+            // Quiet SEE Pruning — prune quiet moves that lose material without compensation at shallow depth
+            if !is_pv_node && depth <= 3 && !is_check && !is_capture && !is_promotion {
+                if see_value(board, m) < -50 * depth as i32 {
+                    continue;
                 }
             }
 
