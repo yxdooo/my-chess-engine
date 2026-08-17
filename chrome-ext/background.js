@@ -1,66 +1,40 @@
 import { log } from "./logger.js";
 
 /**
- * Aggressive opening book: FEN (position + side + castling + en-passant) -> UCI move.
- * En-passant field is critical – it must match the normalized FEN from the engine.
+ * Master opening book: FEN (position + side + castling + en-passant) -> UCI move.
+ * Provides instant, top-tier Grandmaster opening book choices.
  */
-const AGGRESSIVE_BOOK = {
-    // ---- Responses to 1. e4 ----
-    // Play the Sicilian (1...c5) against 1. e4
+const MASTER_BOOK = {
+    // ---- Responses to 1. e4 as Black ----
+    // Sicilian Defense against 1. e4
     "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq e3": "c7c5",
+    // 1. e4 e5
+    "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq -": "e7e5",
+    "rnbqkbnr/pppp1ppp/8/4p3/4P3/5N2/PPPP1PPP/RNBQKB1R b KQkq -": "b8c6",
+    "r1bqkbnr/pppp1ppp/2n5/1B2p3/4P3/5N2/PPPP1PPP/RNBQK2R b KQkq -": "a7a6",
 
-    // Stafford Gambit: 1. e4 e5 2. Nf3 Nf6!?
-    "rnbqkbnr/pppp1ppp/8/4p3/4P3/5N2/PPPP1PPP/RNBQKB1R b KQkq -": "g8f6",
-    // After 2...Nf6 3. Nxe5 (White grabs the pawn)
-    "rnbqkb1r/pppp1ppp/5n2/4p3/4P3/5N2/PPPP1PPP/RNBQKB1R w KQkq -": "f3e5",
-    // After 3. Nxe5: Black plays 3...Nc6!
-    "rnbqkb1r/pppp1ppp/5n2/4N3/4P3/8/PPPP1PPP/RNBQKB1R b KQkq -": "b8c6",
-    // Traxler Counterattack: 1. e4 e5 2. Nf3 Nc6 3. Bc4 Nf6 4. Ng5 Bc5!!
-    "r1bqk2r/pppp1ppp/2n2n2/2b1p1N1/2B1P3/8/PPPP1PPP/RNBQK2R b KQkq -": "f8c5",
+    // French Defense response: 2. d4 d5
+    "rnbqkbnr/pppp1ppp/4p3/8/4P3/8/PPPP1PPP/RNBQKBNR w KQkq -": "d2d4",
+    "rnbqkbnr/pppp1ppp/4p3/8/3PP3/8/PPP2PPP/RNBQKBNR b KQkq d3": "d7d5",
 
-    // Scandinavian (1. e4 d5 2. exd5) – play the modern 2...Nf6
+    // Caro-Kann response: 2. d4 d5
+    "rnbqkbnr/pp1ppppp/2p5/8/4P3/8/PPPP1PPP/RNBQKBNR w KQkq -": "d2d4",
+    "rnbqkbnr/pp1ppppp/2p5/8/3PP3/8/PPP2PPP/RNBQKBNR b KQkq d3": "d7d5",
+
+    // Scandinavian response: 2. exd5
     "rnbqkbnr/ppp1pppp/8/3p4/4P3/8/PPPP1PPP/RNBQKBNR w KQkq d6": "e4d5",
-    "rnbqkbnr/ppp1pppp/8/3P4/8/8/PPPP1PPP/RNBQKBNR b KQkq -": "g8f6",
-    // After 2...Nf6 3. d4
-    "rnbqkb1r/ppp1pppp/5n2/3P4/3P4/8/PPP2PPP/RNBQKBNR b KQkq -": "f6d5",
-
-    // Scholar's Mate Trap (trap Nd4 fork)
-    "r1bqkbnr/pppp1ppp/2n5/4p3/2B1P3/5Q2/PPPP1PPP/RNB1K1NR b KQkq -": "c6d4",
-
-    // Caro-Kann Fantasy Variation Trap
-    "rnbqkbnr/pp2pppp/2p5/3p4/3PP3/5P2/PPP3PP/RNBQKBNR b KQkq -": "d5e4",
-    "rnbqkbnr/pp2pppp/2p5/8/3Pp3/5P2/PPP3PP/RNBQKBNR w KQkq -": "f3e4",
-    "rnbqkbnr/pp2pppp/2p5/8/3PP3/8/PPP3PP/RNBQKBNR b KQkq -": "e7e5",
+    "rnbqkbnr/ppp1pppp/8/3P4/8/8/PPPP1PPP/RNBQKBNR b KQkq -": "d8d5",
 
     // ---- Responses to 1. d4 ----
-    // Englund Gambit: 1. d4 e5!?
-    "rnbqkbnr/pppppppp/8/8/3P4/8/PPP1PPPP/RNBQKBNR b KQkq d3": "e7e5",
-    // After 2. dxe5 (White takes) – Nc6
-    "rnbqkbnr/pppp1ppp/8/4P3/8/8/PPP1PPPP/RNBQKBNR b KQkq -": "b8c6",
-    // After 2...Nc6 3. Nf3 – Qe7 (classic Englund)
-    "r1bqkbnr/pppp1ppp/2n5/4P3/8/5N2/PPP1PPPP/RNBQKB1R b KQkq -": "d8e7",
-
-    // Budapest Gambit: 1. d4 Nf6 2. c4 e5!?
-    "rnbqkb1r/pppppppp/5n2/8/2PP4/8/PP2PPPP/RNBQKBNR b KQkq c3": "e7e5",
-    // After 3. dxe5 Ng4 (Budapest Gambit main line)
-    "rnbqkb1r/pppp1ppp/8/4P3/2P3n1/8/PP2PPPP/RNBQKBNR w KQkq -": "b1c3",
-
-    // ---- Engine plays White ----
-    // Italian Game
-    "r1bqkbnr/pppp1ppp/2n5/4p3/4P3/5N2/PPPP1PPP/RNBQKB1R w KQkq -": "f1c4",
-    // Against Sicilian: Nf3 then d4
-    "rnbqkbnr/pp1ppppp/8/2p5/4P3/8/PPPP1PPP/RNBQKBNR w KQkq -": "g1f3",
-    // Against French (1...e6): d4
-    "rnbqkbnr/pppp1ppp/4p3/8/4P3/8/PPPP1PPP/RNBQKBNR w KQkq -": "d2d4",
-    // Against Caro-Kann (1...c6): d4
-    "rnbqkbnr/pp1ppppp/2p5/8/4P3/8/PPPP1PPP/RNBQKBNR w KQkq -": "d2d4",
-    // London System: 1. d4 d5 2. Nf3
-    "rnbqkbnr/ppp1pppp/8/3p4/3P4/8/PPP1PPPP/RNBQKBNR w KQkq d6": "g1f3",
-    // London: after Nf3, Bf4
-    "rnbqkbnr/ppp1pppp/8/3p4/3P4/5N2/PPP1PPPP/RNBQKB1R b KQkq -": "g8f6",
-    "rnbqkb1r/ppp1pppp/5n2/3p4/3P4/5N2/PPP1PPPP/RNBQKB1R w KQkq -": "c1f4",
-    // Against 1. d4 Nf6: play c4 (English/Queen's Indian territory)
+    "rnbqkbnr/pppppppp/8/8/3P4/8/PPP1PPPP/RNBQKBNR b KQkq d3": "g8f6",
+    "rnbqkbnr/pppppppp/8/8/3P4/8/PPP1PPPP/RNBQKBNR b KQkq -": "g8f6",
+    "rnbqkb1r/pppppppp/5n2/8/2PP4/8/PP2PPPP/RNBQKBNR b KQkq c3": "e7e6",
     "rnbqkb1r/pppppppp/5n2/8/3P4/8/PPP1PPPP/RNBQKBNR w KQkq -": "c2c4",
+
+    // ---- Playing White ----
+    "r1bqkbnr/pppp1ppp/2n5/4p3/4P3/5N2/PPPP1PPP/RNBQKB1R w KQkq -": "f1b5",
+    "rnbqkbnr/pp1ppppp/8/2p5/4P3/8/PPPP1PPP/RNBQKBNR w KQkq -": "g1f3",
+    "rnbqkbnr/ppp1pppp/8/3p4/3P4/8/PPP1PPPP/RNBQKBNR w KQkq d6": "c2c4",
 };
 
 chrome.runtime.onInstalled.addListener(() => {
@@ -230,10 +204,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                 log.debug('Background', `FEN: ${message.fen}`);
 
                 const fallbackToEngine = () => {
-                    if (message.isMyTurn && AGGRESSIVE_BOOK[normFen]) {
-                        const trapMove = AGGRESSIVE_BOOK[normFen];
-                        log.info('Background', `Played book trap move: ${trapMove}`);
-                        sendResponse({ bestMove: trapMove, pv: [trapMove] });
+                    if (message.isMyTurn && MASTER_BOOK[normFen]) {
+                        const bookMove = MASTER_BOOK[normFen];
+                        log.info('Background', `Played master book move: ${bookMove}`);
+                        sendResponse({ bestMove: bookMove, pv: [bookMove] });
                         return;
                     }
 

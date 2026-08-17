@@ -363,7 +363,18 @@ impl ChessEngine {
             self.time_limit_ms = f64::min(self.time_limit_ms * 2.0, self.hard_time_limit_ms);
         }
 
-        let max_horizon = max_depth;
+        let effective_max_depth = if elo < 1000.0 {
+            max_depth.min(4)
+        } else if elo < 1500.0 {
+            max_depth.min(6)
+        } else if elo < 2000.0 {
+            max_depth.min(8)
+        } else if elo < 2400.0 {
+            max_depth.min(10)
+        } else {
+            max_depth
+        };
+        let max_horizon = effective_max_depth;
         for base_depth in 1..=64u8 {
             let depth = base_depth + (split_id % 2) as u8;
             if depth > max_horizon { break; }
@@ -441,33 +452,23 @@ impl ChessEngine {
             previous_best_score = best_score;
         }
         
-        // Blunder simulation: for weaker Elo, sometimes play a suboptimal move.
-        // IMPORTANT: Only activate for elo < 2500. For elo >= 2500 NEVER blunder.
-        if elo < 2500.0 {
-            // Clamp to [0.0, 2500.0] before subtraction to prevent negative → u32 overflow
-            let effective_elo = elo.min(2499.0).max(0.0);
-            let blunder_chance = ((2500.0 - effective_elo) / 50.0) as u32; // max 50 at elo=0
+        // Blunder simulation: for weaker Elo, sometimes play a slightly suboptimal move.
+        // IMPORTANT: For elo >= 2400 NEVER blunder (100% full strength).
+        if elo < 2400.0 {
+            let effective_elo = elo.min(2399.0).max(0.0);
+            let blunder_chance = ((2400.0 - effective_elo) / 60.0) as u32; // max ~40% at elo=0
             #[cfg(target_arch = "wasm32")]
             let random = (js_sys::Math::random() * 100.0) as u32;
             #[cfg(not(target_arch = "wasm32"))]
-            let random = 15; // Mock random for native
+            let random = 15;
             
             if random < blunder_chance {
                 if let Some(m) = second_best_move {
                     best_move = Some(m);
-                } else {
-                    let mut moves: ArrayVec<ChessMove, 256> = MoveGen::new_legal(&board).collect();
-                    let mut scores = self.score_moves(&board, &moves, 0, best_move);
-                    for i in 0..moves.len() {
-                        self.pick_move(&mut moves, &mut scores, i);
-                    }
-                    if moves.len() > 1 {
-                        best_move = moves.iter().find(|&&m| Some(m) != best_move).copied();
-                    }
                 }
             }
         }
-        // elo >= 2500: always play the best found move, no blunder simulation.
+        // elo >= 2400: always play the best found move, no blunder simulation.
 
         let mut pv = Vec::new();
         let mut current_board = board.clone();
@@ -1168,8 +1169,8 @@ impl ChessEngine {
         // Only compute when we'll actually need it (not in check at depth > 3).
         let static_eval = if !is_check { self.evaluate_full(board, pawn_hash, ply) } else { 0 };
 
-        // Reverse Futility Pruning (RFP) — more aggressive depth range
-        if !is_check && depth <= 6 {
+        // Reverse Futility Pruning (RFP) — only on non-PV nodes
+        if !is_pv_node && !is_check && depth <= 6 {
             let margin = depth as i32 * 75;
             if static_eval - margin >= beta {
                 return static_eval;
@@ -1177,7 +1178,7 @@ impl ChessEngine {
         }
 
         // Razoring: if even an optimistic score can't reach alpha, fall through to qsearch.
-        if !is_check && depth <= 3 {
+        if !is_pv_node && !is_check && depth <= 3 {
             let razor_margin = depth as i32 * 300;
             if static_eval + razor_margin <= alpha {
                 let q_score = self.quiescence_search(board, alpha - razor_margin, beta, ply, halfmove_clock, tt, pawn_hash);
@@ -1189,7 +1190,7 @@ impl ChessEngine {
 
         let stm_pieces = board.color_combined(board.side_to_move()) & (board.pieces(Piece::Knight) | board.pieces(Piece::Bishop) | board.pieces(Piece::Rook) | board.pieces(Piece::Queen));
         let has_pieces = stm_pieces.popcnt() > 0;
-        if !is_check && depth >= 3 && has_pieces && (ply as usize) < 128 {
+        if !is_pv_node && !is_check && depth >= 3 && has_pieces && (ply as usize) < 128 {
             if let Some(null_board) = board.null_move() {
                 self.update_nnue(ply, board, &null_board);
                 let mut r = 3 + depth / 3;
@@ -1212,7 +1213,7 @@ impl ChessEngine {
         }
 
         // ProbCut
-        if !is_check && depth >= 5 && beta < MATE - 128 {
+        if !is_pv_node && !is_check && depth >= 5 && beta < MATE - 128 {
             let bound = beta + 200;
             // Proper ProbCut: Reduced depth full search instead of just quiescence
             let probcut_score = self.negamax(board, depth - 4, bound - 1, bound, ply, halfmove_clock, tt, pawn_hash);
@@ -1244,10 +1245,8 @@ impl ChessEngine {
                 quiet_moves.push(m);
             }
 
-            // Futility Pruning — extended to depth <= 4
-            // Note: gives_check not available here (computed after make_move_new),
-            // so we skip pruning for promotions only (captures already excluded).
-            if depth <= 4 && !is_check && !is_capture && !is_promotion {
+            // Futility Pruning — only on non-PV nodes at low depth
+            if !is_pv_node && depth <= 4 && !is_check && !is_capture && !is_promotion {
                 let fp_margin = 80 + 100 * depth as i32;
                 if static_eval + fp_margin <= alpha {
                     continue; 

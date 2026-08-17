@@ -9,7 +9,8 @@ fn main() {
 
     let mut engine = ChessEngine::new();
     
-    let nnue_bytes = std::fs::read("../chrome-ext/net.nnue").unwrap();
+    let net_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../chrome-ext/net.nnue");
+    let nnue_bytes = std::fs::read(&net_path).unwrap();
     let loaded = engine.load_network_native(&nnue_bytes);
     println!("NNUE Loaded: {}", loaded);
 
