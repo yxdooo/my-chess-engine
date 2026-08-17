@@ -207,7 +207,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                     if (message.isMyTurn && MASTER_BOOK[normFen]) {
                         const bookMove = MASTER_BOOK[normFen];
                         log.info('Background', `Played master book move: ${bookMove}`);
-                        sendResponse({ bestMove: bookMove, pv: [bookMove] });
+                        const stats = { bestMove: bookMove, pv: [bookMove], score: 0, depth: 1, nodes: 1, timeMs: 5 };
+                        chrome.storage.local.set({ engineStats: stats });
+                        sendResponse(stats);
                         return;
                     }
 
@@ -232,10 +234,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                                     elo >= 1600
                                 ) {
                                     log.info('Background', `Played opening master book move: ${data.moves[0].uci}`);
-                                    sendResponse({
-                                        bestMove: data.moves[0].uci,
-                                        pv: [data.moves[0].uci],
-                                    });
+                                    const stats = { bestMove: data.moves[0].uci, pv: [data.moves[0].uci], score: 0, depth: 1, nodes: 1, timeMs: 50 };
+                                    chrome.storage.local.set({ engineStats: stats });
+                                    sendResponse(stats);
                                 } else {
                                     callOffscreenEngine(
                                         message.fen,
@@ -286,10 +287,17 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                         .then((data) => {
                             if (data && data.moves && data.moves.length > 0) {
                                 log.info('Background', `Played syzygy TB move: ${data.moves[0].uci}`);
-                                sendResponse({
+                                const tbScore = data.category === "win" ? 29000 : data.category === "loss" ? -29000 : 0;
+                                const stats = {
                                     bestMove: data.moves[0].uci,
                                     pv: [data.moves[0].uci],
-                                });
+                                    score: tbScore,
+                                    depth: 99,
+                                    nodes: 1,
+                                    timeMs: 50,
+                                };
+                                chrome.storage.local.set({ engineStats: stats });
+                                sendResponse(stats);
                             } else {
                                 fallbackToEngine();
                             }
