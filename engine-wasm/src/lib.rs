@@ -485,8 +485,10 @@ impl ChessEngine {
             break;
         }
         
-        if pv.is_empty() && best_move.is_some() {
-            pv.push(format!("\"{}\"", best_move.unwrap().to_string()));
+        if pv.is_empty() {
+            if let Some(m) = best_move {
+                pv.push(format!("\"{}\"", m.to_string()));
+            }
         }
 
         let best_move_str = match best_move {
@@ -509,19 +511,11 @@ impl ChessEngine {
             ponder_fen = pv_board.to_string(); 
         }
 
-        let score_cp = if best_score > 20000 {
-            30000 - best_score
-        } else if best_score < -20000 {
-            -30000 - best_score
-        } else {
-            best_score
-        };
-
         format!(
             "{{\"bestMove\":\"{}\",\"ponderFen\":\"{}\",\"score\":{},\"depth\":{},\"nodes\":{},\"pv\":[{}]}}",
             best_move_str,
             ponder_fen,
-            score_cp,
+            best_score,
             depth_reached,
             self.nodes,
             pv.join(",")
