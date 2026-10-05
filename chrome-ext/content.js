@@ -129,7 +129,6 @@ function initOverlay() {
         overlayCanvas.width = boardWidth;
         overlayCanvas.height = boardHeight;
     }
-}
 
 /**
  * Clears the overlay canvas.
@@ -140,7 +139,6 @@ function clearOverlay() {
             .getContext("2d")
             .clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
     }
-}
 
 /**
  * Draws an arrow on the overlay canvas from one square index to another.
@@ -212,31 +210,28 @@ function drawArrow(fromIdx, toIdx, color) {
  * @param {number} clientX
  * @param {number} clientY
  */
-function simulateClick(clientX, clientY) {
-    const target = document.elementFromPoint(clientX, clientY);
-    if (!target) return;
+function simulateDrag(fromX, fromY, toX, toY) {
+    const fromEl = document.elementFromPoint(fromX, fromY);
+    if (!fromEl) return;
+    const evtInitFrom = { bubbles: true, cancelable: true, view: window, clientX: fromX, clientY: fromY, button: 0, buttons: 1 };
+    const evtInitTo = { bubbles: true, cancelable: true, view: window, clientX: toX, clientY: toY, button: 0, buttons: 1 };
+    const evtInitUp = { bubbles: true, cancelable: true, view: window, clientX: toX, clientY: toY, button: 0, buttons: 0 };
 
-    const eventArgs = {
-        bubbles: true,
-        cancelable: true,
-        view: window,
-        clientX,
-        clientY,
-        button: 0,
-        buttons: 1,
-    };
-
-    // Fire the full sequence that the browser would normally fire for a real click.
-    for (const type of ["pointerover", "pointerenter", "mouseover", "mouseenter",
-                         "pointermove", "mousemove",
-                         "pointerdown", "mousedown",
-                         "pointerup", "mouseup", "click"]) {
-        target.dispatchEvent(
-            type.startsWith("pointer")
-                ? new PointerEvent(type, { ...eventArgs, pointerId: 1, isPrimary: true })
-                : new MouseEvent(type, eventArgs)
-        );
-    }
+    fromEl.dispatchEvent(new PointerEvent("pointerover", evtInitFrom));
+    fromEl.dispatchEvent(new PointerEvent("pointerenter", evtInitFrom));
+    fromEl.dispatchEvent(new PointerEvent("pointermove", evtInitFrom));
+    fromEl.dispatchEvent(new PointerEvent("pointerdown", evtInitFrom));
+    fromEl.dispatchEvent(new MouseEvent("mousedown", evtInitFrom));
+    
+    // Move to target
+    fromEl.dispatchEvent(new PointerEvent("pointermove", evtInitTo));
+    fromEl.dispatchEvent(new MouseEvent("mousemove", evtInitTo));
+    
+    // Release
+    const toEl = document.elementFromPoint(toX, toY) || fromEl;
+    toEl.dispatchEvent(new PointerEvent("pointerup", evtInitUp));
+    toEl.dispatchEvent(new MouseEvent("mouseup", evtInitUp));
+    toEl.dispatchEvent(new MouseEvent("click", evtInitUp));
 }
 
 /**
@@ -424,53 +419,18 @@ function selectPromotion(promotionChar) {
 function playMove(uci) {
     if (!uci || uci.length < 4) return false;
 
-    const fromFile = uci.charCodeAt(0) - 97; // 'a'=0 … 'h'=7
-    const fromRank = uci.charCodeAt(1) - 49; // '1'=0 … '8'=7
+    const fromFile = uci.charCodeAt(0) - 97;
+    const fromRank = uci.charCodeAt(1) - 49;
     const toFile   = uci.charCodeAt(2) - 97;
     const toRank   = uci.charCodeAt(3) - 49;
-    const promotionChar = uci.length === 5 ? uci[4] : null; // 'q','r','b','n'
+    const promotionChar = uci.length === 5 ? uci[4] : null;
 
-    // Validate coordinates
-    if (
-        fromFile < 0 || fromFile > 7 || fromRank < 0 || fromRank > 7 ||
-        toFile   < 0 || toFile   > 7 || toRank   < 0 || toRank   > 7
-    ) {
-        log.warn('Move', `Invalid UCI coordinates: ${uci}`);
-        return false;
-    }
+    if (fromFile < 0 || fromFile > 7 || fromRank < 0 || fromRank > 7 || toFile < 0 || toFile > 7 || toRank < 0 || toRank > 7) return false;
 
-    const boardEl = document.querySelector(
-        "wc-chess-board, chess-board, cg-board"
-    );
-    if (!boardEl) {
-        log.warn('Move', 'Board element not found for move simulation');
-        return false;
-    }
+    const boardEl = document.querySelector("wc-chess-board, chess-board, cg-board");
+    if (!boardEl) return false;
 
-    const rect = boardEl.getBoundingClientRect();
-    const sqSize = rect.width / 8;
-
-    /**
-     * Converts logical file/rank to viewport coordinates of the square centre.
-     * Accounts for board flip.
-     * @param {number} file - 0-7 (a=0)
-     * @param {number} rank - 0-7 (rank1=0)
-     * @returns {{x: number, y: number}}
-     */
-    function squareToViewport(file, rank) {
-        const visualFile = flipBoard ? 7 - file : file;
-        const visualRank = flipBoard ? rank : 7 - rank;
-        return {
-            x: rect.left + (visualFile + 0.5) * sqSize,
-            y: rect.top  + (visualRank + 0.5) * sqSize,
-        };
-    }
-
-    const from = squareToViewport(fromFile, fromRank);
-    const to   = squareToViewport(toFile, toRank);
-
-    // Step 1: Click source square (piece selection) with reaction delay
-    const reactionDelay = 200 + Math.floor(Math.random() * 300);
+    const reactionDelay = 50 + Math.floor(Math.random() * 50);
     setTimeout(() => {
         const boardElNow = document.querySelector("wc-chess-board, chess-board, cg-board");
         if (!boardElNow) return;
@@ -480,37 +440,25 @@ function playMove(uci) {
             x: rectNow.left + ((flipBoard ? 7 - fromFile : fromFile) + 0.5) * sqSizeNow,
             y: rectNow.top + ((flipBoard ? fromRank : 7 - fromRank) + 0.5) * sqSizeNow
         };
-        simulateClick(fromNow.x, fromNow.y);
+        const toNow = {
+            x: rectNow.left + ((flipBoard ? 7 - toFile : toFile) + 0.5) * sqSizeNow,
+            y: rectNow.top + ((flipBoard ? toRank : 7 - toRank) + 0.5) * sqSizeNow
+        };
+        
+        simulateDrag(fromNow.x, fromNow.y, toNow.x, toNow.y);
 
-        // Step 2: Click destination square after a short delay (natural timing with jitter)
-        const delay = 150 + Math.floor(Math.random() * 200);
-        setTimeout(() => {
-            const boardElFinal = document.querySelector("wc-chess-board, chess-board, cg-board");
-            if (!boardElFinal) return;
-            const rectFinal = boardElFinal.getBoundingClientRect();
-            const sqSizeFinal = rectFinal.width / 8;
-            const toFinal = {
-                x: rectFinal.left + ((flipBoard ? 7 - toFile : toFile) + 0.5) * sqSizeFinal,
-                y: rectFinal.top + ((flipBoard ? toRank : 7 - toRank) + 0.5) * sqSizeFinal
-            };
-            simulateClick(toFinal.x, toFinal.y);
-
-            // Step 3: Handle promotion — show picker UI so user can choose the piece
-            if (promotionChar) {
-                // Show the picker UI after a short delay so the board's modal can appear
-                const promoDelay = 150 + Math.floor(Math.random() * 50);
-                setTimeout(async () => {
-                    const chosenChar = await showPromotionPicker(promotionChar);
-                    // After user picks, click on the board's modal piece
-                    setTimeout(() => selectPromotion(chosenChar), 80);
-                }, promoDelay);
-            }
-        }, delay);
+        if (promotionChar) {
+            const promoDelay = 150 + Math.floor(Math.random() * 50);
+            setTimeout(async () => {
+                const chosenChar = await showPromotionPicker(promotionChar);
+                setTimeout(() => selectPromotion(chosenChar), 80);
+            }, promoDelay);
+        }
     }, reactionDelay);
 
     return true;
 }
-
+}
 // ---------------------------------------------------------------------------
 // Board Parsing
 // ---------------------------------------------------------------------------
@@ -812,7 +760,6 @@ function renderArrows(pvLines, isMyTurn) {
             }
         }
     }
-}
 
 /**
  * Main entry point. Called when a position change is detected.
@@ -1135,3 +1082,4 @@ chrome.runtime.onMessage.addListener((msg) => {
         }
     }
 });
+}}
