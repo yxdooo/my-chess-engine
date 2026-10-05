@@ -210,27 +210,15 @@ function drawArrow(fromIdx, toIdx, color) {
  * @param {number} clientX
  * @param {number} clientY
  */
-function simulateDrag(fromX, fromY, toX, toY) {
-    const fromEl = document.elementFromPoint(fromX, fromY);
-    if (!fromEl) return;
-    const evtInitFrom = { bubbles: true, cancelable: true, view: window, clientX: fromX, clientY: fromY, button: 0, buttons: 1 };
-    const evtInitTo = { bubbles: true, cancelable: true, view: window, clientX: toX, clientY: toY, button: 0, buttons: 1 };
-    const evtInitUp = { bubbles: true, cancelable: true, view: window, clientX: toX, clientY: toY, button: 0, buttons: 0 };
-
-    fromEl.dispatchEvent(new PointerEvent("pointerdown", evtInitFrom));
-    fromEl.dispatchEvent(new MouseEvent("mousedown", evtInitFrom));
-    
-    // Add a tiny async delay so React DND / Chess.com can register the drag start
-    setTimeout(() => {
-        fromEl.dispatchEvent(new PointerEvent("pointermove", evtInitTo));
-        fromEl.dispatchEvent(new MouseEvent("mousemove", evtInitTo));
-        
-        setTimeout(() => {
-            const toEl = document.elementFromPoint(toX, toY) || fromEl;
-            toEl.dispatchEvent(new PointerEvent("pointerup", evtInitUp));
-            toEl.dispatchEvent(new MouseEvent("mouseup", evtInitUp));
-        }, 10);
-    }, 10);
+function simulateClick(clientX, clientY) {
+    const el = document.elementFromPoint(clientX, clientY);
+    if (!el) return;
+    const evtInit = { bubbles: true, cancelable: true, view: window, clientX, clientY, button: 0, buttons: 1 };
+    el.dispatchEvent(new PointerEvent("pointerdown", evtInit));
+    el.dispatchEvent(new MouseEvent("mousedown", evtInit));
+    el.dispatchEvent(new PointerEvent("pointerup", { ...evtInit, buttons: 0 }));
+    el.dispatchEvent(new MouseEvent("mouseup", { ...evtInit, buttons: 0 }));
+    el.dispatchEvent(new MouseEvent("click", { ...evtInit, buttons: 0 }));
 }
 
 /**
@@ -444,7 +432,8 @@ function playMove(uci) {
             y: rectNow.top + ((flipBoard ? toRank : 7 - toRank) + 0.5) * sqSizeNow
         };
         
-        simulateDrag(fromNow.x, fromNow.y, toNow.x, toNow.y);
+        simulateClick(fromNow.x, fromNow.y);
+        simulateClick(toNow.x, toNow.y);
 
         if (promotionChar) {
             const promoDelay = 150 + Math.floor(Math.random() * 50);
