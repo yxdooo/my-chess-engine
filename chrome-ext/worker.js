@@ -58,7 +58,7 @@ onmessage = async (e) => {
 
     if (type === "SEARCH") {
         const fenShort = fen ? fen.substring(0, 45) : 'null';
-        log.debug('Search', `Worker[${workerId}] searching elo=${elo} my_ms=${timeMs} split=${splitId}/${splitCount}`, { fenShort });
+        log.debug('Search', `Worker[${workerId}] searching elo=${elo} my_ms= split=${splitId}/${splitCount}`, { fenShort });
         log.time(`Search[${workerId}]`);
         
         
