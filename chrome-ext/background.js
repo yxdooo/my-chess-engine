@@ -242,42 +242,15 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                                     chrome.storage.local.set({ engineStats: stats });
                                     sendResponse(stats);
                                 } else {
-                                    callOffscreenEngine(
-                                        message.fen,
-                                        engineTime,
-                                        elo,
-                                        workerCount,
-                                        true,
-                                        message.history,
-                                        hashSize,
-                                        sendResponse
-                                    );
+                                    callOffscreenEngine(message.fen, my_ms, opp_ms, inc_ms, movesToGo, elo, workerCount, true, message.history, hashSize, sendResponse);
                                 }
                             })
                             .catch((err) => {
                                 log.warn('Background', 'Explorer API failed, falling back to engine', err);
-                                callOffscreenEngine(
-                                    message.fen,
-                                    engineTime,
-                                    elo,
-                                    workerCount,
-                                    true,
-                                    message.history,
-                                    hashSize,
-                                    sendResponse
-                                );
+                                callOffscreenEngine(message.fen, my_ms, opp_ms, inc_ms, movesToGo, elo, workerCount, true, message.history, hashSize, sendResponse);
                             });
                     } else {
-                        callOffscreenEngine(
-                            message.fen,
-                            engineTime,
-                            elo,
-                            workerCount,
-                            false,
-                            message.history,
-                            hashSize,
-                            sendResponse
-                        );
+                        callOffscreenEngine(message.fen, my_ms, opp_ms, inc_ms, movesToGo, elo, workerCount, false, message.history, hashSize, sendResponse);
                     }
                 };
 
