@@ -54,7 +54,7 @@ class GameResult:
 def parse_time_control(text):
     """Parses `base+inc` (seconds) into a (base, increment) tuple."""
     base_text, _, inc_text = text.partition("+")
-    return float(base_text), float(inc_text or 0)
+    return float(base_text) * 60.0, float(inc_text or 0)
 
 
 def random_opening(rng):

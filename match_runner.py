@@ -17,3 +17,4 @@ TOURNEY_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "engine-
 if __name__ == "__main__":
     sys.argv[0] = TOURNEY_PATH
     runpy.run_path(TOURNEY_PATH, run_name="__main__")
+

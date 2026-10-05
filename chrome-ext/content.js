@@ -717,31 +717,46 @@ function parseBoard() {
  * Reads the active player's remaining clock time from the DOM.
  * @returns {number|null} Seconds remaining, or null if not found.
  */
-function getMyTimeLeft() {
-    let myClock = document.querySelector(
-        ".clock-bottom .clock-time-monospaced, .clock-bottom.clock-component, [data-cy='clock-bottom'] .clock-time-monospaced, .clock-bottom, #board-layout-player-bottom .clock-time-monospaced, .rclock-bottom .time, .cg-clock-bottom"
-    );
-    if (!myClock) {
-        // Fallback: if multiple clocks exist in DOM, we are always the bottom (last) clock!
+
+let lastMyTime = null;
+let inferredIncMs = 0.0;
+let moveCount = 0;
+
+function parseClockText(text) {
+    if (!text) return null;
+    try {
+        if (text.includes(':')) {
+            const parts = text.split(':');
+            return (parseInt(parts[0], 10) * 60 + parseFloat(parts[1])) * 1000.0;
+        }
+        return parseFloat(text) * 1000.0;
+    } catch (_) {
+        return null;
+    }
+}
+
+function getClocks() {
+    let myClock = document.querySelector(".clock-bottom .clock-time-monospaced, .clock-bottom.clock-component, [data-cy='clock-bottom'] .clock-time-monospaced, .clock-bottom, #board-layout-player-bottom .clock-time-monospaced, .rclock-bottom .time, .cg-clock-bottom");
+    let oppClock = document.querySelector(".clock-top .clock-time-monospaced, .clock-top.clock-component, [data-cy='clock-top'] .clock-time-monospaced, .clock-top, #board-layout-player-top .clock-time-monospaced, .rclock-top .time, .cg-clock-top");
+    
+    if (!myClock || !oppClock) {
         const allClocks = document.querySelectorAll(".clock-component .clock-time-monospaced, .clock-component, .clock-time-monospaced");
         if (allClocks && allClocks.length >= 2) {
             myClock = allClocks[allClocks.length - 1];
+            oppClock = allClocks[0];
         } else if (allClocks && allClocks.length === 1) {
             myClock = allClocks[0];
         }
     }
-    if (!myClock) return null;
+    
+    let my_ms = myClock ? parseClockText(myClock.innerText.trim()) : null;
+    let opp_ms = oppClock ? parseClockText(oppClock.innerText.trim()) : null;
+    return { my_ms, opp_ms };
+}
 
-    const text = myClock.innerText.trim();
-    try {
-        if (text.includes(":")) {
-            const parts = text.split(":");
-            return parseInt(parts[0], 10) * 60 + parseFloat(parts[1]);
-        }
-        return parseFloat(text);
-    } catch (_) {
-        return null;
-    }
+function getMyTimeLeft() {
+    const c = getClocks();
+    return c.my_ms ? c.my_ms / 1000.0 : null;
 }
 
 // ---------------------------------------------------------------------------
@@ -885,14 +900,32 @@ function processPosition(networkFen = null) {
     }
     ponderCache = {};
 
+    
+    const clocks = getClocks();
+    if (clocks.my_ms !== null && lastMyTime !== null && clocks.my_ms > lastMyTime) {
+        let diff = clocks.my_ms - lastMyTime;
+        if (diff > 0 && diff < 30000) {
+            // Very simple EWMA for increment inference
+            if (inferredIncMs === 0) inferredIncMs = diff;
+            else inferredIncMs = inferredIncMs * 0.7 + diff * 0.3;
+        }
+    }
+    if (isMyTurn && clocks.my_ms !== null) {
+        lastMyTime = clocks.my_ms;
+    }
+
     chrome.runtime.sendMessage(
         {
             type: "NEW_POSITION",
             fen,
-            timeLeft,
+            timeLeft: timeLeft,
+            my_ms: clocks.my_ms || 0.0,
+            opp_ms: clocks.opp_ms || 0.0,
+            inc_ms: inferredIncMs,
             isMyTurn,
             history: historyStr,
         },
+
         (response) => {
             if (chrome.runtime.lastError) {
                 log.error('Background', 'Messaging error', chrome.runtime.lastError);

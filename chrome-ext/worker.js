@@ -13,7 +13,7 @@ let engine = null;
 let workerId = Math.random().toString(36).slice(2, 6); // e.g. "a3f7"
 
 onmessage = async (e) => {
-    const { type, size, fen, timeMs, elo, splitId, splitCount, history, searchId, abortFlag, memory } =
+    const { type, size, fen, my_ms, opp_ms, inc_ms, movesToGo, elo, splitId, splitCount, history, searchId, abortFlag, memory } =
         e.data;
 
     if (type === "INIT") {
@@ -58,18 +58,24 @@ onmessage = async (e) => {
 
     if (type === "SEARCH") {
         const fenShort = fen ? fen.substring(0, 45) : 'null';
-        log.debug('Search', `Worker[${workerId}] searching elo=${elo} timeMs=${timeMs} split=${splitId}/${splitCount}`, { fenShort });
+        log.debug('Search', `Worker[${workerId}] searching elo=${elo} my_ms=${timeMs} split=${splitId}/${splitCount}`, { fenShort });
         log.time(`Search[${workerId}]`);
         
-        const result = engine.get_best_move(
+        
+        const result = engine.get_best_move_timed(
             fen,
-            timeMs,
+            my_ms || 0.0,
+            inc_ms || 0.0,
+            opp_ms || 0.0,
+            movesToGo || 35,
+            30.0, // overhead_ms
             elo,
             splitId,
             splitCount,
             serializeHistory(history),
             abortFlag
         );
+
 
         const elapsed = log.timeEnd(`Search[${workerId}]`);
 
@@ -79,22 +85,6 @@ onmessage = async (e) => {
                 log.warn('Search', `Worker[${workerId}] got empty bestMove`, { parsed, fenShort });
             } else {
                 log.info('Search', `Worker[${workerId}] → ${parsed.bestMove} score=${parsed.score}cp depth=${parsed.depth} nodes=${(parsed.nodes||0).toLocaleString()} time=${elapsed}ms`);
-            }
-            postMessage({ type: "RESULT", searchId, ...parsed });
-        } catch (err) {
-            log.error('Search', `Worker[${workerId}] JSON parse FAILED — raw result below`, { err, result });
-            postMessage({
-                type: "RESULT",
-                searchId,
-                bestMove: "",
-                score: 0,
-                pv: [],
-                ponderFen: "",
-            });
-        }
-    }
-};
-rkerId}] → ${parsed.bestMove} score=${parsed.score}cp depth=${parsed.depth} nodes=${(parsed.nodes||0).toLocaleString()} time=${elapsed}ms`);
             }
             postMessage({ type: "RESULT", searchId, ...parsed });
         } catch (err) {

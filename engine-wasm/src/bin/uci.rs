@@ -104,30 +104,31 @@ fn main() {
                 let is_white = position_fen.split_whitespace().nth(1).unwrap_or("w") == "w";
                 let (my_time, my_inc) = if is_white { (wtime, winc) } else { (btime, binc) };
 
+                
                 // Calculate search time budget (ms)
-                let time_ms = if movetime > 0.0 {
-                    movetime * 0.95  // fixed time per move
-                } else if my_time > 0.0 {
-                    let moves_left = movestogo.max(1) as f64;
-                    // Use ~1/movestogo of remaining time + increment
-                    let budget = my_time / moves_left + my_inc * 0.8;
-                    // Clamp: don't use more than 10% of total time or 30s
-                    budget.min(my_time * 0.1).min(30_000.0).max(50.0)
+                let history_str = position_history.join("|");
+                let json_result = if movetime > 0.0 {
+                    engine.get_best_move_native(
+                        &position_fen,
+                        movetime * 0.95,
+                        3000.0,
+                        1, 1,
+                        &history_str
+                    )
                 } else {
-                    1000.0  // default: 1 second
+                    engine.get_best_move_timed_native(
+                        &position_fen,
+                        my_time,
+                        my_inc,
+                        if is_white { btime } else { wtime },
+                        movestogo as i32,
+                        30.0, // move_overhead_ms
+                        3000.0, // elo
+                        1, 1, // split
+                        &history_str
+                    )
                 };
 
-                // Build history string (pipe-separated normalized FENs of prior positions)
-                let history_str = position_history.join("|");
-
-                let json_result = engine.get_best_move_native(
-                    &position_fen,
-                    time_ms,
-                    3000.0, // elo = max
-                    1,      // split_id = 1 (no SMP splitting)
-                    1,      // split_count = 1 (no SMP)
-                    &history_str,
-                );
 
                 // Parse JSON response
                 let parsed_score: i32 = extract_json_i32(&json_result, "score");

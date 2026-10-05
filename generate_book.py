@@ -2,6 +2,14 @@ import chess
 
 openings = [
     # ---- 1. e4 as White ----
+    # London System
+    'd2d4 d7d5 g1f3 g8f6 c1f4 c7c5 e2e3 b8c6 b1d2',
+    # Pirc Defense
+    'e2e4 d7d6 d2d4 g8f6 b1c3 g7g6 g1f3 f8g7',
+    # Alekhine Defense
+    'e2e4 g8f6 e4e5 f6d5 d2d4 d7d6 g1f3',
+    # Dutch Defense
+    'd2d4 f7f5 g2g3 g8f6 f1g2 e7e6',
     # Ruy Lopez (Main Line)
     'e2e4 e7e5 g1f3 b8c6 f1b5 a7a6 b5a4 g8f6 e1g1 f8e7 f1e1 b7b5 a4b3 d7d6 c2c3 e8g8 h2h3',
     # Italian Game / Giuoco Piano

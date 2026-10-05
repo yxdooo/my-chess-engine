@@ -196,7 +196,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                 const workerCount  = Math.min(8, Math.max(1, result.targetWorkers || ((navigator.hardwareConcurrency || 4) - 1)));
                 const hashSize     = result.hashSize || 128;
                 const increment    = result.increment || 0;
-                const engineTime   = computeEngineTime(message.timeLeft, elo, increment);
+                const my_ms = message.my_ms || 0;
+                const opp_ms = message.opp_ms || 0;
+                const inc_ms = message.inc_ms || 0;
+                const movesToGo = 35;
+
                 const normFen      = normalizeFen(message.fen);
                 const pieceCount   = normFen.split(' ')[0].replace(/[\/0-9]/g, '').length;
 
@@ -213,7 +217,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                         return;
                     }
 
-                    if (message.isMyTurn) {
+                    if (message.isMyTurn && message.my_ms > 15000) {
                         fetchWithTimeout(
                             "https://explorer.lichess.ovh/masters?fen=" +
                                 encodeURIComponent(message.fen),
@@ -322,7 +326,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
  */
 function callOffscreenEngine(
     fen,
-    timeMs,
+    my_ms, opp_ms, inc_ms, movesToGo,
     elo,
     workerCount,
     isMyTurn,
@@ -336,7 +340,7 @@ function callOffscreenEngine(
             {
                 type: "START_SMP_SEARCH",
                 fen,
-                timeMs,
+                my_ms, opp_ms, inc_ms, movesToGo,
                 elo,
                 activeWorkerCount: workerCount,
                 isMyTurn,
@@ -346,15 +350,15 @@ function callOffscreenEngine(
             (response) => {
                 if (chrome.runtime.lastError) {
                     log.warn('Background', `Offscreen error (sending to fallback): ${chrome.runtime.lastError.message}`);
-                    runFallbackWorker(fen, timeMs, elo, history, hashSize, isMyTurn, sendResponse, workerCount);
+                    runFallbackWorker(fen, my_ms, opp_ms, inc_ms, movesToGo, elo, history, hashSize, isMyTurn, sendResponse, workerCount);
                     return;
                 }
-                handleSearchResponse(response, isMyTurn, sendResponse, timeMs, elo, workerCount, history, hashSize);
+                handleSearchResponse(response, isMyTurn, sendResponse, my_ms, opp_ms, inc_ms, movesToGo, elo, workerCount, history, hashSize);
             }
         );
     }).catch((e) => {
         log.error('Background', 'Offscreen setup failed, routing to fallback', e);
-        runFallbackWorker(fen, timeMs, elo, history, hashSize, isMyTurn, sendResponse, workerCount);
+        runFallbackWorker(fen, my_ms, opp_ms, inc_ms, movesToGo, elo, history, hashSize, isMyTurn, sendResponse, workerCount);
     });
 }
 
@@ -386,7 +390,7 @@ function clearFallbackIdleTimeout() {
     }
 }
 
-function runFallbackWorker(fen, timeMs, elo, history, hashSize, isMyTurn, sendResponse, workerCount) {
+function runFallbackWorker(fen, my_ms, opp_ms, inc_ms, movesToGo, elo, history, hashSize, isMyTurn, sendResponse, workerCount) {
     clearFallbackIdleTimeout();
     let sabSupported = false;
     try {
@@ -450,9 +454,9 @@ function runFallbackWorker(fen, timeMs, elo, history, hashSize, isMyTurn, sendRe
                 score: e.data.score,
                 depth: e.data.depth,
                 nodes: e.data.nodes,
-                timeMs: e.data.timeMs || timeMs,
+                timeMs: e.data.timeMs || my_ms, opp_ms, inc_ms, movesToGo,
             };
-            handleSearchResponse(response, isMyTurn, sendResponse, timeMs, elo, workerCount, history, hashSize);
+            handleSearchResponse(response, isMyTurn, sendResponse, my_ms, opp_ms, inc_ms, movesToGo, elo, workerCount, history, hashSize);
             if (pendingFallbackResponse === sendResponse) {
                 pendingFallbackResponse = null;
             }
@@ -480,7 +484,7 @@ function runFallbackWorker(fen, timeMs, elo, history, hashSize, isMyTurn, sendRe
         },
         {
             type: "SEARCH",
-            fen, timeMs, elo,
+            fen, my_ms, opp_ms, inc_ms, movesToGo, elo,
             splitId: 0,
             splitCount: 1,
             history: history || "",
@@ -496,7 +500,7 @@ function runFallbackWorker(fen, timeMs, elo, history, hashSize, isMyTurn, sendRe
     }
 }
 
-function handleSearchResponse(response, isMyTurn, sendResponse, timeMs, elo, workerCount, history, hashSize) {
+function handleSearchResponse(response, isMyTurn, sendResponse, my_ms, opp_ms, inc_ms, movesToGo, elo, workerCount, history, hashSize) {
     if (isMyTurn) {
         if (response && response.score !== undefined) {
             chrome.storage.local.set({
@@ -504,7 +508,7 @@ function handleSearchResponse(response, isMyTurn, sendResponse, timeMs, elo, wor
                     score: response.score,
                     depth: response.depth,
                     nodes: response.nodes,
-                    timeMs: response.timeMs,
+                    timeMs: response.my_ms, opp_ms, inc_ms, movesToGo,
                 },
             });
         }
@@ -521,7 +525,7 @@ function handleSearchResponse(response, isMyTurn, sendResponse, timeMs, elo, wor
                 {
                     type: "START_SMP_SEARCH",
                     fen: response.ponderFen,
-                    timeMs, elo, activeWorkerCount: workerCount, isMyTurn: true, history, hashSize,
+                    my_ms, opp_ms, inc_ms, movesToGo, elo, activeWorkerCount: workerCount, isMyTurn: true, history, hashSize,
                 },
                 (ponderResponse) => {
                     if (!chrome.runtime.lastError && ponderResponse) {

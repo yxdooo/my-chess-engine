@@ -30,3 +30,6 @@ engine-wasm/out.txt
 
 # Logs
 *.log
+
+.junie/
+engine-wasm/results/*.csv

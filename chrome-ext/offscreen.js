@@ -198,7 +198,7 @@ function processSearch(message, searchId, abortFlag) {
         activeWorkers[i].postMessage({
             type: "SEARCH",
             fen: message.fen,
-            timeMs: message.timeMs,
+            my_ms: message.my_ms, opp_ms: message.opp_ms, inc_ms: message.inc_ms, movesToGo: message.movesToGo,
             elo: message.elo,
             splitId: i,
             splitCount: workersToUse,

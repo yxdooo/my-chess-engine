@@ -1,4 +1,6 @@
 /* @ts-self-types="./engine_wasm.d.ts" */
+import { startWorkers } from './snippets/wasm-bindgen-rayon-38edf6e439f6d70d/src/workerHelpers.js';
+
 
 export class ChessEngine {
     __destroy_into_raw() {
@@ -13,7 +15,7 @@ export class ChessEngine {
     }
     /**
      * @param {string} fen
-     * @param {number} time_limit_ms
+     * @param {number} optimum_time_ms
      * @param {number} elo
      * @param {number} split_id
      * @param {number} split_count
@@ -21,7 +23,7 @@ export class ChessEngine {
      * @param {Uint8Array | null} [abort_flag]
      * @returns {string}
      */
-    get_best_move(fen, time_limit_ms, elo, split_id, split_count, history, abort_flag) {
+    get_best_move(fen, optimum_time_ms, elo, split_id, split_count, history, abort_flag) {
         let deferred3_0;
         let deferred3_1;
         try {
@@ -29,7 +31,7 @@ export class ChessEngine {
             const len0 = WASM_VECTOR_LEN;
             const ptr1 = passStringToWasm0(history, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
             const len1 = WASM_VECTOR_LEN;
-            const ret = wasm.chessengine_get_best_move(this.__wbg_ptr, ptr0, len0, time_limit_ms, elo, split_id, split_count, ptr1, len1, isLikeNone(abort_flag) ? 0 : addToExternrefTable0(abort_flag));
+            const ret = wasm.chessengine_get_best_move(this.__wbg_ptr, ptr0, len0, optimum_time_ms, elo, split_id, split_count, ptr1, len1, isLikeNone(abort_flag) ? 0 : addToExternrefTable0(abort_flag));
             deferred3_0 = ret[0];
             deferred3_1 = ret[1];
             return getStringFromWasm0(ret[0], ret[1]);
@@ -39,14 +41,14 @@ export class ChessEngine {
     }
     /**
      * @param {string} fen
-     * @param {number} time_limit_ms
+     * @param {number} optimum_time_ms
      * @param {number} elo
      * @param {number} split_id
      * @param {number} split_count
      * @param {string} history
      * @returns {string}
      */
-    get_best_move_native(fen, time_limit_ms, elo, split_id, split_count, history) {
+    get_best_move_native(fen, optimum_time_ms, elo, split_id, split_count, history) {
         let deferred3_0;
         let deferred3_1;
         try {
@@ -54,7 +56,66 @@ export class ChessEngine {
             const len0 = WASM_VECTOR_LEN;
             const ptr1 = passStringToWasm0(history, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
             const len1 = WASM_VECTOR_LEN;
-            const ret = wasm.chessengine_get_best_move_native(this.__wbg_ptr, ptr0, len0, time_limit_ms, elo, split_id, split_count, ptr1, len1);
+            const ret = wasm.chessengine_get_best_move_native(this.__wbg_ptr, ptr0, len0, optimum_time_ms, elo, split_id, split_count, ptr1, len1);
+            deferred3_0 = ret[0];
+            deferred3_1 = ret[1];
+            return getStringFromWasm0(ret[0], ret[1]);
+        } finally {
+            wasm.__wbindgen_free(deferred3_0, deferred3_1, 1);
+        }
+    }
+    /**
+     * @param {string} fen
+     * @param {number} my_ms
+     * @param {number} inc_ms
+     * @param {number} opp_ms
+     * @param {number} moves_to_go
+     * @param {number} overhead_ms
+     * @param {number} elo
+     * @param {number} split_id
+     * @param {number} split_count
+     * @param {string} history
+     * @param {Uint8Array | null} [abort_flag]
+     * @returns {string}
+     */
+    get_best_move_timed(fen, my_ms, inc_ms, opp_ms, moves_to_go, overhead_ms, elo, split_id, split_count, history, abort_flag) {
+        let deferred3_0;
+        let deferred3_1;
+        try {
+            const ptr0 = passStringToWasm0(fen, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+            const len0 = WASM_VECTOR_LEN;
+            const ptr1 = passStringToWasm0(history, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+            const len1 = WASM_VECTOR_LEN;
+            const ret = wasm.chessengine_get_best_move_timed(this.__wbg_ptr, ptr0, len0, my_ms, inc_ms, opp_ms, moves_to_go, overhead_ms, elo, split_id, split_count, ptr1, len1, isLikeNone(abort_flag) ? 0 : addToExternrefTable0(abort_flag));
+            deferred3_0 = ret[0];
+            deferred3_1 = ret[1];
+            return getStringFromWasm0(ret[0], ret[1]);
+        } finally {
+            wasm.__wbindgen_free(deferred3_0, deferred3_1, 1);
+        }
+    }
+    /**
+     * @param {string} fen
+     * @param {number} my_ms
+     * @param {number} inc_ms
+     * @param {number} opp_ms
+     * @param {number} moves_to_go
+     * @param {number} overhead_ms
+     * @param {number} elo
+     * @param {number} split_id
+     * @param {number} split_count
+     * @param {string} history
+     * @returns {string}
+     */
+    get_best_move_timed_native(fen, my_ms, inc_ms, opp_ms, moves_to_go, overhead_ms, elo, split_id, split_count, history) {
+        let deferred3_0;
+        let deferred3_1;
+        try {
+            const ptr0 = passStringToWasm0(fen, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+            const len0 = WASM_VECTOR_LEN;
+            const ptr1 = passStringToWasm0(history, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+            const len1 = WASM_VECTOR_LEN;
+            const ret = wasm.chessengine_get_best_move_timed_native(this.__wbg_ptr, ptr0, len0, my_ms, inc_ms, opp_ms, moves_to_go, overhead_ms, elo, split_id, split_count, ptr1, len1);
             deferred3_0 = ret[0];
             deferred3_1 = ret[1];
             return getStringFromWasm0(ret[0], ret[1]);
@@ -94,9 +155,74 @@ export class ChessEngine {
     }
 }
 if (Symbol.dispose) ChessEngine.prototype[Symbol.dispose] = ChessEngine.prototype.free;
-function __wbg_get_imports() {
+
+/**
+ * @param {number} num_threads
+ * @returns {Promise<any>}
+ */
+export function initThreadPool(num_threads) {
+    const ret = wasm.initThreadPool(num_threads);
+    return ret;
+}
+
+export class wbg_rayon_PoolBuilder {
+    static __wrap(ptr) {
+        const obj = Object.create(wbg_rayon_PoolBuilder.prototype);
+        obj.__wbg_ptr = ptr;
+        wbg_rayon_PoolBuilderFinalization.register(obj, obj.__wbg_ptr, obj);
+        return obj;
+    }
+    __destroy_into_raw() {
+        const ptr = this.__wbg_ptr;
+        this.__wbg_ptr = 0;
+        wbg_rayon_PoolBuilderFinalization.unregister(this);
+        return ptr;
+    }
+    free() {
+        const ptr = this.__destroy_into_raw();
+        wasm.__wbg_wbg_rayon_poolbuilder_free(ptr, 0);
+    }
+    build() {
+        wasm.wbg_rayon_poolbuilder_build(this.__wbg_ptr);
+    }
+    /**
+     * @returns {number}
+     */
+    numThreads() {
+        const ret = wasm.wbg_rayon_poolbuilder_numThreads(this.__wbg_ptr);
+        return ret >>> 0;
+    }
+    /**
+     * @returns {number}
+     */
+    receiver() {
+        const ret = wasm.wbg_rayon_poolbuilder_receiver(this.__wbg_ptr);
+        return ret >>> 0;
+    }
+}
+if (Symbol.dispose) wbg_rayon_PoolBuilder.prototype[Symbol.dispose] = wbg_rayon_PoolBuilder.prototype.free;
+
+/**
+ * @param {number} receiver
+ */
+export function wbg_rayon_start_worker(receiver) {
+    wasm.wbg_rayon_start_worker(receiver);
+}
+function __wbg_get_imports(memory) {
     const import0 = {
         __proto__: null,
+        __wbg___wbindgen_is_undefined_c05833b95a3cf397: function(arg0) {
+            const ret = arg0 === undefined;
+            return ret;
+        },
+        __wbg___wbindgen_memory_de265df8aadd6273: function() {
+            const ret = wasm.memory;
+            return ret;
+        },
+        __wbg___wbindgen_module_a22faa8909381977: function() {
+            const ret = wasmModule;
+            return ret;
+        },
         __wbg___wbindgen_throw_344f42d3211c4765: function(arg0, arg1) {
             throw new Error(getStringFromWasm0(arg0, arg1));
         },
@@ -113,6 +239,16 @@ function __wbg_get_imports() {
         },
         __wbg_get_index_e68b01fac18aa799: function(arg0, arg1) {
             const ret = arg0[arg1 >>> 0];
+            return ret;
+        },
+        __wbg_instanceof_Window_05ba1ee4f6781663: function(arg0) {
+            let result;
+            try {
+                result = arg0 instanceof Window;
+            } catch (_) {
+                result = false;
+            }
+            const ret = result;
             return ret;
         },
         __wbg_length_1f0964f4a5e2c6d8: function(arg0) {
@@ -141,6 +277,26 @@ function __wbg_get_imports() {
             getDataViewMemory0().setInt32(arg0 + 4 * 1, len1, true);
             getDataViewMemory0().setInt32(arg0 + 4 * 0, ptr1, true);
         },
+        __wbg_startWorkers_8b582d57e92bd2d4: function(arg0, arg1, arg2) {
+            const ret = startWorkers(arg0, arg1, wbg_rayon_PoolBuilder.__wrap(arg2));
+            return ret;
+        },
+        __wbg_static_accessor_GLOBAL_4ef717fb391d88b7: function() {
+            const ret = typeof global === 'undefined' ? null : global;
+            return isLikeNone(ret) ? 0 : addToExternrefTable0(ret);
+        },
+        __wbg_static_accessor_GLOBAL_THIS_8d1badc68b5a74f4: function() {
+            const ret = typeof globalThis === 'undefined' ? null : globalThis;
+            return isLikeNone(ret) ? 0 : addToExternrefTable0(ret);
+        },
+        __wbg_static_accessor_SELF_146583524fe1469b: function() {
+            const ret = typeof self === 'undefined' ? null : self;
+            return isLikeNone(ret) ? 0 : addToExternrefTable0(ret);
+        },
+        __wbg_static_accessor_WINDOW_f2829a2234d7819e: function() {
+            const ret = typeof window === 'undefined' ? null : window;
+            return isLikeNone(ret) ? 0 : addToExternrefTable0(ret);
+        },
         __wbindgen_init_externref_table: function() {
             const table = wasm.__wbindgen_externrefs;
             const offset = table.grow(4);
@@ -150,6 +306,7 @@ function __wbg_get_imports() {
             table.set(offset + 2, true);
             table.set(offset + 3, false);
         },
+        memory: memory || new WebAssembly.Memory({initial:45,maximum:65536}),
     };
     return {
         __proto__: null,
@@ -160,6 +317,9 @@ function __wbg_get_imports() {
 const ChessEngineFinalization = (typeof FinalizationRegistry === 'undefined')
     ? { register: () => {}, unregister: () => {} }
     : new FinalizationRegistry(ptr => wasm.__wbg_chessengine_free(ptr, 1));
+const wbg_rayon_PoolBuilderFinalization = (typeof FinalizationRegistry === 'undefined')
+    ? { register: () => {}, unregister: () => {} }
+    : new FinalizationRegistry(ptr => wasm.__wbg_wbg_rayon_poolbuilder_free(ptr, 1));
 
 function addToExternrefTable0(obj) {
     const idx = wasm.__externref_table_alloc();
@@ -315,19 +475,19 @@ async function __wbg_load(module, imports) {
     }
 }
 
-function initSync(module) {
+function initSync(module, memory) {
     if (wasm !== undefined) return wasm;
 
 
     if (module !== undefined) {
         if (Object.getPrototypeOf(module) === Object.prototype) {
-            ({module} = module)
+            ({module, memory} = module)
         } else {
             console.warn('using deprecated parameters for `initSync()`; pass a single object instead')
         }
     }
 
-    const imports = __wbg_get_imports();
+    const imports = __wbg_get_imports(memory);
     if (!(module instanceof WebAssembly.Module)) {
         module = new WebAssembly.Module(module);
     }
@@ -335,13 +495,13 @@ function initSync(module) {
     return __wbg_finalize_init(instance, module);
 }
 
-async function __wbg_init(module_or_path) {
+async function __wbg_init(module_or_path, memory) {
     if (wasm !== undefined) return wasm;
 
 
     if (module_or_path !== undefined) {
         if (Object.getPrototypeOf(module_or_path) === Object.prototype) {
-            ({module_or_path} = module_or_path)
+            ({module_or_path, memory} = module_or_path)
         } else {
             console.warn('using deprecated parameters for the initialization function; pass a single object instead')
         }
@@ -350,7 +510,7 @@ async function __wbg_init(module_or_path) {
     if (module_or_path === undefined) {
         module_or_path = new URL('engine_wasm_bg.wasm', import.meta.url);
     }
-    const imports = __wbg_get_imports();
+    const imports = __wbg_get_imports(memory);
 
     if (typeof module_or_path === 'string' || (typeof Request === 'function' && module_or_path instanceof Request) || (typeof URL === 'function' && module_or_path instanceof URL)) {
         module_or_path = fetch(module_or_path);

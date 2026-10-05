@@ -1,8 +1,10 @@
 pub mod nnue;
 mod book;
+mod timeman;
 use nnue::{Network, Accumulator};
 
 use wasm_bindgen::prelude::*;
+pub use wasm_bindgen_rayon::init_thread_pool;
 use chess::{Board, ChessMove, Color, Piece, MoveGen};
 use std::collections::HashMap;
 use arrayvec::ArrayVec;
@@ -137,8 +139,8 @@ pub struct ChessEngine {
     /// Butterfly history table for move ordering heuristics.
     history: [[i32; 64]; 64],
     stop_search: bool,
-    time_limit_ms: f64,
-    hard_time_limit_ms: f64,
+    optimum_time_ms: f64,
+    maximum_time_ms: f64,
     start_time: f64,
     /// Total nodes visited across the current search.
     nodes: u64,
@@ -166,8 +168,8 @@ impl ChessEngine {
             killers: [[None; 2]; 128],
             history: [[0; 64]; 64],
             stop_search: false,
-            time_limit_ms: 0.0,
-            hard_time_limit_ms: 0.0,
+            optimum_time_ms: 0.0,
+            maximum_time_ms: 0.0,
             start_time: 0.0,
             nodes: 0,
             elo: 3000,
@@ -266,17 +268,55 @@ impl ChessEngine {
     }
 
     #[wasm_bindgen]
-    pub fn get_best_move(&mut self, fen: &str, time_limit_ms: f64, elo: f64, split_id: u8, split_count: u8, history: &str, abort_flag: Option<js_sys::Uint8Array>) -> String {
+    
+    #[wasm_bindgen]
+    pub fn get_best_move_timed(&mut self, fen: &str, my_ms: f64, inc_ms: f64, opp_ms: f64, moves_to_go: i32, overhead_ms: f64, elo: f64, split_id: u8, split_count: u8, history: &str, abort_flag: Option<js_sys::Uint8Array>) -> String {
         self.abort_flag = abort_flag;
-        self.get_best_move_internal(fen, time_limit_ms, elo, split_id, split_count, history)
+        let clock = timeman::ClockInfo {
+            remaining_ms: my_ms,
+            increment_ms: inc_ms,
+            opponent_remaining_ms: opp_ms,
+            moves_to_go: if moves_to_go > 0 { Some(moves_to_go as u32) } else { None },
+            move_overhead_ms: overhead_ms,
+        };
+        let budget = timeman::allocate(&clock);
+        self.optimum_time_ms = budget.optimum_ms;
+        self.maximum_time_ms = budget.maximum_ms;
+        self.get_best_move_internal(fen, elo, split_id, split_count, history)
     }
 
-    pub fn get_best_move_native(&mut self, fen: &str, time_limit_ms: f64, elo: f64, split_id: u8, split_count: u8, history: &str) -> String {
+    #[wasm_bindgen]
+    pub fn get_best_move(&mut self, fen: &str, optimum_time_ms: f64, elo: f64, split_id: u8, split_count: u8, history: &str, abort_flag: Option<js_sys::Uint8Array>) -> String {
+        self.abort_flag = abort_flag;
+        self.optimum_time_ms = optimum_time_ms;
+        self.maximum_time_ms = optimum_time_ms * 1.2;
+        self.get_best_move_internal(fen, elo, split_id, split_count, history)
+    }
+
+    
+    pub fn get_best_move_timed_native(&mut self, fen: &str, my_ms: f64, inc_ms: f64, opp_ms: f64, moves_to_go: i32, overhead_ms: f64, elo: f64, split_id: u8, split_count: u8, history: &str) -> String {
         self.abort_flag = None;
-        self.get_best_move_internal(fen, time_limit_ms, elo, split_id, split_count, history)
+        let clock = timeman::ClockInfo {
+            remaining_ms: my_ms,
+            increment_ms: inc_ms,
+            opponent_remaining_ms: opp_ms,
+            moves_to_go: if moves_to_go > 0 { Some(moves_to_go as u32) } else { None },
+            move_overhead_ms: overhead_ms,
+        };
+        let budget = timeman::allocate(&clock);
+        self.optimum_time_ms = budget.optimum_ms;
+        self.maximum_time_ms = budget.maximum_ms;
+        self.get_best_move_internal(fen, elo, split_id, split_count, history)
     }
 
-    fn get_best_move_internal(&mut self, fen: &str, time_limit_ms: f64, elo: f64, split_id: u8, split_count: u8, history: &str) -> String {
+    pub fn get_best_move_native(&mut self, fen: &str, optimum_time_ms: f64, elo: f64, split_id: u8, split_count: u8, history: &str) -> String {
+        self.abort_flag = None;
+        self.optimum_time_ms = optimum_time_ms;
+        self.maximum_time_ms = optimum_time_ms * 1.2;
+        self.get_best_move_internal(fen, elo, split_id, split_count, history)
+    }
+
+    fn get_best_move_internal(&mut self, fen: &str, elo: f64, split_id: u8, split_count: u8, history: &str) -> String {
 
         if let Some(book_move) = book::get_book_move(fen) {
             return format!("{{\"bestMove\":\"{}\",\"ponderFen\":\"\",\"score\":0,\"depth\":1,\"nodes\":1,\"pv\":[\"{}\"]}}", book_move, book_move);
@@ -287,15 +327,7 @@ impl ChessEngine {
 
         self.nodes = 0;
         self.stop_search = false;
-        if time_limit_ms.is_nan() {
-            self.time_limit_ms = 3000.0;
-            self.hard_time_limit_ms = 5000.0;
-        } else {
-            self.time_limit_ms = time_limit_ms;
-            // Allow up to 3x base time for critical/fail-low situations
-            self.hard_time_limit_ms = time_limit_ms * 3.0; 
-        }
-        self.elo = elo as u32;
+                self.elo = elo as u32;
         // Bump generation every search so old TT entries are more aggressively replaced.
         self.search_generation = self.search_generation.wrapping_add(1);
 
@@ -316,14 +348,6 @@ impl ChessEngine {
         self.history_hashes = parse_history_hashes(history);
 
         let moves: ArrayVec<ChessMove, 256> = MoveGen::new_legal(&board).collect();
-        if moves.len() == 1 {
-            if let Some(network) = &self.network {
-                nnue::refresh_accumulator(network, &mut self.accumulators[0], &board);
-            }
-            let score = self.evaluate_full(&board, &pawn_hash, 0);
-            return format!("{{\"bestMove\":\"{}\",\"ponderFen\":\"\",\"score\":{},\"depth\":1,\"nodes\":1,\"pv\":[\"{}\"]}}", moves[0].to_string(), score, moves[0].to_string());
-        }
-        
         let my_moves = moves.len();
         if my_moves == 0 {
             let is_check = board.checkers().popcnt() > 0;
@@ -339,6 +363,8 @@ impl ChessEngine {
 
         let mut best_move: Option<ChessMove> = None;
         let mut best_score = -INF;
+        let mut best_move_stable_iterations = 0;
+        let mut previous_best_move: Option<ChessMove> = None;
         let mut previous_best_score = -INF;
         let mut second_best_move = None;
         
@@ -364,8 +390,7 @@ impl ChessEngine {
 
         let is_check = board.checkers().popcnt() > 0;
         if is_check {
-            self.time_limit_ms = f64::min(self.time_limit_ms * 2.0, self.hard_time_limit_ms);
-        }
+                    }
 
         let effective_max_depth = if elo < 1000.0 {
             max_depth.min(4)
@@ -397,7 +422,7 @@ impl ChessEngine {
                 if self.stop_search { break result; }
                 
                 let elapsed_check = current_time_ms() - self.start_time;
-                if elapsed_check >= self.hard_time_limit_ms {
+                if elapsed_check >= self.maximum_time_ms {
                     self.stop_search = true;
                     break result;
                 }
@@ -411,8 +436,7 @@ impl ChessEngine {
                     delta += delta / 2;
                     if delta > 2000 { alpha = -INF; beta = INF; delta = INF; }
                     // Fail low: score dropped, allocate more time
-                    self.time_limit_ms = f64::min(self.time_limit_ms * 1.5, self.hard_time_limit_ms);
-                } else if result.1 >= beta {
+                                    } else if result.1 >= beta {
                     beta = (beta + delta).min(INF);
                     delta += delta / 2;
                     if delta > 2000 { alpha = -INF; beta = INF; delta = INF; }
@@ -421,6 +445,8 @@ impl ChessEngine {
                 }
             };
 
+            
+            
             if self.stop_search { break; }
 
             best_move = current_move;
@@ -428,32 +454,39 @@ impl ChessEngine {
             second_best_move = current_second_move;
             depth_reached = depth;
             
-            let elapsed = current_time_ms() - self.start_time;
-            
-            if best_score < previous_best_score - 50 {
-                self.time_limit_ms = f64::min(self.time_limit_ms * 2.0, self.hard_time_limit_ms);
+            // TimeScaler logic
+            if previous_best_move == best_move {
+                best_move_stable_iterations += 1;
+            } else {
+                best_move_stable_iterations = 0;
+                // Best move changed: extend time slightly
+                self.optimum_time_ms = f64::min(self.optimum_time_ms * 1.3, self.maximum_time_ms);
             }
             
-            if best_score > 20000 {
-                self.stop_search = true;
-                break;
+            // Score dropped significantly: extend time
+            if depth > 1 && previous_best_score - best_score > 40 {
+                self.optimum_time_ms = f64::min(self.optimum_time_ms * 1.5, self.maximum_time_ms);
             }
             
-            let early_exit_threshold = if best_score > 1000 { 100 } else { 300 };
-            let early_exit_depth = if best_score > 1000 { 5 } else { 7 };
-            if depth >= early_exit_depth && best_score.saturating_sub(current_second_score) > early_exit_threshold {
-                if elapsed > self.hard_time_limit_ms * 0.4 {
-                    self.stop_search = true;
-                    break;
-                }
+            // Best move stable for 4 iterations: reduce time
+            if best_move_stable_iterations >= 4 {
+                self.optimum_time_ms *= 0.8; // conservative reduction
             }
             
+            // "Easy move": best move is significantly better than the second best
+            if depth >= 8 && best_score - current_second_score > 120 {
+                self.optimum_time_ms *= 0.6; // easy move, save time
+            }
+
+            previous_best_move = best_move;
+            previous_best_score = best_score;
+
             // Do not start next depth if soft time is up.
-            if elapsed > self.time_limit_ms * 0.65 {
+            let elapsed = current_time_ms() - self.start_time;
+            if elapsed > self.optimum_time_ms * 0.65 {
                 break;
             }
 
-            previous_best_score = best_score;
         }
         
         // Blunder simulation: for weaker Elo, sometimes play a slightly suboptimal move.
@@ -799,7 +832,7 @@ impl ChessEngine {
             }
         }
         let now = current_time_ms();
-        if now - self.start_time >= self.hard_time_limit_ms {
+        if now - self.start_time >= self.maximum_time_ms {
             self.stop_search = true;
         }
     }
@@ -2038,5 +2071,7 @@ mod tests {
         assert!(legal, "engine returned illegal move: {} (raw: {})", best, json);
     }
 }
+
+
 
 
