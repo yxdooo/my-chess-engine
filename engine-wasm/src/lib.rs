@@ -366,7 +366,7 @@ impl ChessEngine {
         let mut best_move_stable_iterations = 0;
         let mut previous_best_move: Option<ChessMove> = None;
         let mut previous_best_score = -INF;
-        let mut second_best_move = None;
+        
         
         let mut depth_reached: u8 = 0;
 
@@ -382,10 +382,10 @@ impl ChessEngine {
             );
         }
         
-        let max_depth = if self.elo < 500 { 1 } 
-                        else if self.elo < 1000 { 2 } 
-                        else if self.elo < 1500 { 3 } 
-                        else if self.elo < 2000 { 5 } 
+        let max_depth = if self.elo < 500 { 2 } 
+                        else if self.elo < 1000 { 4 } 
+                        else if self.elo < 1500 { 6 } 
+                        else if self.elo < 2000 { 8 } 
                         else { 64 };
 
         let is_check = board.checkers().popcnt() > 0;
@@ -396,10 +396,10 @@ impl ChessEngine {
             max_depth.min(4)
         } else if elo < 1500.0 {
             max_depth.min(6)
-        } else if elo < 2000.0 {
+        } else if elo < 1800.0 {
             max_depth.min(8)
-        } else if elo < 2400.0 {
-            max_depth.min(10)
+        } else if elo < 2000.0 {
+            max_depth.min(12)
         } else {
             max_depth
         };
@@ -416,7 +416,7 @@ impl ChessEngine {
                 (best_score - 50, best_score + 50, 50i32)
             };
 
-            let (current_move, current_best_score, current_second_move, current_second_score) = loop {
+            let (current_move, current_best_score) = loop {
 
                 let result = self.search_root(&board, depth, alpha, beta, split_id as u32, split_count as u32, halfmove_clock, &tt, &pawn_hash);
                 if self.stop_search { break result; }
@@ -451,7 +451,7 @@ impl ChessEngine {
 
             best_move = current_move;
             best_score = current_best_score;
-            second_best_move = current_second_move;
+            
             depth_reached = depth;
             
             // TimeScaler logic
@@ -474,7 +474,7 @@ impl ChessEngine {
             }
             
             // "Easy move": best move is significantly better than the second best
-            if depth >= 8 && best_score - current_second_score > 120 {
+            if depth >= 8 && best_move_stable_iterations >= 3 {
                 self.optimum_time_ms *= 0.6; // easy move, save time
             }
 
@@ -489,22 +489,7 @@ impl ChessEngine {
 
         }
         
-        // Blunder simulation: for weaker Elo, sometimes play a slightly suboptimal move.
-        // IMPORTANT: For elo >= 2400 NEVER blunder (100% full strength).
-        if elo < 2400.0 {
-            let effective_elo = elo.min(2399.0).max(0.0);
-            let blunder_chance = ((2400.0 - effective_elo) / 60.0) as u32; // max ~40% at elo=0
-            #[cfg(target_arch = "wasm32")]
-            let random = (js_sys::Math::random() * 100.0) as u32;
-            #[cfg(not(target_arch = "wasm32"))]
-            let random = 15;
-            
-            if random < blunder_chance {
-                if let Some(m) = second_best_move {
-                    best_move = Some(m);
-                }
-            }
-        }
+
         // elo >= 2400: always play the best found move, no blunder simulation.
 
         let mut pv = Vec::new();
@@ -897,11 +882,10 @@ impl ChessEngine {
         scores.swap(start, best_idx);
     }
 
-    fn search_root(&mut self, board: &Board, depth: u8, mut alpha: i32, beta: i32, split_id: u32, split_count: u32, halfmove_clock: u8, tt: &TranspositionTable, pawn_hash: &PawnHashTable) -> (Option<ChessMove>, i32, Option<ChessMove>, i32) {
+    fn search_root(&mut self, board: &Board, depth: u8, mut alpha: i32, beta: i32, split_id: u32, split_count: u32, halfmove_clock: u8, tt: &TranspositionTable, pawn_hash: &PawnHashTable) -> (Option<ChessMove>, i32) {
         let mut best_move = None;
         let mut best_score = -INF;
-        let mut second_best_move = None;
-        let mut second_best_score = -INF;
+        
         let original_alpha = alpha;
         
         let hash = board.get_hash();
@@ -909,7 +893,7 @@ impl ChessEngine {
         let tt_best_move = tt.probe(hash, 0).and_then(|entry| entry.best_move);
 
         let mut moves: ArrayVec<ChessMove, 256> = MoveGen::new_legal(board).collect();
-        if moves.is_empty() { return (None, if board.checkers().popcnt() > 0 { -MATE } else { 0 }, None, -INF); }
+        if moves.is_empty() { return (None, if board.checkers().popcnt() > 0 { -MATE } else { 0 }); }
         
         let mut scores = self.score_moves(board, &moves, 0, tt_best_move);
         
@@ -921,7 +905,7 @@ impl ChessEngine {
             }
         }
 
-        if moves.is_empty() { return (None, -INF, None, -INF); }
+        if moves.is_empty() { return (None, -INF); }
 
         let mut b_search_pv = true;
 
@@ -951,13 +935,10 @@ impl ChessEngine {
             if self.stop_search { break; }
 
             if score > best_score {
-                second_best_score = best_score;
-                second_best_move = best_move;
+                
+                
                 best_score = score;
                 best_move = Some(m);
-            } else if score > second_best_score {
-                second_best_score = score;
-                second_best_move = Some(m);
             }
             if score > alpha { alpha = score; }
             if alpha >= beta { break; }
@@ -966,7 +947,7 @@ impl ChessEngine {
             let flag = if best_score <= original_alpha { UPPERBOUND } else if best_score >= beta { LOWERBOUND } else { EXACT };
             tt.store(hash, best_move, depth, best_score, flag, 0, self.search_generation);
         }
-        (best_move, best_score, second_best_move, second_best_score)
+        (best_move, best_score)
     }
 
     #[inline(always)]
@@ -1205,16 +1186,7 @@ impl ChessEngine {
             }
         }
 
-        // Razoring: if even an optimistic score can't reach alpha, fall through to qsearch.
-        if !is_pv_node && !is_check && depth <= 3 {
-            let razor_margin = depth as i32 * 300;
-            if static_eval + razor_margin <= alpha {
-                let q_score = self.quiescence_search(board, alpha - razor_margin, beta, ply, halfmove_clock, tt, pawn_hash);
-                if q_score + razor_margin <= alpha {
-                    return q_score;
-                }
-            }
-        }
+
 
         let stm_pieces = board.color_combined(board.side_to_move()) & (board.pieces(Piece::Knight) | board.pieces(Piece::Bishop) | board.pieces(Piece::Rook) | board.pieces(Piece::Queen));
         let has_pieces = stm_pieces.popcnt() > 0;
@@ -1289,7 +1261,7 @@ impl ChessEngine {
             }
 
             // Late Move Pruning (LMP): at low depths, skip quiet moves beyond a threshold
-            static LMP_TABLE: [usize; 6] = [0, 5, 8, 12, 16, 20];
+            static LMP_TABLE: [usize; 6] = [0, 8, 16, 28, 45, 65];
             if !is_pv_node && !is_check && !is_capture && !is_promotion && depth <= 5 {
                 let lmp_limit = LMP_TABLE[depth.min(5) as usize];
                 if moves_evaluated > lmp_limit {
