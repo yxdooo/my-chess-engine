@@ -313,15 +313,7 @@ impl ChessEngine {
         };
         
         // Rebuild the set of past position hashes for 3-fold repetition detection.
-        // History is passed as pipe-separated normalized FEN strings.
-        self.history_hashes.clear();
-        for h_fen in history.split('|') {
-            if h_fen.is_empty() { continue; }
-            let full_fen = format!("{} 0 1", h_fen);
-            if let Ok(b) = Board::from_str(&full_fen) {
-                *self.history_hashes.entry(b.get_hash()).or_insert(0) += 1;
-            }
-        }
+        self.history_hashes = parse_history_hashes(history);
 
         let moves: ArrayVec<ChessMove, 256> = MoveGen::new_legal(&board).collect();
         if moves.len() == 1 {
@@ -1898,9 +1890,106 @@ fn evaluate(board: &Board) -> i32 {
     (mg_score * mg_phase + eg_score * eg_phase) / 24
 }
 
+/// Parses the engine history contract into a map of position hash -> occurrence count.
+///
+/// The contract is a `|`-joined list of normalized FENs (first four FEN fields)
+/// describing every PRIOR position of the game; the current position is excluded.
+/// Malformed entries are skipped.
+fn parse_history_hashes(history: &str) -> HashMap<u64, u8> {
+    let mut hashes: HashMap<u64, u8> = HashMap::new();
+    for normalized_fen in history.split('|') {
+        let normalized_fen = normalized_fen.trim();
+        if normalized_fen.is_empty() {
+            continue;
+        }
+        let full_fen = format!("{} 0 1", normalized_fen);
+        if let Ok(board) = Board::from_str(&full_fen) {
+            let count = hashes.entry(board.get_hash()).or_insert(0);
+            *count = count.saturating_add(1);
+        }
+    }
+    hashes
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const START_FEN: &str = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
+
+    /// Counts leaf nodes of the legal move tree to the given depth.
+    fn perft(board: &Board, depth: u32) -> u64 {
+        if depth == 0 {
+            return 1;
+        }
+        let mut nodes = 0;
+        for m in MoveGen::new_legal(board) {
+            nodes += perft(&board.make_move_new(m), depth - 1);
+        }
+        nodes
+    }
+
+    fn normalize(fen: &str) -> String {
+        fen.split_whitespace().take(4).collect::<Vec<_>>().join(" ")
+    }
+
+    /// Plays UCI moves from the start position, returning every normalized FEN visited.
+    fn visited_positions(uci_moves: &[&str]) -> Vec<String> {
+        let mut board = Board::default();
+        let mut positions = vec![normalize(&board.to_string())];
+        for uci in uci_moves {
+            let m = ChessMove::from_str(uci).expect("valid UCI move");
+            board = board.make_move_new(m);
+            positions.push(normalize(&board.to_string()));
+        }
+        positions
+    }
+
+    #[test]
+    fn perft_start_position() {
+        let board = Board::from_str(START_FEN).unwrap();
+        assert_eq!(perft(&board, 1), 20);
+        assert_eq!(perft(&board, 2), 400);
+        assert_eq!(perft(&board, 3), 8_902);
+        assert_eq!(perft(&board, 4), 197_281);
+    }
+
+    #[test]
+    fn perft_kiwipete() {
+        let board = Board::from_str(
+            "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1",
+        )
+        .unwrap();
+        assert_eq!(perft(&board, 1), 48);
+        assert_eq!(perft(&board, 2), 2_039);
+        assert_eq!(perft(&board, 3), 97_862);
+    }
+
+    #[test]
+    fn history_parser_counts_repeated_positions() {
+        // Knights go out and back twice: the start position is visited three times.
+        let positions = visited_positions(&[
+            "g1f3", "g8f6", "f3g1", "f6g8", "g1f3", "g8f6", "f3g1", "f6g8",
+        ]);
+        let prior = &positions[..positions.len() - 1];
+        let hashes = parse_history_hashes(&prior.join("|"));
+        let start_hash = Board::default().get_hash();
+        assert_eq!(hashes.get(&start_hash), Some(&2));
+    }
+
+    #[test]
+    fn history_parser_ignores_empty_and_malformed_entries() {
+        assert!(parse_history_hashes("").is_empty());
+        let hashes = parse_history_hashes("||not a fen||");
+        assert!(hashes.is_empty());
+    }
+
+    #[test]
+    fn history_parser_rejects_space_separated_moves() {
+        // Regression: a UCI move list is not a valid history payload.
+        let hashes = parse_history_hashes("e2e4 e7e5 g1f3");
+        assert!(hashes.is_empty());
+    }
 
     #[test]
     fn test_see_basic() {
@@ -1926,20 +2015,27 @@ mod tests {
     }
 
     #[test]
-    fn test_eval_speed() {
+    fn evaluation_is_symmetric_for_start_position() {
+        // The start position is perfectly balanced: only a small tempo term is allowed.
         let board = Board::default();
         let mut engine = ChessEngine::new();
         let pawn_hash = PawnHashTable::new(131_072);
-        let start = std::time::Instant::now();
-        let mut sum = 0;
-        let iters = 1_000_000;
-        for _ in 0..iters {
-            sum += engine.evaluate_full(&board, &pawn_hash, 0);
-        }
-        let duration = start.elapsed();
-        println!("Evaluated {} nodes in {:?} ({} NPS)", iters, duration,
-            (iters as f64 / duration.as_secs_f64()) as u64);
-        assert!(sum != 0 || sum == 0);
+        let score = engine.evaluate_full(&board, &pawn_hash, 0);
+        assert!(score.abs() < 60, "start position should be near zero, got {}", score);
+    }
+
+    #[test]
+    fn engine_returns_legal_move_from_start_position() {
+        let mut engine = ChessEngine::new();
+        let json = engine.get_best_move_native(START_FEN, 100.0, 3000.0, 1, 1, "");
+        let best = json
+            .split("\"bestMove\":\"")
+            .nth(1)
+            .and_then(|rest| rest.split('"').next())
+            .unwrap_or("");
+        let board = Board::default();
+        let legal = MoveGen::new_legal(&board).any(|m| m.to_string() == best);
+        assert!(legal, "engine returned illegal move: {} (raw: {})", best, json);
     }
 }
 

@@ -67,7 +67,7 @@ onmessage = async (e) => {
             elo,
             splitId,
             splitCount,
-            history || "",
+            serializeHistory(history),
             abortFlag
         );
 
@@ -79,6 +79,22 @@ onmessage = async (e) => {
                 log.warn('Search', `Worker[${workerId}] got empty bestMove`, { parsed, fenShort });
             } else {
                 log.info('Search', `Worker[${workerId}] → ${parsed.bestMove} score=${parsed.score}cp depth=${parsed.depth} nodes=${(parsed.nodes||0).toLocaleString()} time=${elapsed}ms`);
+            }
+            postMessage({ type: "RESULT", searchId, ...parsed });
+        } catch (err) {
+            log.error('Search', `Worker[${workerId}] JSON parse FAILED — raw result below`, { err, result });
+            postMessage({
+                type: "RESULT",
+                searchId,
+                bestMove: "",
+                score: 0,
+                pv: [],
+                ponderFen: "",
+            });
+        }
+    }
+};
+rkerId}] → ${parsed.bestMove} score=${parsed.score}cp depth=${parsed.depth} nodes=${(parsed.nodes||0).toLocaleString()} time=${elapsed}ms`);
             }
             postMessage({ type: "RESULT", searchId, ...parsed });
         } catch (err) {

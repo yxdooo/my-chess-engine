@@ -48,6 +48,9 @@ log.info('Content', 'Logger initialized');
 /** @type {string} The last FEN position that was sent for analysis. */
 let currentFEN = "";
 
+/** Maximum number of prior positions kept for repetition detection. */
+const MAX_FEN_HISTORY = 50;
+
 /** @type {string[]} Normalized FEN history for repetition detection. */
 let fenHistory = [];
 
@@ -843,11 +846,16 @@ function processPosition(networkFen = null) {
     if (fen.startsWith("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w")) {
         fenHistory = [];
     }
-    fenHistory.push(normFen);
-    if (fenHistory.length > 50) {
-        fenHistory.shift(); // Limit history to prevent payload bloat
+    // History contract: `|`-joined normalized FENs of PRIOR positions only
+    // (the current position is excluded, matching uci.rs and match_runner.py).
+    // Re-processing the same position (e.g. DOM re-render) must not add duplicates.
+    if (fenHistory[fenHistory.length - 1] !== normFen) {
+        fenHistory.push(normFen);
+        if (fenHistory.length > MAX_FEN_HISTORY) {
+            fenHistory.shift(); // Limit history to prevent payload bloat
+        }
     }
-    const historyStr = fenHistory.join("|");
+    const historyStr = fenHistory.slice(0, -1).join("|");
 
     // Check if a ponder result is already cached for this position.
     // If so, display arrows instantly. Play move if autoplay is on.
