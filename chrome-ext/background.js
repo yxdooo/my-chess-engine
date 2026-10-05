@@ -204,7 +204,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                 const normFen      = normalizeFen(message.fen);
                 const pieceCount   = normFen.split(' ')[0].replace(/[\/0-9]/g, '').length;
 
-                log.info('Background', `NEW_POSITION received: turn=${message.isMyTurn} clock=${message.timeLeft}s timeToThink=${engineTime}ms pieces=${pieceCount}`);
+                log.info('Background', `NEW_POSITION received: turn=${message.isMyTurn} clock=${message.timeLeft}s my_ms=ms pieces=${pieceCount}`);
                 log.debug('Background', `FEN: ${message.fen}`);
 
                 const fallbackToEngine = () => {
