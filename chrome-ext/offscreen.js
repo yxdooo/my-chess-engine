@@ -120,15 +120,15 @@ function processSearch(message, searchId, abortFlag) {
     );
     const activeWorkers = workers.slice(0, workersToUse);
 
-    log.info('SMP', `Starting search — workers=${workersToUse} elo=${message.elo} timeMs=${message.timeMs}`);
+    log.info('SMP', `Starting search — workers=${workersToUse} elo=${message.elo} timeMs=${(message.my_ms/20)}`);
     log.debug('SMP', `FEN: ${(message.fen || '').substring(0, 50)}...`);
 
     // Freeze detector: if we don’t get results within timeMs*2+5s, log a freeze warning
     const freezeTimeout = setTimeout(() => {
         if (completed < workersToUse) {
-            log.error('SMP', `🥶 FREEZE DETECTED! Only ${completed}/${workersToUse} workers responded after ${message.timeMs * 2 + 5000}ms`, { message });
+            log.error('SMP', `🥶 FREEZE DETECTED! Only ${completed}/${workersToUse} workers responded after ${(message.my_ms/20) * 2 + 5000}ms`, { message });
         }
-    }, (message.timeMs || 3000) * 2 + 5000);
+    }, ((message.my_ms/20) || 3000) * 2 + 5000);
 
     /** @type {Array<{bestMove: string, pv: string[], ponderFen: string, score: number}>} */
     let workerResults = [];
@@ -229,7 +229,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
  * @param {Function} sendResponse - Chrome messaging response callback.
  */
 function startEngineSearch(message, sendResponse) {
-    log.info('SMP', `New search request received | elo=${message.elo} timeMs=${message.timeMs} workers=${message.activeWorkerCount}`);
+    log.info('SMP', `New search request received | elo=${message.elo} timeMs=${(message.my_ms/20)} workers=${message.activeWorkerCount}`);
     
     // Gracefully abort any running search.
     if (abortFlag) {
