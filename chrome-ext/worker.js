@@ -72,7 +72,7 @@ onmessage = async (e) => {
             elo,
             splitId,
             splitCount,
-            serializeHistory(history),
+            history || "",
             abortFlag
         );
 
