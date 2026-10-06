@@ -433,7 +433,17 @@ function playMove(uci) {
         };
         
         simulateClick(fromNow.x, fromNow.y);
-        simulateClick(toNow.x, toNow.y);
+        setTimeout(() => {
+            const boardElFinal = document.querySelector("wc-chess-board, chess-board, cg-board");
+            if (!boardElFinal) return;
+            const rectFinal = boardElFinal.getBoundingClientRect();
+            const sqSizeFinal = rectFinal.width / 8;
+            const toFinal = {
+                x: rectFinal.left + ((flipBoard ? 7 - toFile : toFile) + 0.5) * sqSizeFinal,
+                y: rectFinal.top + ((flipBoard ? toRank : 7 - toRank) + 0.5) * sqSizeFinal
+            };
+            simulateClick(toFinal.x, toFinal.y);
+        }, 35); // 35ms delay to allow React state update between clicks
 
         if (promotionChar) {
             const promoDelay = 150 + Math.floor(Math.random() * 50);
