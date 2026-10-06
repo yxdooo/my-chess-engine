@@ -140,6 +140,7 @@ function clearOverlay() {
             .getContext("2d")
             .clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
     }
+}
 
 /**
  * Draws an arrow on the overlay canvas from one square index to another.
@@ -1081,6 +1082,5 @@ chrome.runtime.onMessage.addListener((msg) => {
     }
 });
 
-}
 
 }
