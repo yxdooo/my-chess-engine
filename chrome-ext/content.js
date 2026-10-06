@@ -545,7 +545,7 @@ function parseBoard() {
         } else if (p.style && p.style.transform) {
             // Fallback: parse translate(x, y) from inline style
             const match = p.style.transform.match(
-                /translate\((.*?)[px%]+,\s*(.*?)[px%]+\)/
+                /translate(?:3d)?\(([-.\d]+)[^\d,]*,\s*([-.\d]+)/
             );
             if (match) {
                 const x = parseFloat(match[1]);
@@ -771,7 +771,7 @@ function processPosition(networkFen = null) {
         if (!fen) {
             // This is completely normal during page load or when waiting for a match.
             // We use debug instead of warn to avoid spamming the console.
-            log.debug('Board', 'Failed to parse FEN from DOM (parseBoard returned null)');
+            log.info('Board', 'Failed to parse FEN from DOM (parseBoard returned null)');
             return;
         }
         if (fen === currentFEN) return;

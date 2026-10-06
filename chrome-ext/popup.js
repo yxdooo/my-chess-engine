@@ -160,7 +160,7 @@ document.addEventListener("DOMContentLoaded", () => {
     function forceEvaluateActiveTab() {
         chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
             if (tabs[0]) {
-                chrome.tabs.sendMessage(tabs[0].id, { type: "FORCE_EVALUATE" });
+                chrome.tabs.sendMessage(tabs[0].id, { type: "FORCE_EVALUATE" }).catch(() => {});
             }
         });
     }
