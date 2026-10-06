@@ -444,7 +444,7 @@ function playMove(uci) {
                 y: rectFinal.top + ((flipBoard ? toRank : 7 - toRank) + 0.5) * sqSizeFinal
             };
             simulateClick(toFinal.x, toFinal.y);
-        }, 35); // 35ms delay to allow React state update between clicks
+        }, 60); // 60ms delay to allow React state update between clicks
 
         if (promotionChar) {
             const promoDelay = 150 + Math.floor(Math.random() * 50);
@@ -800,7 +800,7 @@ function processPosition(networkFen = null) {
     const isMyTurn = stm === myColor;
     const normFen = normalizeFen(fen);
     
-    log.debug('Board', `Parsed FEN`, { fenShort: fen.substring(0, 50), myColor, stm, isMyTurn, flipBoard });
+    log.info('Board', `Parsed FEN`, { fenShort: fen.substring(0, 50), myColor, stm, isMyTurn, flipBoard });
 
     // Reset FEN history on a new game.
     if (fen.startsWith("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w")) {
