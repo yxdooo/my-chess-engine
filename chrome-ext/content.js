@@ -219,21 +219,20 @@ function simulateDrag(fromX, fromY, toX, toY) {
     const evtInitTo = { bubbles: true, cancelable: true, view: window, clientX: toX, clientY: toY, button: 0, buttons: 1 };
     const evtInitUp = { bubbles: true, cancelable: true, view: window, clientX: toX, clientY: toY, button: 0, buttons: 0 };
 
-    fromEl.dispatchEvent(new PointerEvent("pointerover", evtInitFrom));
-    fromEl.dispatchEvent(new PointerEvent("pointerenter", evtInitFrom));
-    fromEl.dispatchEvent(new PointerEvent("pointermove", evtInitFrom));
     fromEl.dispatchEvent(new PointerEvent("pointerdown", evtInitFrom));
     fromEl.dispatchEvent(new MouseEvent("mousedown", evtInitFrom));
     
-    // Move to target
-    fromEl.dispatchEvent(new PointerEvent("pointermove", evtInitTo));
-    fromEl.dispatchEvent(new MouseEvent("mousemove", evtInitTo));
-    
-    // Release
-    const toEl = document.elementFromPoint(toX, toY) || fromEl;
-    toEl.dispatchEvent(new PointerEvent("pointerup", evtInitUp));
-    toEl.dispatchEvent(new MouseEvent("mouseup", evtInitUp));
-    toEl.dispatchEvent(new MouseEvent("click", evtInitUp));
+    // Add a tiny async delay so React DND / Chess.com can register the drag start
+    setTimeout(() => {
+        fromEl.dispatchEvent(new PointerEvent("pointermove", evtInitTo));
+        fromEl.dispatchEvent(new MouseEvent("mousemove", evtInitTo));
+        
+        setTimeout(() => {
+            const toEl = document.elementFromPoint(toX, toY) || fromEl;
+            toEl.dispatchEvent(new PointerEvent("pointerup", evtInitUp));
+            toEl.dispatchEvent(new MouseEvent("mouseup", evtInitUp));
+        }, 15);
+    }, 15);
 }
 
 /**
@@ -1084,3 +1083,4 @@ chrome.runtime.onMessage.addListener((msg) => {
         }
     }
 });
+
