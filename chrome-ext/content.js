@@ -759,6 +759,7 @@ function renderArrows(pvLines, isMyTurn) {
             }
         }
     }
+}
 
 /**
  * Main entry point. Called when a position change is detected.
@@ -1081,6 +1082,3 @@ chrome.runtime.onMessage.addListener((msg) => {
         }
     }
 });
-
-
-}
