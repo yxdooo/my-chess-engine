@@ -272,12 +272,14 @@ impl ChessEngine {
     #[wasm_bindgen]
     pub fn get_best_move_timed(&mut self, fen: &str, my_ms: f64, inc_ms: f64, opp_ms: f64, moves_to_go: i32, overhead_ms: f64, elo: f64, split_id: u8, split_count: u8, history: &str, abort_flag: Option<js_sys::Uint8Array>) -> String {
         self.abort_flag = abort_flag;
+        let piece_count = fen.split_whitespace().next().unwrap_or("").chars().filter(|c| c.is_alphabetic()).count() as u32;
         let clock = timeman::ClockInfo {
             remaining_ms: my_ms,
             increment_ms: inc_ms,
             opponent_remaining_ms: opp_ms,
             moves_to_go: if moves_to_go > 0 { Some(moves_to_go as u32) } else { None },
             move_overhead_ms: overhead_ms,
+            piece_count,
         };
         let budget = timeman::allocate(&clock);
         self.optimum_time_ms = budget.optimum_ms;
@@ -296,12 +298,14 @@ impl ChessEngine {
     
     pub fn get_best_move_timed_native(&mut self, fen: &str, my_ms: f64, inc_ms: f64, opp_ms: f64, moves_to_go: i32, overhead_ms: f64, elo: f64, split_id: u8, split_count: u8, history: &str) -> String {
         self.abort_flag = None;
+        let piece_count = fen.split_whitespace().next().unwrap_or("").chars().filter(|c| c.is_alphabetic()).count() as u32;
         let clock = timeman::ClockInfo {
             remaining_ms: my_ms,
             increment_ms: inc_ms,
             opponent_remaining_ms: opp_ms,
             moves_to_go: if moves_to_go > 0 { Some(moves_to_go as u32) } else { None },
             move_overhead_ms: overhead_ms,
+            piece_count,
         };
         let budget = timeman::allocate(&clock);
         self.optimum_time_ms = budget.optimum_ms;

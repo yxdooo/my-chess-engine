@@ -199,7 +199,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                 const my_ms = message.my_ms || 0;
                 const opp_ms = message.opp_ms || 0;
                 const inc_ms = message.inc_ms || 0;
-                const movesToGo = 35;
+                const movesToGo = 0;
 
                 const normFen      = normalizeFen(message.fen);
                 const pieceCount   = normFen.split(' ')[0].replace(/[\/0-9]/g, '').length;

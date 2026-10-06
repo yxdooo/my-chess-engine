@@ -4,6 +4,7 @@ pub struct ClockInfo {
     pub opponent_remaining_ms: f64,
     pub moves_to_go: Option<u32>,
     pub move_overhead_ms: f64,
+    pub piece_count: u32,
 }
 
 pub struct TimeBudget {
@@ -31,11 +32,15 @@ pub fn allocate(clock: &ClockInfo) -> TimeBudget {
     }
     
     let moves_left = match clock.moves_to_go {
-        Some(m) => (m as f64).clamp(MIN_MOVES_TO_GO, MAX_MOVES_TO_GO),
-        None => 35.0, // Default for sudden death (e.g. 1+0 or 3+0)
+        Some(m) => (m as f64).clamp(10.0, 50.0),
+        None => {
+            let p = clock.piece_count.clamp(2, 32) as f64;
+            let expected = 12.0 + (28.0 * (p - 2.0) / 30.0);
+            expected.clamp(12.0, 45.0)
+        }
     };
     
-    let optimum = usable_time / moves_left + clock.increment_ms * INCREMENT_SHARE;
+    let mut optimum = usable_time / moves_left + clock.increment_ms * INCREMENT_SHARE;
     let mut maximum = optimum * 4.0;
     
     // Hard clamp: never use more than a fraction of the remaining clock
@@ -44,6 +49,7 @@ pub fn allocate(clock: &ClockInfo) -> TimeBudget {
     
     // Absolute max clamp: never exceed half the clock
     maximum = maximum.min(usable_time * 0.5);
+    optimum = optimum.min(maximum);
     
     TimeBudget {
         optimum_ms: optimum.max(10.0),
@@ -62,7 +68,7 @@ mod tests {
             increment_ms: 0.0,
             opponent_remaining_ms: 1000.0,
             moves_to_go: None,
-            move_overhead_ms: 50.0,
+            move_overhead_ms: 50.0, piece_count: 32,
         };
         let budget = allocate(&clock);
         assert!(budget.maximum_ms <= (1000.0 - 50.0) * 0.5);
@@ -75,7 +81,7 @@ mod tests {
             increment_ms: 0.0,
             opponent_remaining_ms: 5000.0,
             moves_to_go: None,
-            move_overhead_ms: 50.0,
+            move_overhead_ms: 50.0, piece_count: 32,
         };
         let budget = allocate(&clock);
         let usable = 1500.0 - 50.0;
