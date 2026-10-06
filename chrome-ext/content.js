@@ -129,6 +129,7 @@ function initOverlay() {
         overlayCanvas.width = boardWidth;
         overlayCanvas.height = boardHeight;
     }
+}
 
 /**
  * Clears the overlay canvas.
@@ -1079,4 +1080,7 @@ chrome.runtime.onMessage.addListener((msg) => {
         }
     }
 });
-}}}
+
+}
+
+}
