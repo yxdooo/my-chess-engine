@@ -867,8 +867,8 @@ function processPosition(networkFen = null) {
             type: "NEW_POSITION",
             fen,
             timeLeft: timeLeft,
-            my_ms: clocks.my_ms || 0.0,
-            opp_ms: clocks.opp_ms || 0.0,
+            my_ms: clocks.my_ms || 180000.0,
+            opp_ms: clocks.opp_ms || 180000.0,
             inc_ms: inferredIncMs,
             isMyTurn,
             history: historyStr,
@@ -1083,4 +1083,5 @@ chrome.runtime.onMessage.addListener((msg) => {
         }
     }
 });
+
 
