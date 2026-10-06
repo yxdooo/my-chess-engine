@@ -212,47 +212,28 @@ function drawArrow(fromIdx, toIdx, color) {
  * @param {number} clientX
  * @param {number} clientY
  */
-function dispatchMouseEvent(element, type, clientX, clientY) {
-    const event = new MouseEvent(type, {
-        view: window,
-        bubbles: true,
-        cancelable: true,
-        clientX: clientX,
-        clientY: clientY,
-        button: 0,
-        buttons: 1
-    });
-    element.dispatchEvent(event);
-    
-    const pointerEvent = new PointerEvent(type.startsWith('mouse') ? type.replace('mouse', 'pointer') : type, {
-        view: window,
-        bubbles: true,
-        cancelable: true,
-        clientX: clientX,
-        clientY: clientY,
-        button: 0,
-        buttons: 1,
-        pointerId: 1,
-        pointerType: "mouse",
-        isPrimary: true
-    });
-    element.dispatchEvent(pointerEvent);
-}
+function simulateDrag(fromX, fromY, toX, toY) {
+    const fromEl = document.elementFromPoint(fromX, fromY);
+    if (!fromEl) return;
+    const evtInitFrom = { bubbles: true, cancelable: true, view: window, clientX: fromX, clientY: fromY, button: 0, buttons: 1 };
+    const evtInitTo = { bubbles: true, cancelable: true, view: window, clientX: toX, clientY: toY, button: 0, buttons: 1 };
+    const evtInitUp = { bubbles: true, cancelable: true, view: window, clientX: toX, clientY: toY, button: 0, buttons: 0 };
 
-function simulateClick(clientX, clientY) {
-    const target = document.elementFromPoint(clientX, clientY);
-    if (!target) return;
+    fromEl.dispatchEvent(new PointerEvent("pointerover", evtInitFrom));
+    fromEl.dispatchEvent(new PointerEvent("pointerenter", evtInitFrom));
+    fromEl.dispatchEvent(new PointerEvent("pointermove", evtInitFrom));
+    fromEl.dispatchEvent(new PointerEvent("pointerdown", evtInitFrom));
+    fromEl.dispatchEvent(new MouseEvent("mousedown", evtInitFrom));
     
-    for (const type of ["pointerover", "pointerenter", "mouseover", "mouseenter",
-                         "pointermove", "mousemove",
-                         "pointerdown", "mousedown",
-                         "pointerup", "mouseup", "click"]) {
-        target.dispatchEvent(
-            type.startsWith("pointer")
-                ? new PointerEvent(type, { bubbles: true, cancelable: true, view: window, clientX, clientY, button: 0, buttons: 1, pointerId: 1, isPrimary: true, pointerType: "mouse" })
-                : new MouseEvent(type, { bubbles: true, cancelable: true, view: window, clientX, clientY, button: 0, buttons: 1 })
-        );
-    }
+    // Move to target
+    fromEl.dispatchEvent(new PointerEvent("pointermove", evtInitTo));
+    fromEl.dispatchEvent(new MouseEvent("mousemove", evtInitTo));
+    
+    // Release
+    const toEl = document.elementFromPoint(toX, toY) || fromEl;
+    toEl.dispatchEvent(new PointerEvent("pointerup", evtInitUp));
+    toEl.dispatchEvent(new MouseEvent("mouseup", evtInitUp));
+    toEl.dispatchEvent(new MouseEvent("click", evtInitUp));
 }
 
 /**
@@ -466,18 +447,7 @@ function playMove(uci) {
             y: rectNow.top + ((flipBoard ? toRank : 7 - toRank) + 0.5) * sqSizeNow
         };
         
-        simulateClick(fromNow.x, fromNow.y);
-        setTimeout(() => {
-            const boardElFinal = document.querySelector("wc-chess-board, chess-board, cg-board");
-            if (!boardElFinal) return;
-            const rectFinal = boardElFinal.getBoundingClientRect();
-            const sqSizeFinal = rectFinal.width / 8;
-            const toFinal = {
-                x: rectFinal.left + ((flipBoard ? 7 - toFile : toFile) + 0.5) * sqSizeFinal,
-                y: rectFinal.top + ((flipBoard ? toRank : 7 - toRank) + 0.5) * sqSizeFinal
-            };
-            simulateClick(toFinal.x, toFinal.y);
-        }, 60); // 60ms delay to allow React state update between clicks
+        simulateDrag(fromNow.x, fromNow.y, toNow.x, toNow.y);
 
         if (promotionChar) {
             const promoDelay = 150 + Math.floor(Math.random() * 50);
