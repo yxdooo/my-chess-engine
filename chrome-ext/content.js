@@ -212,15 +212,47 @@ function drawArrow(fromIdx, toIdx, color) {
  * @param {number} clientX
  * @param {number} clientY
  */
+function dispatchMouseEvent(element, type, clientX, clientY) {
+    const event = new MouseEvent(type, {
+        view: window,
+        bubbles: true,
+        cancelable: true,
+        clientX: clientX,
+        clientY: clientY,
+        button: 0,
+        buttons: 1
+    });
+    element.dispatchEvent(event);
+    
+    const pointerEvent = new PointerEvent(type.startsWith('mouse') ? type.replace('mouse', 'pointer') : type, {
+        view: window,
+        bubbles: true,
+        cancelable: true,
+        clientX: clientX,
+        clientY: clientY,
+        button: 0,
+        buttons: 1,
+        pointerId: 1,
+        pointerType: "mouse",
+        isPrimary: true
+    });
+    element.dispatchEvent(pointerEvent);
+}
+
 function simulateClick(clientX, clientY) {
-    const el = document.elementFromPoint(clientX, clientY);
-    if (!el) return;
-    const evtInit = { bubbles: true, cancelable: true, view: window, clientX, clientY, button: 0, buttons: 1 };
-    el.dispatchEvent(new PointerEvent("pointerdown", evtInit));
-    el.dispatchEvent(new MouseEvent("mousedown", evtInit));
-    el.dispatchEvent(new PointerEvent("pointerup", { ...evtInit, buttons: 0 }));
-    el.dispatchEvent(new MouseEvent("mouseup", { ...evtInit, buttons: 0 }));
-    el.dispatchEvent(new MouseEvent("click", { ...evtInit, buttons: 0 }));
+    const target = document.elementFromPoint(clientX, clientY);
+    if (!target) return;
+    
+    for (const type of ["pointerover", "pointerenter", "mouseover", "mouseenter",
+                         "pointermove", "mousemove",
+                         "pointerdown", "mousedown",
+                         "pointerup", "mouseup", "click"]) {
+        target.dispatchEvent(
+            type.startsWith("pointer")
+                ? new PointerEvent(type, { bubbles: true, cancelable: true, view: window, clientX, clientY, button: 0, buttons: 1, pointerId: 1, isPrimary: true, pointerType: "mouse" })
+                : new MouseEvent(type, { bubbles: true, cancelable: true, view: window, clientX, clientY, button: 0, buttons: 1 })
+        );
+    }
 }
 
 /**
