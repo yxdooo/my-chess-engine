@@ -27,8 +27,97 @@ let currentSendResponse = null;
 /** @type {number} Current transposition table size in MB. */
 let activeHashSize = 128;
 
+/** @type {WebAssembly.Memory|null} Shared WASM memory instance across all workers */
+let sharedWasmMemory = null;
+try {
+    if (typeof WebAssembly !== "undefined" && typeof SharedArrayBuffer !== "undefined") {
+        sharedWasmMemory = new WebAssembly.Memory({
+            initial: 512,   // 32 MB
+            maximum: 16384, // 1 GB
+            shared: true,
+        });
+        log.info('Pool', 'Shared WebAssembly.Memory created successfully (True Shared Memory SMP)');
+    }
+} catch (e) {
+    log.warn('Pool', 'Shared WebAssembly.Memory unavailable, falling back to per-worker memory', e);
+    sharedWasmMemory = null;
+}
+
 let abortFlag = null;
 let currentSearchId = 0;
+
+/**
+ * Robust Multi-Worker Aggregation:
+ * 1. Filter out empty or broken moves.
+ * 2. Find the highest completed depth among all workers.
+ * 3. Discard lagging outliers (any result with depth < maxDepth - 1) to prevent
+ *    horizon-effect blunders from shallow searches overriding deep analyses.
+ * 4. For qualified candidates, sort by:
+ *    a) Depth descending (deepest search wins)
+ *    b) Score descending (for side to move)
+ *    c) Nodes descending (more thorough exploration wins)
+ *    d) Prefer Worker 0 in exact ties (canonical unperturbed move ordering)
+ *
+ * @param {Array<object>} workerResults
+ * @returns {object} Aggregated result object
+ */
+export function aggregateWorkerResults(workerResults) {
+    const validResults = (workerResults || []).filter(r => r && r.bestMove && r.bestMove !== "");
+    if (validResults.length === 0) {
+        return {
+            bestMove: null,
+            score: -999999,
+            depth: 0,
+            nodes: 0,
+            pv: [],
+            ponderFen: "",
+            multiPv: []
+        };
+    }
+
+    const maxDepth = Math.max(...validResults.map(r => r.depth || 0));
+    const minAcceptableDepth = Math.max(1, maxDepth - 1);
+    const qualified = validResults.filter(r => (r.depth || 0) >= minAcceptableDepth);
+
+    qualified.sort((a, b) => {
+        const depthDiff = (b.depth || 0) - (a.depth || 0);
+        if (depthDiff !== 0) return depthDiff;
+        const scoreDiff = (b.score || 0) - (a.score || 0);
+        if (scoreDiff !== 0) return scoreDiff;
+        const nodeDiff = (b.nodes || 0) - (a.nodes || 0);
+        if (nodeDiff !== 0) return nodeDiff;
+        if (a.splitId === 0) return -1;
+        if (b.splitId === 0) return 1;
+        return 0;
+    });
+
+    const best = qualified[0];
+    const seenMoves = new Set();
+    const multiPv = [];
+    for (const r of qualified) {
+        if (!seenMoves.has(r.bestMove)) {
+            seenMoves.add(r.bestMove);
+            multiPv.push({
+                bestMove: r.bestMove,
+                pv: r.pv || [],
+                ponderFen: r.ponderFen || "",
+                score: r.score,
+                depth: r.depth,
+            });
+            if (multiPv.length >= 3) break;
+        }
+    }
+
+    return {
+        bestMove: best.bestMove,
+        score: best.score,
+        depth: best.depth || 0,
+        nodes: best.nodes || 0,
+        pv: best.pv || [],
+        ponderFen: best.ponderFen || "",
+        multiPv
+    };
+}
 
 // ---------------------------------------------------------------------------
 // Worker Pool Management
@@ -46,14 +135,26 @@ function initWorkers(workerCount) {
     for (let i = initialLength; i < workerCount; i++) {
         try {
             const worker = new Worker("worker.js", { type: "module" });
-            worker.postMessage({ type: "INIT" });
+            const workerIndex = i;
+            worker.postMessage({ type: "INIT", memory: sharedWasmMemory });
 
             worker.onmessage = (e) => {
                 if (e.data.type === "READY") {
-                    worker.postMessage({
-                        type: "SET_HASH_SIZE",
-                        size: Math.max(1, Math.floor(activeHashSize / currentWorkerCount)),
-                    });
+                    if (sharedWasmMemory) {
+                        // True Shared Memory SMP: Worker 0 initializes the global shared TT once
+                        if (workerIndex === 0) {
+                            worker.postMessage({
+                                type: "SET_HASH_SIZE",
+                                size: activeHashSize,
+                            });
+                        }
+                    } else {
+                        // Fallback: Partition hash across isolated workers
+                        worker.postMessage({
+                            type: "SET_HASH_SIZE",
+                            size: Math.max(1, Math.floor(activeHashSize / currentWorkerCount)),
+                        });
+                    }
                     workersReady++;
                     log.info('Pool', `Worker #${workersReady}/${currentWorkerCount} ready`);
                     if (messageQueue && workersReady >= Math.min(MAX_WORKERS, Math.max(1, messageQueue.activeWorkerCount || 1), workers.length)) {
@@ -156,24 +257,18 @@ function processSearch(message, searchId, abortFlag) {
 
         if (completed === workersToUse) {
             clearTimeout(freezeTimeout);
+
+            const aggregated = aggregateWorkerResults(workerResults);
+            bestOverallScore = aggregated.score;
+            bestOverallMove  = aggregated.bestMove;
+            bestPv           = aggregated.pv;
+            bestPonderFen    = aggregated.ponderFen;
+            bestDepth        = aggregated.depth;
+            const multiPv    = aggregated.multiPv;
+
             const elapsed = (performance.now() - startTime).toFixed(0);
             const nps = elapsed > 0 ? Math.round(totalNodes / (elapsed / 1000)).toLocaleString() : '?';
             log.info('SMP', `Done in ${elapsed}ms | best=${bestOverallMove} score=${bestOverallScore}cp depth=${bestDepth} nodes=${totalNodes.toLocaleString()} nps=${nps}`);
-
-            workerResults.sort((a, b) => b.score - a.score);
-            if (workerResults.length > 0) {
-                bestOverallScore = workerResults[0].score;
-                bestOverallMove  = workerResults[0].bestMove;
-                bestPv           = workerResults[0].pv;
-                bestPonderFen    = workerResults[0].ponderFen;
-                bestDepth        = workerResults[0].depth;
-            }
-
-            const multiPv = workerResults.slice(0, 3).map((r) => ({
-                bestMove: r.bestMove,
-                pv: r.pv,
-                ponderFen: r.ponderFen,
-            }));
 
             if (currentSendResponse) {
                 currentSendResponse({
@@ -213,13 +308,15 @@ function processSearch(message, searchId, abortFlag) {
 // Message Listener
 // ---------------------------------------------------------------------------
 
-chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-    if (message.type !== "START_SMP_SEARCH") return false;
+if (typeof chrome !== "undefined" && chrome.runtime?.onMessage) {
+    chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+        if (message.type !== "START_SMP_SEARCH") return false;
 
-    // Abort any in-flight search and start fresh.
-    startEngineSearch(message, sendResponse);
-    return true; // Keep message channel open for async response.
-});
+        // Abort any in-flight search and start fresh.
+        startEngineSearch(message, sendResponse);
+        return true; // Keep message channel open for async response.
+    });
+}
 
 /**
  * Aborts running workers and queues a new search request.
@@ -247,7 +344,19 @@ function startEngineSearch(message, sendResponse) {
 
     messageQueue = message;
     currentSendResponse = sendResponse;
-    if (message.hashSize) activeHashSize = message.hashSize;
+    if (message.hashSize && message.hashSize !== activeHashSize) {
+        activeHashSize = message.hashSize;
+        if (workers.length > 0) {
+            if (sharedWasmMemory) {
+                workers[0].postMessage({ type: "SET_HASH_SIZE", size: activeHashSize });
+            } else {
+                const perWorkerSize = Math.max(1, Math.floor(activeHashSize / workers.length));
+                for (const w of workers) {
+                    w.postMessage({ type: "SET_HASH_SIZE", size: perWorkerSize });
+                }
+            }
+        }
+    }
 
     const targetWorkers = Math.min(MAX_WORKERS, Math.max(1, message.activeWorkerCount || 4));
     
@@ -277,4 +386,6 @@ function startEngineSearch(message, sendResponse) {
 // ---------------------------------------------------------------------------
 // Initial Worker Pool
 // ---------------------------------------------------------------------------
-initWorkers(4);
+if (typeof Worker !== "undefined") {
+    initWorkers(4);
+}

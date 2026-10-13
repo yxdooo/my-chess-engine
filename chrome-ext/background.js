@@ -1,5 +1,8 @@
 import { log } from "./logger.js";
 
+const SYZYGY_CACHE = new Map();
+
+
 /**
  * Master opening book: FEN (position + side + castling + en-passant) -> UCI move.
  * Provides instant, top-tier Grandmaster opening book choices.
@@ -7,26 +10,28 @@ import { log } from "./logger.js";
 const MASTER_BOOK = {
     // ---- Responses to 1. e4 as Black ----
     // Sicilian Defense against 1. e4
-    "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq e3": "c7c5",
-    // 1. e4 e5
-    "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq -": "e7e5",
+    "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq -": "c7c5",
     "rnbqkbnr/pppp1ppp/8/4p3/4P3/5N2/PPPP1PPP/RNBQKB1R b KQkq -": "b8c6",
     "r1bqkbnr/pppp1ppp/2n5/1B2p3/4P3/5N2/PPPP1PPP/RNBQK2R b KQkq -": "a7a6",
+    // Bishops Opening 2. Bc4
+    "rnbqkbnr/pppp1ppp/8/4p3/2B1P3/8/PPPP1PPP/RNBQK1NR b KQkq -": "g8f6",
+    // 2. d3
+    "rnbqkbnr/pppp1ppp/8/4p3/4P3/3P4/PPP2PPP/RNBQKBNR b KQkq -": "b8c6",
+    "r1bqkbnr/pppp1ppp/2n5/4p3/4P3/2NP4/PPP2PPP/R1BQKBNR b KQkq -": "g8f6",
 
     // French Defense response: 2. d4 d5
     "rnbqkbnr/pppp1ppp/4p3/8/4P3/8/PPPP1PPP/RNBQKBNR w KQkq -": "d2d4",
-    "rnbqkbnr/pppp1ppp/4p3/8/3PP3/8/PPP2PPP/RNBQKBNR b KQkq d3": "d7d5",
+    "rnbqkbnr/pppp1ppp/4p3/8/3PP3/8/PPP2PPP/RNBQKBNR b KQkq -": "d7d5",
 
     // Caro-Kann response: 2. d4 d5
     "rnbqkbnr/pp1ppppp/2p5/8/4P3/8/PPPP1PPP/RNBQKBNR w KQkq -": "d2d4",
-    "rnbqkbnr/pp1ppppp/2p5/8/3PP3/8/PPP2PPP/RNBQKBNR b KQkq d3": "d7d5",
+    "rnbqkbnr/pp1ppppp/2p5/8/3PP3/8/PPP2PPP/RNBQKBNR b KQkq -": "d7d5",
 
     // Scandinavian response: 2. exd5
-    "rnbqkbnr/ppp1pppp/8/3p4/4P3/8/PPPP1PPP/RNBQKBNR w KQkq d6": "e4d5",
+    "rnbqkbnr/ppp1pppp/8/3p4/4P3/8/PPPP1PPP/RNBQKBNR w KQkq -": "e4d5",
     "rnbqkbnr/ppp1pppp/8/3P4/8/8/PPPP1PPP/RNBQKBNR b KQkq -": "d8d5",
 
     // ---- Responses to 1. d4 ----
-    "rnbqkbnr/pppppppp/8/8/3P4/8/PPP1PPPP/RNBQKBNR b KQkq d3": "g8f6",
     "rnbqkbnr/pppppppp/8/8/3P4/8/PPP1PPPP/RNBQKBNR b KQkq -": "g8f6",
     "rnbqkb1r/pppppppp/5n2/8/2PP4/8/PP2PPPP/RNBQKBNR b KQkq c3": "e7e6",
     "rnbqkb1r/pppppppp/5n2/8/3P4/8/PPP1PPPP/RNBQKBNR w KQkq -": "c2c4",
@@ -34,7 +39,7 @@ const MASTER_BOOK = {
     // ---- Playing White ----
     "r1bqkbnr/pppp1ppp/2n5/4p3/4P3/5N2/PPPP1PPP/RNBQKB1R w KQkq -": "f1b5",
     "rnbqkbnr/pp1ppppp/8/2p5/4P3/8/PPPP1PPP/RNBQKBNR w KQkq -": "g1f3",
-    "rnbqkbnr/ppp1pppp/8/3p4/3P4/8/PPP1PPPP/RNBQKBNR w KQkq d6": "c2c4",
+    "rnbqkbnr/ppp1pppp/8/3p4/3P4/8/PPP1PPPP/RNBQKBNR w KQkq -": "c2c4",
 };
 
 chrome.runtime.onInstalled.addListener(() => {
@@ -255,35 +260,50 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                 };
 
                 if (pieceCount <= 7) {
-                    fetchWithTimeout(
-                        "https://tablebase.lichess.ovh/standard?fen=" + encodeURIComponent(message.fen),
-                        {},
-                        2000
-                    )
-                        .then((r) => r.json())
-                        .then((data) => {
-                            if (data && data.moves && data.moves.length > 0) {
-                                log.info('Background', `Played syzygy TB move: ${data.moves[0].uci}`);
-                                const tbScore = data.category === "win" ? 29000 : data.category === "loss" ? -29000 : 0;
-                                const stats = {
-                                    bestMove: data.moves[0].uci,
-                                    pv: [data.moves[0].uci],
-                                    score: tbScore,
-                                    depth: 99,
-                                    nodes: 1,
-                                    timeMs: 50,
-                                };
-                                chrome.storage.local.set({ engineStats: stats });
-                                sendResponse(stats);
-                            } else {
+                    // Check local memory cache first (0ms instantaneous lookup)
+                    if (SYZYGY_CACHE.has(message.fen)) {
+                        const cached = SYZYGY_CACHE.get(message.fen);
+                        log.info('Background', `Played cached syzygy TB move: ${cached.bestMove}`);
+                        chrome.storage.local.set({ engineStats: cached });
+                        sendResponse(cached);
+                        return;
+                    }
+
+                    // Strict Clock Guard: Only make network tablebase requests if we have at least 3 seconds (my_ms >= 3000).
+                    // In Bullet or time scrambles, network latency risks flagging on time.
+                    if (my_ms >= 3000) {
+                        const tbTimeout = Math.min(600, Math.floor(my_ms / 6));
+                        fetchWithTimeout(
+                            "https://tablebase.lichess.ovh/standard?fen=" + encodeURIComponent(message.fen),
+                            {},
+                            tbTimeout
+                        )
+                            .then((r) => r.json())
+                            .then((data) => {
+                                if (data && data.moves && data.moves.length > 0) {
+                                    log.info('Background', `Played syzygy TB move: ${data.moves[0].uci}`);
+                                    const tbScore = data.category === "win" ? 29000 : data.category === "loss" ? -29000 : 0;
+                                    const stats = {
+                                        bestMove: data.moves[0].uci,
+                                        pv: [data.moves[0].uci],
+                                        score: tbScore,
+                                        depth: 99,
+                                        nodes: 1,
+                                        timeMs: 50,
+                                    };
+                                    SYZYGY_CACHE.set(message.fen, stats);
+                                    chrome.storage.local.set({ engineStats: stats });
+                                    sendResponse(stats);
+                                } else {
+                                    fallbackToEngine();
+                                }
+                            })
+                            .catch((err) => {
+                                log.warn('Background', 'TB API failed, falling back to engine', err);
                                 fallbackToEngine();
-                            }
-                        })
-                        .catch((err) => {
-                            log.warn('Background', 'TB API failed, falling back to engine', err);
-                            fallbackToEngine();
-                        });
-                    return;
+                            });
+                        return;
+                    }
                 }
 
                 fallbackToEngine();

@@ -247,139 +247,10 @@ const _promoUI = { resolve: null, el: null };
  * @returns {Promise<string>} Resolves with the chosen char
  */
 function showPromotionPicker(engineChar) {
-    return new Promise((resolve) => {
-        // Remove any existing picker
-        if (_promoUI.el) _promoUI.el.remove();
-
-        const boardEl = document.querySelector('wc-chess-board, chess-board, cg-board');
-        const rect = boardEl ? boardEl.getBoundingClientRect() : { left: window.innerWidth / 2 - 100, top: 100 };
-
-        const pieces = [
-            { char: 'q', label: '♛', name: 'Queen' },
-            { char: 'r', label: '♜', name: 'Rook' },
-            { char: 'b', label: '♝', name: 'Bishop' },
-            { char: 'n', label: '♞', name: 'Knight' },
-        ];
-
-        const container = document.createElement('div');
-        container.id = 'aether-promo-picker';
-        container.style.cssText = `
-            position: fixed;
-            z-index: 999999;
-            left: ${Math.min(rect.left + 8, window.innerWidth - 280)}px;
-            top: ${Math.max(rect.top - 110, 8)}px;
-            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
-            border: 1px solid rgba(102,126,234,0.6);
-            border-radius: 14px;
-            box-shadow: 0 8px 32px rgba(0,0,0,0.7), 0 0 0 1px rgba(255,255,255,0.05);
-            padding: 10px 12px;
-            display: flex;
-            flex-direction: column;
-            align-items: center;
-            gap: 8px;
-            font-family: 'Segoe UI', Arial, sans-serif;
-            animation: aetherPromoIn 0.18s cubic-bezier(0.34, 1.56, 0.64, 1) both;
-            backdrop-filter: blur(8px);
-            -webkit-backdrop-filter: blur(8px);
-        `;
-
-        const style = document.createElement('style');
-        style.textContent = `
-            @keyframes aetherPromoIn {
-                from { opacity: 0; transform: scale(0.82) translateY(-10px); }
-                to   { opacity: 1; transform: scale(1) translateY(0); }
-            }
-            #aether-promo-picker .aether-promo-title {
-                font-size: 11px; color: rgba(255,255,255,0.5); letter-spacing: 1.5px;
-                text-transform: uppercase; font-weight: 600; margin-bottom: 2px;
-            }
-            #aether-promo-picker .aether-promo-row {
-                display: flex; gap: 8px;
-            }
-            #aether-promo-picker .aether-promo-btn {
-                width: 52px; height: 52px;
-                background: rgba(255,255,255,0.06);
-                border: 1px solid rgba(255,255,255,0.12);
-                border-radius: 10px;
-                cursor: pointer;
-                display: flex; flex-direction: column; align-items: center; justify-content: center;
-                gap: 2px;
-                transition: background 0.15s, border-color 0.15s, transform 0.1s, box-shadow 0.15s;
-                color: white;
-            }
-            #aether-promo-picker .aether-promo-btn .piece-icon {
-                font-size: 26px; line-height: 1;
-            }
-            #aether-promo-picker .aether-promo-btn .piece-name {
-                font-size: 9px; opacity: 0.55; letter-spacing: 0.5px;
-            }
-            #aether-promo-picker .aether-promo-btn:hover {
-                background: rgba(102,126,234,0.35);
-                border-color: rgba(102,126,234,0.8);
-                transform: translateY(-2px) scale(1.05);
-                box-shadow: 0 4px 16px rgba(102,126,234,0.4);
-            }
-            #aether-promo-picker .aether-promo-btn.engine-pick {
-                border-color: rgba(102,234,140,0.6);
-                background: rgba(102,234,140,0.12);
-            }
-            #aether-promo-picker .aether-promo-btn.engine-pick .piece-icon {
-                filter: drop-shadow(0 0 6px rgba(102,234,140,0.7));
-            }
-            #aether-promo-picker .aether-promo-btn:active {
-                transform: translateY(0) scale(0.97);
-            }
-        `;
-        document.head.appendChild(style);
-
-        const title = document.createElement('div');
-        title.className = 'aether-promo-title';
-        title.textContent = '⚡ Promote Pawn';
-
-        const row = document.createElement('div');
-        row.className = 'aether-promo-row';
-
-        pieces.forEach(({ char, label, name }) => {
-            const btn = document.createElement('button');
-            btn.className = 'aether-promo-btn' + (char === engineChar ? ' engine-pick' : '');
-            btn.title = name + (char === engineChar ? ' (Engine pick)' : '');
-            btn.innerHTML = `<span class="piece-icon">${label}</span><span class="piece-name">${name}</span>`;
-            btn.addEventListener('click', () => {
-                container.style.animation = 'none';
-                container.style.opacity = '0';
-                setTimeout(() => { container.remove(); style.remove(); }, 150);
-                _promoUI.el = null;
-                _promoUI.resolve = null;
-                resolve(char);
-            });
-            row.appendChild(btn);
-        });
-
-        container.appendChild(title);
-        container.appendChild(row);
-        document.body.appendChild(container);
-        _promoUI.el = container;
-        _promoUI.resolve = resolve;
-
-        // Auto-resolve with engine's choice after 8 seconds if user doesn't pick
-        setTimeout(() => {
-            if (_promoUI.resolve) {
-                _promoUI.resolve(engineChar);
-                _promoUI.resolve = null;
-                container.remove();
-                style.remove();
-                _promoUI.el = null;
-            }
-        }, 8000);
-    });
+    return Promise.resolve(engineChar || "q");
 }
 
 /**
- * Selects a promotion piece in the promotion modal.
- * Tries Chess.com and generic modal approaches.
- * Defaults to queen promotion if nothing else is found.
- * @param {string} promotionChar - One of 'q', 'r', 'b', 'n'
- */
 function selectPromotion(promotionChar) {
     if (!promotionChar) promotionChar = 'q';
     
@@ -431,7 +302,7 @@ function playMove(uci) {
     const boardEl = document.querySelector("wc-chess-board, chess-board, cg-board");
     if (!boardEl) return false;
 
-    const reactionDelay = 50 + Math.floor(Math.random() * 50);
+    const reactionDelay = currentEngineMode === "autoplay" ? 5 : 50 + Math.floor(Math.random() * 50);
     setTimeout(() => {
         const boardElNow = document.querySelector("wc-chess-board, chess-board, cg-board");
         if (!boardElNow) return;
@@ -526,7 +397,7 @@ function parseBoard() {
 
         // Ignore pieces that are fading out or hidden (e.g., captured pieces during animation)
         const computedStyle = window.getComputedStyle(p);
-        if (parseFloat(computedStyle.opacity) < 1 || computedStyle.display === "none") return;
+        if (parseFloat(computedStyle.opacity) < 0.5 || computedStyle.display === "none") return;
         if (p.classList.contains("fade-out")) return;
         // Ignore hints or highlights if any slipped in
         if (p.classList.contains("highlight") || p.classList.contains("hint")) return;
@@ -673,14 +544,22 @@ let moveCount = 0;
 function parseClockText(text) {
     if (!text) return null;
     try {
-        if (text.includes(':')) {
-            const parts = text.split(':');
-            return (parseInt(parts[0], 10) * 60 + parseFloat(parts[1])) * 1000.0;
+        const lines = text.split(/[\n\s]+/).map(l => l.trim());
+        for (const line of lines) {
+            let match = line.match(/^(\d+):(\d{2})(?:\.(\d+))?$/);
+            if (match) {
+                return (parseInt(match[1], 10) * 60 + parseInt(match[2], 10)) * 1000 + (match[3] ? parseInt(match[3], 10) * (match[3].length === 1 ? 100 : 10) : 0);
+            }
+            match = line.match(/^(\d+)(?:\.(\d+))?$/);
+            if (match) {
+                const sec = parseInt(match[1], 10);
+                if (sec <= 60 || match[2]) {
+                    return sec * 1000 + (match[2] ? parseInt(match[2], 10) * (match[2].length === 1 ? 100 : 10) : 0);
+                }
+            }
         }
-        return parseFloat(text) * 1000.0;
-    } catch (_) {
         return null;
-    }
+    } catch (_) { return null; }
 }
 
 function getClocks() {
@@ -853,9 +732,10 @@ function processPosition(networkFen = null) {
     if (clocks.my_ms !== null && lastMyTime !== null && clocks.my_ms > lastMyTime) {
         let diff = clocks.my_ms - lastMyTime;
         if (diff > 0 && diff < 30000) {
-            // Very simple EWMA for increment inference
-            if (inferredIncMs === 0) inferredIncMs = diff;
-            else inferredIncMs = inferredIncMs * 0.7 + diff * 0.3;
+            let inc = diff;
+            if (inferredIncMs === 0) inferredIncMs = inc;
+            else inferredIncMs = inferredIncMs * 0.7 + inc * 0.3;
+            if (inferredIncMs > 15000) inferredIncMs = 0; // Reject absurd increments
         }
     }
     if (isMyTurn && clocks.my_ms !== null) {
@@ -972,7 +852,7 @@ function setupObserver() {
                      isProcessing = false;
                  }, 0);
              }
-        }, 400);
+        }, 50);
     });
 
     for (const target of targets) {
@@ -1083,5 +963,6 @@ chrome.runtime.onMessage.addListener((msg) => {
         }
     }
 });
+
 
 

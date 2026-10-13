@@ -141,6 +141,24 @@ export class ChessEngine {
         const ret = wasm.chessengine_load_network_native(this.__wbg_ptr, ptr0, len0);
         return ret !== 0;
     }
+    /**
+     * @param {Uint8Array} data
+     * @returns {boolean}
+     */
+    load_polyglot_book(data) {
+        const ret = wasm.chessengine_load_polyglot_book(this.__wbg_ptr, data);
+        return ret !== 0;
+    }
+    /**
+     * @param {Uint8Array} bytes
+     * @returns {boolean}
+     */
+    load_polyglot_book_native(bytes) {
+        const ptr0 = passArray8ToWasm0(bytes, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.chessengine_load_polyglot_book_native(this.__wbg_ptr, ptr0, len0);
+        return ret !== 0;
+    }
     constructor() {
         const ret = wasm.chessengine_new();
         this.__wbg_ptr = ret;
@@ -302,7 +320,7 @@ function __wbg_get_imports(memory) {
             table.set(offset + 2, true);
             table.set(offset + 3, false);
         },
-        memory: memory || new WebAssembly.Memory({initial:45,maximum:65536}),
+        memory: memory || new WebAssembly.Memory({initial:46,maximum:65536}),
     };
     return {
         __proto__: null,

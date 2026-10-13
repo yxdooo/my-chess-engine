@@ -10,6 +10,8 @@ export class ChessEngine {
     get_best_move_timed_native(fen: string, my_ms: number, inc_ms: number, opp_ms: number, moves_to_go: number, overhead_ms: number, elo: number, split_id: number, split_count: number, history: string): string;
     load_network(data: Uint8Array): boolean;
     load_network_native(bytes: Uint8Array): boolean;
+    load_polyglot_book(data: Uint8Array): boolean;
+    load_polyglot_book_native(bytes: Uint8Array): boolean;
     constructor();
     set_hash_size(mb: number): void;
 }
@@ -37,6 +39,8 @@ export interface InitOutput {
     readonly chessengine_get_best_move_timed_native: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number) => [number, number];
     readonly chessengine_load_network: (a: number, b: any) => number;
     readonly chessengine_load_network_native: (a: number, b: number, c: number) => number;
+    readonly chessengine_load_polyglot_book: (a: number, b: any) => number;
+    readonly chessengine_load_polyglot_book_native: (a: number, b: number, c: number) => number;
     readonly chessengine_new: () => number;
     readonly chessengine_set_hash_size: (a: number, b: number) => void;
     readonly __wbg_wbg_rayon_poolbuilder_free: (a: number, b: number) => void;

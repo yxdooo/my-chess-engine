@@ -20,7 +20,13 @@ onmessage = async (e) => {
         log.info('Init', `Worker[${workerId}] starting WASM init...`);
         try {
             log.time('WasmInit');
-            await init({ module_or_path: new URL('./pkg/engine_wasm_bg.wasm', import.meta.url) });
+            const initOptions = {
+                module_or_path: new URL('./pkg/engine_wasm_bg.wasm', import.meta.url)
+            };
+            if (memory) {
+                initOptions.memory = memory;
+            }
+            await init(initOptions);
             engine = new ChessEngine();
             log.timeEnd('WasmInit');
             
@@ -67,8 +73,8 @@ onmessage = async (e) => {
             my_ms || 0.0,
             inc_ms || 0.0,
             opp_ms || 0.0,
-            movesToGo || 35,
-            30.0, // overhead_ms
+            movesToGo || ((my_ms||180000) < 65000 && (inc_ms||0) < 2000 ? 50 : 35),
+            250.0, // overhead_ms
             elo,
             splitId,
             splitCount,
@@ -86,7 +92,7 @@ onmessage = async (e) => {
             } else {
                 log.info('Search', `Worker[${workerId}] → ${parsed.bestMove} score=${parsed.score}cp depth=${parsed.depth} nodes=${(parsed.nodes||0).toLocaleString()} time=${elapsed}ms`);
             }
-            postMessage({ type: "RESULT", searchId, ...parsed });
+            postMessage({ type: "RESULT", searchId, workerId, splitId, ...parsed });
         } catch (err) {
             log.error('Search', `Worker[${workerId}] JSON parse FAILED — raw result below`, { err, result });
             postMessage({
@@ -100,3 +106,4 @@ onmessage = async (e) => {
         }
     }
 };
+

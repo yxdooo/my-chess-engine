@@ -6,6 +6,10 @@ engine-wasm/target/
 node_modules/
 npm-debug.log
 
+# Python
+__pycache__/
+*.py[cod]
+
 # Build artifacts (generated – do not commit)
 dist/
 engine-wasm/pkg/

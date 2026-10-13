@@ -7,6 +7,8 @@ export const chessengine_get_best_move_timed: (a: number, b: number, c: number, 
 export const chessengine_get_best_move_timed_native: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number) => [number, number];
 export const chessengine_load_network: (a: number, b: any) => number;
 export const chessengine_load_network_native: (a: number, b: number, c: number) => number;
+export const chessengine_load_polyglot_book: (a: number, b: any) => number;
+export const chessengine_load_polyglot_book_native: (a: number, b: number, c: number) => number;
 export const chessengine_new: () => number;
 export const chessengine_set_hash_size: (a: number, b: number) => void;
 export const __wbg_wbg_rayon_poolbuilder_free: (a: number, b: number) => void;
