@@ -2,6 +2,11 @@ pub mod nnue;
 mod book;
 pub mod polyglot;
 pub mod timeman;
+pub mod syzygy;
+pub mod tune;
+pub mod types;
+pub mod movegen;
+pub mod board;
 use nnue::{Network, Accumulator};
 
 use wasm_bindgen::prelude::*;
@@ -198,6 +203,7 @@ pub struct ChessEngine {
     custom_polyglot_book: Option<Vec<u8>>,
     nmp_min_ply: u8,
     static_eval_history: [i32; 130],
+    cutoff_cnt: [u8; 128],
 }
 #[wasm_bindgen]
 impl ChessEngine {
@@ -233,6 +239,7 @@ impl ChessEngine {
             custom_polyglot_book: None,
             nmp_min_ply: 0,
             static_eval_history: [0; 130],
+            cutoff_cnt: [0; 128],
         }
     }
 
@@ -1149,6 +1156,13 @@ impl ChessEngine {
         
         let hash = board.get_hash();
         self.search_path[0] = hash;
+
+        // Syzygy Endgame Tablebase probe at root
+        if let Some((tb_move, tb_score)) = syzygy::probe_root(board) {
+            tt.store(hash, Some(tb_move), depth.max(1), tb_score, EXACT, 0, self.search_generation);
+            return (Some(tb_move), tb_score, -INF);
+        }
+
         let tt_best_move = tt.probe(hash, 0).and_then(|entry| entry.best_move);
 
         let mut moves: ArrayVec<ChessMove, 256> = MoveGen::new_legal(board).collect();
@@ -1448,6 +1462,35 @@ impl ChessEngine {
             }
         }
 
+        // Syzygy tablebase in-tree probe (WDL)
+        if excluded_move.is_none() && halfmove_clock == 0 && depth >= 1 {
+            if let Some(wdl) = syzygy::probe_wdl(board) {
+                let tb_score = match wdl {
+                    syzygy::WdlResult::Win => 25000 - ply as i32,
+                    syzygy::WdlResult::CursedWin => 100,
+                    syzygy::WdlResult::Draw => 0,
+                    syzygy::WdlResult::BlessedLoss => -100,
+                    syzygy::WdlResult::Loss => -25000 + ply as i32,
+                };
+                let flag = match wdl {
+                    syzygy::WdlResult::Win => LOWERBOUND,
+                    syzygy::WdlResult::Loss => UPPERBOUND,
+                    _ => EXACT,
+                };
+                tt.store(hash, None, depth, tb_score, flag, ply, self.search_generation);
+                if (flag == EXACT)
+                    || (flag == LOWERBOUND && tb_score >= beta)
+                    || (flag == UPPERBOUND && tb_score <= alpha)
+                {
+                    return tb_score;
+                }
+            }
+        }
+
+        if (ply as usize) < 128 {
+            self.cutoff_cnt[ply as usize] = 0;
+        }
+
         // Internal Iterative Reduction (IIR)
         if depth >= 4 && tt_best_move.is_none() && is_pv_node && !is_check {
             depth -= 1;
@@ -1458,11 +1501,20 @@ impl ChessEngine {
         if (ply as usize) < self.static_eval_history.len() {
             self.static_eval_history[ply as usize] = static_eval;
         }
-        let improving = !is_check && ply >= 2 && static_eval > self.static_eval_history[(ply - 2) as usize];
+        let improving = !is_check && (
+            (ply >= 2 && static_eval > self.static_eval_history[(ply - 2) as usize])
+            || (ply >= 1 && static_eval > -self.static_eval_history[(ply - 1) as usize] + 30)
+        );
+
+        let eval_diff = if ply > 0 && !is_check {
+            static_eval - (-self.static_eval_history[(ply - 1) as usize])
+        } else {
+            0
+        };
 
         // Reverse Futility Pruning (RFP) — only on non-PV nodes without excluded_move
         if !is_pv_node && !is_check && depth <= 6 && excluded_move.is_none() {
-            let margin = (depth as i32 * 75) - (if improving { 30 } else { 0 });
+            let margin = (depth as i32 * 75) - (if improving { 30 } else { 0 }) - (if eval_diff > 100 { 20 } else { 0 });
             if static_eval - margin >= beta {
                 return static_eval;
             }
@@ -1508,27 +1560,39 @@ impl ChessEngine {
             return 0; // Stalemate
         }
 
-        // ProbCut: test only captures/promotions with SEE >= bound - static_eval at reduced depth
+        // ProbCut Modernization: two-stage verification (QSearch first, then shallow negamax)
         if !is_pv_node && !is_check && depth >= 5 && beta < MATE - 128 && excluded_move.is_none() {
-            let bound = beta + 200;
-            for &m in &moves {
-                let (is_capture, _, is_pawn_move) = get_move_props(board, m);
-                if !is_capture && m.get_promotion().is_none() {
-                    continue;
-                }
-                if see_value(board, m) < bound - static_eval {
-                    continue;
-                }
-                let next_board = board.make_move_new(m);
-                self.update_nnue(ply, board, &next_board, m);
-                if (ply as usize) < 128 {
-                    self.search_path_moves[ply as usize] = Some(m);
-                }
-                let next_halfmove = if is_capture || is_pawn_move { 0 } else { halfmove_clock + 1 };
-                let probcut_score = -self.negamax(&next_board, depth - 4, -bound, -bound + 1, ply.saturating_add(1), next_halfmove, tt, pawn_hash, None);
-                if self.stop_search { return 0; }
-                if probcut_score >= bound {
-                    return probcut_score;
+            let bound = beta + 170;
+            let can_probcut = tt_score_for_singular.map(|s| s >= bound).unwrap_or(true);
+            if can_probcut {
+                for &m in &moves {
+                    let (is_capture, _, is_pawn_move) = get_move_props(board, m);
+                    if !is_capture && m.get_promotion().is_none() {
+                        continue;
+                    }
+                    if see_value(board, m) < bound - static_eval {
+                        continue;
+                    }
+                    let next_board = board.make_move_new(m);
+                    self.update_nnue(ply, board, &next_board, m);
+                    if (ply as usize) < 128 {
+                        self.search_path_moves[ply as usize] = Some(m);
+                    }
+                    let next_halfmove = if is_capture || is_pawn_move { 0 } else { halfmove_clock + 1 };
+
+                    // Stage 1: Fast Quiescence Search check
+                    let q_score = -self.quiescence_search(&next_board, -bound, -bound + 1, ply.saturating_add(1), next_halfmove, tt, pawn_hash);
+                    if q_score < bound {
+                        continue;
+                    }
+
+                    // Stage 2: Verification search at depth - 4
+                    let probcut_score = -self.negamax(&next_board, depth - 4, -bound, -bound + 1, ply.saturating_add(1), next_halfmove, tt, pawn_hash, None);
+                    if self.stop_search { return 0; }
+                    if probcut_score >= bound {
+                        tt.store(hash, Some(m), depth - 3, probcut_score, LOWERBOUND, ply, self.search_generation);
+                        return probcut_score;
+                    }
                 }
             }
         }
@@ -1539,6 +1603,10 @@ impl ChessEngine {
         let original_alpha = alpha;
 
         let mut scores = self.score_moves(board, &moves, ply, tt_best_move);
+
+        let tt_noisy = tt_best_move.map(|tm| {
+            board.piece_on(tm.get_dest()).is_some() || tm.get_promotion().is_some()
+        }).unwrap_or(false);
 
         let mut moves_evaluated = 0;
         let mut b_search_pv = true;
@@ -1569,9 +1637,19 @@ impl ChessEngine {
                     }
                 }
 
-                // Quiet SEE Pruning — prune quiet moves that lose material without compensation at shallow depth
-                if depth <= 3 {
-                    if see_value(board, m) < -50 * depth as i32 {
+                // Quiet History Pruning: at depth <= 4, prune moves with heavily negative history
+                if depth <= 4 {
+                    let hist = self.history[m.get_source().to_index()][m.get_dest().to_index()];
+                    if hist < -3500 * depth as i32 {
+                        continue;
+                    }
+                }
+
+                // History-Scaled SEE Pruning: scale quiet SEE threshold by -history_score / 128
+                if depth <= 4 {
+                    let hist = self.history[m.get_source().to_index()][m.get_dest().to_index()];
+                    let see_thresh = -30 * depth as i32 + (hist / 128).clamp(-100, 100);
+                    if see_value(board, m) < see_thresh {
                         continue;
                     }
                 }
@@ -1604,7 +1682,9 @@ impl ChessEngine {
                             let s_score = self.negamax(board, s_depth, s_beta - 1, s_beta, ply, halfmove_clock, tt, pawn_hash, Some(m));
                             if self.stop_search { return 0; }
                             if s_score < s_beta {
-                                if !is_pv_node && s_score < s_beta - 25 {
+                                if !is_pv_node && s_score < s_beta - 75 {
+                                    extension = 3; // Triple extension!
+                                } else if !is_pv_node && s_score < s_beta - 25 {
                                     extension = 2; // Double extension!
                                 } else {
                                     extension = 1; // Singular extension!
@@ -1661,6 +1741,16 @@ impl ChessEngine {
                         r = r.saturating_sub(1);
                     }
 
+                    // Noisy TT move reduction
+                    if tt_noisy {
+                        r += 1;
+                    }
+
+                    // Cutoff count reduction: if this ply has high cutoff activity (>= 4 cutoffs)
+                    if (ply as usize) < 128 && self.cutoff_cnt[ply as usize] >= 4 {
+                        r += 1;
+                    }
+
                     // History heuristic bonus/malus for LMR
                     let history_score = self.history[m.get_source().to_index()][m.get_dest().to_index()];
                     if history_score > 4000 {
@@ -1695,6 +1785,7 @@ impl ChessEngine {
             if score > alpha { alpha = score; }
             if alpha >= beta { 
                 if (ply as usize) < 128 {
+                    self.cutoff_cnt[ply as usize] = self.cutoff_cnt[ply as usize].saturating_add(1);
                     let stat_bonus = (16 * depth as i32 * depth as i32).min(1200);
                     if !is_capture {
                         if Some(m) != self.killers[ply as usize][0] {
@@ -1952,6 +2043,15 @@ impl ChessEngine {
         let pawn_corr = (self.pawn_corr_table[stm_idx][corr_idx] / 16).clamp(-200, 200);
 
         if let Some(network) = &self.network {
+            // Dual-NNUE fast path:
+            // In positions with decisive material imbalance (|base_eval| > 950, i.e. up a full queen),
+            // avoid heavy NNUE forward pass and use fast evaluation path
+            let base_eval = evaluate(board);
+            if base_eval.abs() > 950 {
+                let stm_sign = if board.side_to_move() == Color::White { 1 } else { -1 };
+                return (base_eval * stm_sign + pawn_corr).clamp(-MATE + 128, MATE - 128);
+            }
+
             let val = nnue::evaluate(network, &self.accumulators[ply as usize], board.side_to_move());
             return (val + pawn_corr).clamp(-MATE + 128, MATE - 128);
         }

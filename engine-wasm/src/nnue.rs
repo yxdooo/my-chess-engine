@@ -575,13 +575,25 @@ pub fn evaluate(network: &Network, acc: &Accumulator, stm: Color) -> i32 {
         let input_ptr = input.0.as_ptr() as *const __m256i;
         let chunks_per_row = input_dim / 32;
 
+        // Sparse SIMD: Precompute indices of non-zero 32-byte chunks
+        let mut nonzero_chunks = [0u8; 64];
+        let mut nonzero_count = 0;
+        for chunk in 0..chunks_per_row {
+            let inp = _mm256_loadu_si256(input_ptr.add(chunk));
+            if _mm256_testz_si256(inp, inp) == 0 {
+                nonzero_chunks[nonzero_count] = chunk as u8;
+                nonzero_count += 1;
+            }
+        }
+
         for i in 0..32 {
             let mut sum_vec = _mm256_setzero_si256();
-            let w_ptr = network.fc0_weights.as_ptr().add(i * input_dim) as *const __m256i;
+            let w_row = network.fc0_weights.as_ptr().add(i * input_dim) as *const __m256i;
 
-            for chunk in 0..chunks_per_row {
+            for &chunk_u8 in &nonzero_chunks[..nonzero_count] {
+                let chunk = chunk_u8 as usize;
                 let inp = _mm256_loadu_si256(input_ptr.add(chunk));
-                let w = _mm256_loadu_si256(w_ptr.add(chunk));
+                let w = _mm256_loadu_si256(w_row.add(chunk));
 
                 let prod = _mm256_maddubs_epi16(inp, w);
                 let dot = _mm256_madd_epi16(prod, ones);
@@ -607,13 +619,25 @@ pub fn evaluate(network: &Network, acc: &Accumulator, stm: Color) -> i32 {
         let input_ptr = input.0.as_ptr() as *const v128;
         let chunks_per_row = input_dim / 16;
 
+        // Sparse SIMD: Precompute indices of non-zero 16-byte chunks
+        let mut nonzero_chunks = [0u8; 128];
+        let mut nonzero_count = 0;
+        for chunk in 0..chunks_per_row {
+            let inp = v128_load(input_ptr.add(chunk));
+            if v128_any_true(inp) {
+                nonzero_chunks[nonzero_count] = chunk as u8;
+                nonzero_count += 1;
+            }
+        }
+
         for i in 0..32 {
             let mut sum_vec = i32x4_splat(0);
-            let w_ptr = network.fc0_weights.as_ptr().add(i * input_dim) as *const v128;
+            let w_row = network.fc0_weights.as_ptr().add(i * input_dim) as *const v128;
 
-            for chunk in 0..chunks_per_row {
+            for &chunk_u8 in &nonzero_chunks[..nonzero_count] {
+                let chunk = chunk_u8 as usize;
                 let inp = v128_load(input_ptr.add(chunk));
-                let w = v128_load(w_ptr.add(chunk));
+                let w = v128_load(w_row.add(chunk));
 
                 let lo = i16x8_extmul_low_i8x16(inp, w);
                 let hi = i16x8_extmul_high_i8x16(inp, w);

@@ -264,6 +264,13 @@ fn main() {
                 println!("option name Hash type spin default 64 min 1 max 2048");
                 println!("option name Threads type spin default {} min 1 max 64", default_threads);
                 println!("option name BookFile type string default <empty>");
+                println!("option name SyzygyPath type string default <empty>");
+                println!("option name SyzygyProbeDepth type spin default 1 min 1 max 64");
+                println!("option name Syzygy50MoveRule type check default true");
+                println!("option name SyzygyProbeLimit type spin default 7 min 0 max 7");
+                for param in engine_wasm::tune::TUNABLE_PARAMS {
+                    println!("option name {} type spin default {} min {} max {}", param.name, param.default, param.min, param.max);
+                }
                 println!("uciok");
             }
             "setoption" => {
@@ -282,6 +289,20 @@ fn main() {
                             let book_path = tokens[val_idx + 1..].join(" ");
                             if let Ok(bytes) = std::fs::read(&book_path) {
                                 pool.load_book(bytes);
+                            }
+                        } else if opt_name == "SyzygyPath" {
+                            let path_str = tokens[val_idx + 1..].join(" ");
+                            engine_wasm::syzygy::set_syzygy_path(&path_str);
+                        } else if opt_name == "SyzygyProbeDepth" {
+                            if let Ok(d) = tokens.get(val_idx + 1).unwrap_or(&"1").parse::<u8>() {
+                                engine_wasm::syzygy::set_probe_depth(d);
+                            }
+                        } else if opt_name == "Syzygy50MoveRule" {
+                            let b = tokens.get(val_idx + 1).map(|v| *v == "true").unwrap_or(true);
+                            engine_wasm::syzygy::set_use_50_move(b);
+                        } else if opt_name == "SyzygyProbeLimit" {
+                            if let Ok(l) = tokens.get(val_idx + 1).unwrap_or(&"7").parse::<u8>() {
+                                engine_wasm::syzygy::set_probe_limit(l);
                             }
                         }
                     }
