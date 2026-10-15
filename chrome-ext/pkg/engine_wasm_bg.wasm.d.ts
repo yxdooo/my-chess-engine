@@ -1,26 +1,18 @@
 /* tslint:disable */
 /* eslint-disable */
+export const memory: WebAssembly.Memory;
 export const __wbg_chessengine_free: (a: number, b: number) => void;
 export const chessengine_get_best_move: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number) => [number, number];
-export const chessengine_get_best_move_native: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number];
 export const chessengine_get_best_move_timed: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number, n: number) => [number, number];
-export const chessengine_get_best_move_timed_native: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number) => [number, number];
 export const chessengine_load_network: (a: number, b: any) => number;
 export const chessengine_load_network_native: (a: number, b: number, c: number) => number;
 export const chessengine_load_polyglot_book: (a: number, b: any) => number;
 export const chessengine_load_polyglot_book_native: (a: number, b: number, c: number) => number;
 export const chessengine_new: () => number;
 export const chessengine_set_hash_size: (a: number, b: number) => void;
-export const __wbg_wbg_rayon_poolbuilder_free: (a: number, b: number) => void;
-export const initThreadPool: (a: number) => any;
-export const wbg_rayon_poolbuilder_build: (a: number) => void;
-export const wbg_rayon_poolbuilder_numThreads: (a: number) => number;
-export const wbg_rayon_poolbuilder_receiver: (a: number) => number;
-export const wbg_rayon_start_worker: (a: number) => void;
-export const memory: WebAssembly.Memory;
 export const __wbindgen_free: (a: number, b: number, c: number) => void;
 export const __wbindgen_malloc: (a: number, b: number) => number;
 export const __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;
-export const __externref_table_alloc: () => number;
 export const __wbindgen_externrefs: WebAssembly.Table;
+export const __externref_table_alloc: () => number;
 export const __wbindgen_start: () => void;

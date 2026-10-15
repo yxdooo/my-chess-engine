@@ -63,6 +63,11 @@ impl Network {
     }
 }
 
+#[repr(align(64))]
+#[derive(Clone, Copy)]
+pub struct AlignedI8<const N: usize>(pub [i8; N]);
+
+#[repr(align(64))]
 #[derive(Clone, Copy)]
 pub struct Accumulator {
     pub white: [i16; MAX_HIDDEN_SIZE],
@@ -158,6 +163,19 @@ pub fn make_halfkav2_index(perspective: Color, sq: usize, pc_offset: usize, ksq:
 #[inline(always)]
 fn add_feature(acc: &mut [i16; MAX_HIDDEN_SIZE], weights: &[i16], feature: usize, hidden_size: usize) {
     let offset = feature * hidden_size;
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        use core::arch::x86_64::*;
+        let mut acc_ptr = acc.as_mut_ptr() as *mut __m256i;
+        let mut w_ptr = weights.as_ptr().add(offset) as *const __m256i;
+        for _ in 0..(hidden_size / 16) {
+            let a = _mm256_loadu_si256(acc_ptr);
+            let w = _mm256_loadu_si256(w_ptr);
+            _mm256_storeu_si256(acc_ptr, _mm256_add_epi16(a, w));
+            acc_ptr = acc_ptr.add(1);
+            w_ptr = w_ptr.add(1);
+        }
+    }
     #[cfg(target_arch = "wasm32")]
     unsafe {
         use core::arch::wasm32::*;
@@ -171,7 +189,7 @@ fn add_feature(acc: &mut [i16; MAX_HIDDEN_SIZE], weights: &[i16], feature: usize
             w_ptr = w_ptr.add(1);
         }
     }
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "wasm32")))]
     {
         for i in 0..hidden_size {
             acc[i] = acc[i].wrapping_add(weights[offset + i]);
@@ -182,6 +200,19 @@ fn add_feature(acc: &mut [i16; MAX_HIDDEN_SIZE], weights: &[i16], feature: usize
 #[inline(always)]
 fn sub_feature(acc: &mut [i16; MAX_HIDDEN_SIZE], weights: &[i16], feature: usize, hidden_size: usize) {
     let offset = feature * hidden_size;
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        use core::arch::x86_64::*;
+        let mut acc_ptr = acc.as_mut_ptr() as *mut __m256i;
+        let mut w_ptr = weights.as_ptr().add(offset) as *const __m256i;
+        for _ in 0..(hidden_size / 16) {
+            let a = _mm256_loadu_si256(acc_ptr);
+            let w = _mm256_loadu_si256(w_ptr);
+            _mm256_storeu_si256(acc_ptr, _mm256_sub_epi16(a, w));
+            acc_ptr = acc_ptr.add(1);
+            w_ptr = w_ptr.add(1);
+        }
+    }
     #[cfg(target_arch = "wasm32")]
     unsafe {
         use core::arch::wasm32::*;
@@ -195,10 +226,118 @@ fn sub_feature(acc: &mut [i16; MAX_HIDDEN_SIZE], weights: &[i16], feature: usize
             w_ptr = w_ptr.add(1);
         }
     }
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "wasm32")))]
     {
         for i in 0..hidden_size {
             acc[i] = acc[i].wrapping_sub(weights[offset + i]);
+        }
+    }
+}
+
+#[inline(always)]
+fn add_sub_feature(acc: &mut [i16; MAX_HIDDEN_SIZE], prev: &[i16; MAX_HIDDEN_SIZE], weights: &[i16], add_feat: usize, sub_feat: usize, hidden_size: usize) {
+    let add_offset = add_feat * hidden_size;
+    let sub_offset = sub_feat * hidden_size;
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        use core::arch::x86_64::*;
+        let mut acc_ptr = acc.as_mut_ptr() as *mut __m256i;
+        let mut prev_ptr = prev.as_ptr() as *const __m256i;
+        let mut w_add_ptr = weights.as_ptr().add(add_offset) as *const __m256i;
+        let mut w_sub_ptr = weights.as_ptr().add(sub_offset) as *const __m256i;
+        for _ in 0..(hidden_size / 16) {
+            let p = _mm256_loadu_si256(prev_ptr);
+            let wa = _mm256_loadu_si256(w_add_ptr);
+            let ws = _mm256_loadu_si256(w_sub_ptr);
+            let res = _mm256_sub_epi16(_mm256_add_epi16(p, wa), ws);
+            _mm256_storeu_si256(acc_ptr, res);
+            acc_ptr = acc_ptr.add(1);
+            prev_ptr = prev_ptr.add(1);
+            w_add_ptr = w_add_ptr.add(1);
+            w_sub_ptr = w_sub_ptr.add(1);
+        }
+    }
+    #[cfg(target_arch = "wasm32")]
+    unsafe {
+        use core::arch::wasm32::*;
+        let mut acc_ptr = acc.as_mut_ptr() as *mut v128;
+        let mut prev_ptr = prev.as_ptr() as *const v128;
+        let mut w_add_ptr = weights.as_ptr().add(add_offset) as *const v128;
+        let mut w_sub_ptr = weights.as_ptr().add(sub_offset) as *const v128;
+        for _ in 0..(hidden_size / 8) {
+            let p = v128_load(prev_ptr);
+            let wa = v128_load(w_add_ptr);
+            let ws = v128_load(w_sub_ptr);
+            v128_store(acc_ptr, i16x8_sub(i16x8_add(p, wa), ws));
+            acc_ptr = acc_ptr.add(1);
+            prev_ptr = prev_ptr.add(1);
+            w_add_ptr = w_add_ptr.add(1);
+            w_sub_ptr = w_sub_ptr.add(1);
+        }
+    }
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "wasm32")))]
+    {
+        for i in 0..hidden_size {
+            acc[i] = prev[i].wrapping_add(weights[add_offset + i]).wrapping_sub(weights[sub_offset + i]);
+        }
+    }
+}
+
+#[inline(always)]
+fn add_sub_sub_feature(acc: &mut [i16; MAX_HIDDEN_SIZE], prev: &[i16; MAX_HIDDEN_SIZE], weights: &[i16], add_feat: usize, sub_feat1: usize, sub_feat2: usize, hidden_size: usize) {
+    let add_offset = add_feat * hidden_size;
+    let sub1_offset = sub_feat1 * hidden_size;
+    let sub2_offset = sub_feat2 * hidden_size;
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        use core::arch::x86_64::*;
+        let mut acc_ptr = acc.as_mut_ptr() as *mut __m256i;
+        let mut prev_ptr = prev.as_ptr() as *const __m256i;
+        let mut w_add_ptr = weights.as_ptr().add(add_offset) as *const __m256i;
+        let mut w_sub1_ptr = weights.as_ptr().add(sub1_offset) as *const __m256i;
+        let mut w_sub2_ptr = weights.as_ptr().add(sub2_offset) as *const __m256i;
+        for _ in 0..(hidden_size / 16) {
+            let p = _mm256_loadu_si256(prev_ptr);
+            let wa = _mm256_loadu_si256(w_add_ptr);
+            let ws1 = _mm256_loadu_si256(w_sub1_ptr);
+            let ws2 = _mm256_loadu_si256(w_sub2_ptr);
+            let res = _mm256_sub_epi16(_mm256_sub_epi16(_mm256_add_epi16(p, wa), ws1), ws2);
+            _mm256_storeu_si256(acc_ptr, res);
+            acc_ptr = acc_ptr.add(1);
+            prev_ptr = prev_ptr.add(1);
+            w_add_ptr = w_add_ptr.add(1);
+            w_sub1_ptr = w_sub1_ptr.add(1);
+            w_sub2_ptr = w_sub2_ptr.add(1);
+        }
+    }
+    #[cfg(target_arch = "wasm32")]
+    unsafe {
+        use core::arch::wasm32::*;
+        let mut acc_ptr = acc.as_mut_ptr() as *mut v128;
+        let mut prev_ptr = prev.as_ptr() as *const v128;
+        let mut w_add_ptr = weights.as_ptr().add(add_offset) as *const v128;
+        let mut w_sub1_ptr = weights.as_ptr().add(sub1_offset) as *const v128;
+        let mut w_sub2_ptr = weights.as_ptr().add(sub2_offset) as *const v128;
+        for _ in 0..(hidden_size / 8) {
+            let p = v128_load(prev_ptr);
+            let wa = v128_load(w_add_ptr);
+            let ws1 = v128_load(w_sub1_ptr);
+            let ws2 = v128_load(w_sub2_ptr);
+            v128_store(acc_ptr, i16x8_sub(i16x8_sub(i16x8_add(p, wa), ws1), ws2));
+            acc_ptr = acc_ptr.add(1);
+            prev_ptr = prev_ptr.add(1);
+            w_add_ptr = w_add_ptr.add(1);
+            w_sub1_ptr = w_sub1_ptr.add(1);
+            w_sub2_ptr = w_sub2_ptr.add(1);
+        }
+    }
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "wasm32")))]
+    {
+        for i in 0..hidden_size {
+            acc[i] = prev[i]
+                .wrapping_add(weights[add_offset + i])
+                .wrapping_sub(weights[sub1_offset + i])
+                .wrapping_sub(weights[sub2_offset + i]);
         }
     }
 }
@@ -339,6 +478,79 @@ pub fn update_accumulator(network: &Network, next_acc: &mut Accumulator, prev_ac
     }
 }
 
+pub fn update_accumulator_move(
+    network: &Network,
+    next_acc: &mut Accumulator,
+    prev_acc: &Accumulator,
+    old_board: &Board,
+    new_board: &Board,
+    m: chess::ChessMove,
+) {
+    if network.arch != ArchType::HalfKP {
+        update_accumulator(network, next_acc, prev_acc, old_board, new_board);
+        return;
+    }
+
+    let wk_old = old_board.king_square(Color::White).to_index();
+    let wk_new = new_board.king_square(Color::White).to_index();
+    let bk_old = old_board.king_square(Color::Black).to_index();
+    let bk_new = new_board.king_square(Color::Black).to_index();
+
+    if wk_old != wk_new || bk_old != bk_new {
+        refresh_accumulator(network, next_acc, new_board);
+        return;
+    }
+
+    let from_sq = m.get_source().to_index();
+    let to_sq = m.get_dest().to_index();
+    let piece = match old_board.piece_on(m.get_source()) {
+        Some(p) => p,
+        None => {
+            update_accumulator(network, next_acc, prev_acc, old_board, new_board);
+            return;
+        }
+    };
+    let color = old_board.side_to_move();
+
+    // Check for special moves: castling, promotion, or en-passant
+    let is_pawn = piece == Piece::Pawn;
+    let is_ep = is_pawn && m.get_source().get_file() != m.get_dest().get_file() && old_board.piece_on(m.get_dest()).is_none();
+    if m.get_promotion().is_some() || is_ep {
+        update_accumulator(network, next_acc, prev_acc, old_board, new_board);
+        return;
+    }
+
+    let hs = network.hidden_size;
+    let wk = wk_new;
+    let bk_flipped = bk_new ^ 63;
+    let pc = make_piece_code(piece, color);
+    let flip_pc = flip_piece_code(pc);
+
+    let feat_w_sub = wk * 641 + 1 + pc * 64 + from_sq;
+    let feat_w_add = wk * 641 + 1 + pc * 64 + to_sq;
+    let feat_b_sub = bk_flipped * 641 + 1 + flip_pc * 64 + (from_sq ^ 63);
+    let feat_b_add = bk_flipped * 641 + 1 + flip_pc * 64 + (to_sq ^ 63);
+
+    next_acc.hidden_size = hs;
+
+    if let Some(cap_piece) = old_board.piece_on(m.get_dest()) {
+        // Capture move: 1 add, 2 subs
+        let cap_color = !color;
+        let cap_pc = make_piece_code(cap_piece, cap_color);
+        let cap_flip_pc = flip_piece_code(cap_pc);
+
+        let cap_feat_w = wk * 641 + 1 + cap_pc * 64 + to_sq;
+        let cap_feat_b = bk_flipped * 641 + 1 + cap_flip_pc * 64 + (to_sq ^ 63);
+
+        add_sub_sub_feature(&mut next_acc.white, &prev_acc.white, &network.feature_weights, feat_w_add, feat_w_sub, cap_feat_w, hs);
+        add_sub_sub_feature(&mut next_acc.black, &prev_acc.black, &network.feature_weights, feat_b_add, feat_b_sub, cap_feat_b, hs);
+    } else {
+        // Quiet move: 1 add, 1 sub
+        add_sub_feature(&mut next_acc.white, &prev_acc.white, &network.feature_weights, feat_w_add, feat_w_sub, hs);
+        add_sub_feature(&mut next_acc.black, &prev_acc.black, &network.feature_weights, feat_b_add, feat_b_sub, hs);
+    }
+}
+
 pub fn evaluate(network: &Network, acc: &Accumulator, stm: Color) -> i32 {
     let hs = network.hidden_size;
     let (us, them) = if stm == Color::White {
@@ -348,19 +560,51 @@ pub fn evaluate(network: &Network, acc: &Accumulator, stm: Color) -> i32 {
     };
 
     let input_dim = hs * 2;
-    let mut input = vec![0i8; input_dim];
+    let mut input = AlignedI8::<{ MAX_HIDDEN_SIZE * 2 }>([0i8; MAX_HIDDEN_SIZE * 2]);
     for i in 0..hs {
-        input[i] = us[i].clamp(0, 127) as i8;
-        input[hs + i] = them[i].clamp(0, 127) as i8;
+        input.0[i] = us[i].clamp(0, 127) as i8;
+        input.0[hs + i] = them[i].clamp(0, 127) as i8;
     }
 
     let mut fc0 = [0i32; 32];
+
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        use core::arch::x86_64::*;
+        let ones = _mm256_set1_epi16(1);
+        let input_ptr = input.0.as_ptr() as *const __m256i;
+        let chunks_per_row = input_dim / 32;
+
+        for i in 0..32 {
+            let mut sum_vec = _mm256_setzero_si256();
+            let w_ptr = network.fc0_weights.as_ptr().add(i * input_dim) as *const __m256i;
+
+            for chunk in 0..chunks_per_row {
+                let inp = _mm256_loadu_si256(input_ptr.add(chunk));
+                let w = _mm256_loadu_si256(w_ptr.add(chunk));
+
+                let prod = _mm256_maddubs_epi16(inp, w);
+                let dot = _mm256_madd_epi16(prod, ones);
+                sum_vec = _mm256_add_epi32(sum_vec, dot);
+            }
+
+            let hi128 = _mm256_extracti128_si256(sum_vec, 1);
+            let lo128 = _mm256_castsi256_si128(sum_vec);
+            let sum128 = _mm_add_epi32(lo128, hi128);
+            let hi64 = _mm_unpackhi_epi64(sum128, sum128);
+            let sum64 = _mm_add_epi32(sum128, hi64);
+            let hi32 = _mm_shuffle_epi32(sum64, 0b00000001);
+            let sum32 = _mm_add_epi32(sum64, hi32);
+            let total = network.fc0_biases[i] + _mm_cvtsi128_si32(sum32);
+            fc0[i] = total.clamp(0, 127 * 64) / 64;
+        }
+    }
 
     #[cfg(target_arch = "wasm32")]
     unsafe {
         use core::arch::wasm32::*;
         let ones = i16x8_splat(1);
-        let input_ptr = input.as_ptr() as *const v128;
+        let input_ptr = input.0.as_ptr() as *const v128;
         let chunks_per_row = input_dim / 16;
 
         for i in 0..32 {
@@ -389,13 +633,13 @@ pub fn evaluate(network: &Network, acc: &Accumulator, stm: Color) -> i32 {
         }
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "wasm32")))]
     {
         for i in 0..32 {
             let mut sum = network.fc0_biases[i];
             let row_offset = i * input_dim;
             for j in 0..input_dim {
-                sum += (input[j] as i32) * (network.fc0_weights[row_offset + j] as i32);
+                sum += (input.0[j] as i32) * (network.fc0_weights[row_offset + j] as i32);
             }
             fc0[i] = sum.clamp(0, 127 * 64) / 64;
         }
@@ -407,13 +651,36 @@ pub fn evaluate(network: &Network, acc: &Accumulator, stm: Color) -> i32 {
     }
 
     let mut fc1 = [0i32; 32];
-    for i in 0..32 {
-        let mut sum = network.fc1_biases[i];
-        let row_offset = i * 32;
-        for j in 0..32 {
-            sum += (fc0_act[j] as i32) * (network.fc1_weights[row_offset + j] as i32);
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        use core::arch::x86_64::*;
+        let ones = _mm256_set1_epi16(1);
+        let inp = _mm256_loadu_si256(fc0_act.as_ptr() as *const __m256i);
+        for i in 0..32 {
+            let w = _mm256_loadu_si256(network.fc1_weights.as_ptr().add(i * 32) as *const __m256i);
+            let prod = _mm256_maddubs_epi16(inp, w);
+            let dot = _mm256_madd_epi16(prod, ones);
+            let hi128 = _mm256_extracti128_si256(dot, 1);
+            let lo128 = _mm256_castsi256_si128(dot);
+            let sum128 = _mm_add_epi32(lo128, hi128);
+            let hi64 = _mm_unpackhi_epi64(sum128, sum128);
+            let sum64 = _mm_add_epi32(sum128, hi64);
+            let hi32 = _mm_shuffle_epi32(sum64, 0b00000001);
+            let sum32 = _mm_add_epi32(sum64, hi32);
+            let total = network.fc1_biases[i] + _mm_cvtsi128_si32(sum32);
+            fc1[i] = total / 64;
         }
-        fc1[i] = sum / 64;
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        for i in 0..32 {
+            let mut sum = network.fc1_biases[i];
+            let row_offset = i * 32;
+            for j in 0..32 {
+                sum += (fc0_act[j] as i32) * (network.fc1_weights[row_offset + j] as i32);
+            }
+            fc1[i] = sum / 64;
+        }
     }
 
     let mut fc1_act = [0i8; 32];
@@ -422,8 +689,28 @@ pub fn evaluate(network: &Network, acc: &Accumulator, stm: Color) -> i32 {
     }
 
     let mut output = network.fc2_biases[0];
-    for j in 0..32 {
-        output += (fc1_act[j] as i32) * (network.fc2_weights[j] as i32);
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        use core::arch::x86_64::*;
+        let ones = _mm256_set1_epi16(1);
+        let inp = _mm256_loadu_si256(fc1_act.as_ptr() as *const __m256i);
+        let w = _mm256_loadu_si256(network.fc2_weights.as_ptr() as *const __m256i);
+        let prod = _mm256_maddubs_epi16(inp, w);
+        let dot = _mm256_madd_epi16(prod, ones);
+        let hi128 = _mm256_extracti128_si256(dot, 1);
+        let lo128 = _mm256_castsi256_si128(dot);
+        let sum128 = _mm_add_epi32(lo128, hi128);
+        let hi64 = _mm_unpackhi_epi64(sum128, sum128);
+        let sum64 = _mm_add_epi32(sum128, hi64);
+        let hi32 = _mm_shuffle_epi32(sum64, 0b00000001);
+        let sum32 = _mm_add_epi32(sum64, hi32);
+        output += _mm_cvtsi128_si32(sum32);
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        for j in 0..32 {
+            output += (fc1_act[j] as i32) * (network.fc2_weights[j] as i32);
+        }
     }
 
     output / 16

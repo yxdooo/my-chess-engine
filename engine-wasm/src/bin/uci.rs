@@ -1,10 +1,11 @@
 use std::io::{self, BufRead};
-use std::str::FromStr;
-use std::sync::mpsc::{self, Receiver, Sender};
-use std::sync::Arc;
 use std::path::PathBuf;
+use std::str::FromStr;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{self, Sender};
+use std::sync::Arc;
 use std::thread::{self, JoinHandle};
-use engine_wasm::ChessEngine;
+use engine_wasm::{ChessEngine, GLOBAL_NODES, GLOBAL_STOP};
 
 fn load_nnue_data() -> Vec<u8> {
     let candidate_paths = [
@@ -26,136 +27,274 @@ fn load_nnue_data() -> Vec<u8> {
     Vec::new()
 }
 
-struct SearchTask {
+#[derive(Clone)]
+struct SearchParams {
     fen: String,
-    movetime: f64,
-    my_time: f64,
-    my_inc: f64,
-    opp_time: f64,
-    movestogo: i32,
-    history_str: String,
-    split_id: u8,
+    optimum_time_ms: f64,
+    maximum_time_ms: f64,
+    max_depth: u8,
     split_count: u8,
+    history_str: String,
 }
 
 enum WorkerMessage {
-    Search(SearchTask),
+    Search {
+        params: SearchParams,
+        split_id: u8,
+    },
     SetHash(usize),
-    LoadBook(Vec<u8>),
+    LoadBook(Arc<Vec<u8>>),
     Terminate,
 }
 
-struct WorkerHandle {
-    tx: Sender<WorkerMessage>,
-    handle: JoinHandle<()>,
+static SEARCH_RUNNING: AtomicBool = AtomicBool::new(false);
+
+struct WorkerPool {
+    threads: Vec<(Sender<WorkerMessage>, JoinHandle<()>)>,
+    nnue_bytes: Arc<Vec<u8>>,
+    book_bytes: Option<Arc<Vec<u8>>>,
+    hash_mb: usize,
+}
+
+impl WorkerPool {
+    fn new(count: usize, nnue_bytes: Arc<Vec<u8>>) -> Self {
+        let mut pool = Self {
+            threads: Vec::new(),
+            nnue_bytes,
+            book_bytes: None,
+            hash_mb: 64,
+        };
+        pool.resize(count);
+        pool
+    }
+
+    fn len(&self) -> usize {
+        self.threads.len()
+    }
+
+    fn resize(&mut self, new_count: usize) {
+        let new_count = new_count.clamp(1, 64);
+        for (tx, handle) in self.threads.drain(..) {
+            let _ = tx.send(WorkerMessage::Terminate);
+            let _ = handle.join();
+        }
+        for _ in 0..new_count {
+            let (tx, rx) = mpsc::channel::<WorkerMessage>();
+            let thread_nnue = Arc::clone(&self.nnue_bytes);
+            let thread_book = self.book_bytes.clone();
+            let hash_mb = self.hash_mb;
+
+            let handle = thread::spawn(move || {
+                let mut engine = ChessEngine::new();
+                if !thread_nnue.is_empty() {
+                    engine.load_network_native(&thread_nnue);
+                }
+                if let Some(book) = thread_book {
+                    engine.load_polyglot_book_native(&book);
+                }
+                engine.set_hash_size(hash_mb);
+
+                while let Ok(msg) = rx.recv() {
+                    match msg {
+                        WorkerMessage::Search { params, split_id: id } => {
+                            let print_info = id == 0;
+                            let res = engine.search_native(
+                                &params.fen,
+                                params.optimum_time_ms,
+                                params.maximum_time_ms,
+                                params.max_depth,
+                                id,
+                                params.split_count,
+                                &params.history_str,
+                                print_info,
+                            );
+
+                            if id == 0 {
+                                // Master thread outputs bestmove
+                                if let Some(bm) = res.best_move {
+                                    if let Some(pm) = res.ponder_move {
+                                        println!("bestmove {} ponder {}", bm, pm);
+                                    } else {
+                                        println!("bestmove {}", bm);
+                                    }
+                                } else {
+                                    if let Ok(board) = chess::Board::from_str(&params.fen) {
+                                        if let Some(m) = chess::MoveGen::new_legal(&board).next() {
+                                            println!("bestmove {}", m);
+                                        } else {
+                                            println!("bestmove 0000");
+                                        }
+                                    } else {
+                                        println!("bestmove 0000");
+                                    }
+                                }
+                                GLOBAL_STOP.store(true, Ordering::Relaxed);
+                                SEARCH_RUNNING.store(false, Ordering::Relaxed);
+                            }
+                        }
+                        WorkerMessage::SetHash(mb) => {
+                            engine.set_hash_size(mb);
+                        }
+                        WorkerMessage::LoadBook(bytes) => {
+                            engine.load_polyglot_book_native(&bytes);
+                        }
+                        WorkerMessage::Terminate => break,
+                    }
+                }
+            });
+
+            self.threads.push((tx, handle));
+        }
+    }
+
+    fn dispatch_search(&self, params: SearchParams) {
+        for (idx, (tx, _)) in self.threads.iter().enumerate() {
+            let _ = tx.send(WorkerMessage::Search {
+                params: params.clone(),
+                split_id: idx as u8,
+            });
+        }
+    }
+
+    fn set_hash(&mut self, mb: usize) {
+        self.hash_mb = mb;
+        for (tx, _) in &self.threads {
+            let _ = tx.send(WorkerMessage::SetHash(mb));
+        }
+    }
+
+    fn load_book(&mut self, bytes: Vec<u8>) {
+        let book = Arc::new(bytes);
+        self.book_bytes = Some(Arc::clone(&book));
+        for (tx, _) in &self.threads {
+            let _ = tx.send(WorkerMessage::LoadBook(Arc::clone(&book)));
+        }
+    }
+
+    fn terminate(&mut self) {
+        for (tx, handle) in self.threads.drain(..) {
+            let _ = tx.send(WorkerMessage::Terminate);
+            let _ = handle.join();
+        }
+    }
+}
+
+const BENCH_FENS: &[&str] = &[
+    "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+    "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1",
+    "8/2p5/3p4/KP5r/1R3p1k/8/4P1P1/8 w - - 0 1",
+    "r1b1k2r/ppppnppp/2n2q2/2b5/3NP3/2P1B3/PP3PPP/RN1QKB1R w KQkq - 0 1",
+    "r2q1rk1/pp1b1ppp/2n1pn2/8/2BP4/1QN1PN2/PP3PPP/R4RK1 b - - 0 11",
+];
+
+fn run_bench(nnue_bytes: &[u8], depth: u8) {
+    let mut engine = ChessEngine::new();
+    if !nnue_bytes.is_empty() {
+        engine.load_network_native(nnue_bytes);
+    }
+    engine.set_hash_size(64);
+
+    let mut total_nodes: u64 = 0;
+    let start_all = std::time::Instant::now();
+
+    for (i, &fen) in BENCH_FENS.iter().enumerate() {
+        println!("\nPosition [{}/{}]: {}", i + 1, BENCH_FENS.len(), fen);
+        GLOBAL_STOP.store(false, Ordering::Relaxed);
+        let res = engine.search_native(fen, 1e9, 1e9, depth, 0, 1, "", true);
+        total_nodes += res.nodes;
+    }
+
+    let elapsed = start_all.elapsed();
+    let total_time_ms = elapsed.as_millis().max(1);
+    let nps = ((total_nodes as f64) / (total_time_ms as f64 / 1000.0)) as u64;
+
+    println!("\n===========================");
+    println!("Total nodes: {}", total_nodes);
+    println!("Total time: {} ms", total_time_ms);
+    println!("Nodes/second: {}", nps);
+    println!("===========================");
 }
 
 fn main() {
-    let nnue_bytes = Arc::new(load_nnue_data());
-    let default_threads = 4;
-    let (result_tx, result_rx) = mpsc::channel::<(u8, String)>();
+    let nnue_raw = load_nnue_data();
+    let default_threads = thread::available_parallelism().map(|n| n.get()).unwrap_or(4).min(16);
 
-    let mut workers: Vec<WorkerHandle> = Vec::with_capacity(default_threads);
-    for _worker_idx in 0..default_threads {
-        let (task_tx, task_rx): (Sender<WorkerMessage>, Receiver<WorkerMessage>) = mpsc::channel();
-        let res_tx = result_tx.clone();
-        let thread_nnue = Arc::clone(&nnue_bytes);
-
-        let handle = thread::spawn(move || {
-            let mut engine = ChessEngine::new();
-            if !thread_nnue.is_empty() {
-                engine.load_network_native(&thread_nnue);
-            }
-            engine.set_hash_size(64);
-
-            while let Ok(msg) = task_rx.recv() {
-                match msg {
-                    WorkerMessage::Search(task) => {
-                        let json = if task.movetime > 0.0 {
-                            engine.get_best_move_native(
-                                &task.fen,
-                                task.movetime * 0.95,
-                                3000.0,
-                                task.split_id,
-                                task.split_count,
-                                &task.history_str,
-                            )
-                        } else {
-                            engine.get_best_move_timed_native(
-                                &task.fen,
-                                task.my_time,
-                                task.my_inc,
-                                task.opp_time,
-                                task.movestogo,
-                                30.0,
-                                3000.0,
-                                task.split_id,
-                                task.split_count,
-                                &task.history_str,
-                            )
-                        };
-                        let _ = res_tx.send((task.split_id, json));
-                    }
-                    WorkerMessage::SetHash(mb) => {
-                        engine.set_hash_size(mb);
-                    }
-                    WorkerMessage::LoadBook(bytes) => {
-                        engine.load_polyglot_book_native(&bytes);
-                    }
-                    WorkerMessage::Terminate => break,
-                }
-            }
-        });
-
-        workers.push(WorkerHandle { tx: task_tx, handle });
+    // Command-line "bench" argument support
+    if std::env::args().any(|arg| arg == "bench") {
+        let depth = std::env::args()
+            .skip(2)
+            .next()
+            .and_then(|d| d.parse().ok())
+            .unwrap_or(12);
+        println!("Running Aether benchmark to depth {}...", depth);
+        run_bench(&nnue_raw, depth);
+        return;
     }
 
-    let stdin = io::stdin();
+    let nnue_bytes = Arc::new(nnue_raw);
+    let mut pool = WorkerPool::new(default_threads, Arc::clone(&nnue_bytes));
+
+    let (stdin_tx, stdin_rx) = mpsc::channel::<String>();
+    thread::spawn(move || {
+        let stdin = io::stdin();
+        for line in stdin.lock().lines() {
+            match line {
+                Ok(l) => {
+                    if stdin_tx.send(l).is_err() { break; }
+                }
+                Err(_) => break,
+            }
+        }
+    });
+
     let mut position_fen = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1".to_string();
     let mut position_history: Vec<String> = Vec::new();
 
     println!("id name Aether v2.2.0");
-    println!("id author Aether");
+    println!("id author Aether Team");
 
-    for line in stdin.lock().lines() {
-        let line = match line {
-            Ok(l) => l,
-            Err(_) => break,
-        };
+    while let Ok(line) = stdin_rx.recv() {
         let tokens: Vec<&str> = line.split_whitespace().collect();
         if tokens.is_empty() { continue; }
 
         match tokens[0] {
             "uci" => {
                 println!("id name Aether v2.2.0");
-                println!("id author Aether");
+                println!("id author Aether Team");
                 println!("option name Hash type spin default 64 min 1 max 2048");
-                println!("option name Threads type spin default 4 min 1 max 128");
+                println!("option name Threads type spin default {} min 1 max 64", default_threads);
                 println!("option name BookFile type string default <empty>");
                 println!("uciok");
             }
             "setoption" => {
                 if let Some(name_idx) = tokens.iter().position(|&x| x == "name") {
                     if let Some(val_idx) = tokens.iter().position(|&x| x == "value") {
-                        if tokens.get(name_idx + 1) == Some(&"Hash") {
+                        let opt_name = tokens[name_idx + 1];
+                        if opt_name == "Hash" {
                             if let Ok(mb) = tokens.get(val_idx + 1).unwrap_or(&"64").parse::<usize>() {
-                                for w in &workers {
-                                    let _ = w.tx.send(WorkerMessage::SetHash(mb));
-                                }
+                                pool.set_hash(mb);
                             }
-                        } else if tokens.get(name_idx + 1) == Some(&"BookFile") {
+                        } else if opt_name == "Threads" {
+                            if let Ok(count) = tokens.get(val_idx + 1).unwrap_or(&"4").parse::<usize>() {
+                                pool.resize(count);
+                            }
+                        } else if opt_name == "BookFile" {
                             let book_path = tokens[val_idx + 1..].join(" ");
                             if let Ok(bytes) = std::fs::read(&book_path) {
-                                for w in &workers {
-                                    let _ = w.tx.send(WorkerMessage::LoadBook(bytes.clone()));
-                                }
+                                pool.load_book(bytes);
                             }
                         }
                     }
                 }
             }
-            "isready" => println!("readyok"),
+            "isready" => {
+                println!("readyok");
+            }
             "ucinewgame" => {
+                GLOBAL_STOP.store(true, Ordering::Relaxed);
+                while SEARCH_RUNNING.load(Ordering::Relaxed) {
+                    thread::sleep(std::time::Duration::from_millis(2));
+                }
                 position_history.clear();
                 position_fen = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1".to_string();
             }
@@ -186,6 +325,14 @@ fn main() {
                 position_fen = board.to_string();
             }
             "go" => {
+                // If previous search is running, stop it first:
+                if SEARCH_RUNNING.load(Ordering::Relaxed) {
+                    GLOBAL_STOP.store(true, Ordering::Relaxed);
+                    while SEARCH_RUNNING.load(Ordering::Relaxed) {
+                        thread::sleep(std::time::Duration::from_millis(2));
+                    }
+                }
+
                 let mut wtime: f64 = 0.0;
                 let mut btime: f64 = 0.0;
                 let mut winc: f64 = 0.0;
@@ -193,6 +340,7 @@ fn main() {
                 let mut movetime: f64 = 0.0;
                 let mut depth_limit: u32 = 0;
                 let mut movestogo: u32 = 30;
+                let mut infinite = false;
 
                 let mut i = 1;
                 while i < tokens.len() {
@@ -204,6 +352,7 @@ fn main() {
                         "movetime"  => { i += 1; movetime  = tokens.get(i).and_then(|v| v.parse().ok()).unwrap_or(0.0); }
                         "depth"     => { i += 1; depth_limit = tokens.get(i).and_then(|v| v.parse().ok()).unwrap_or(0); }
                         "movestogo" => { i += 1; movestogo = tokens.get(i).and_then(|v| v.parse().ok()).unwrap_or(30); }
+                        "infinite"  => { infinite = true; }
                         _ => {}
                     }
                     i += 1;
@@ -213,127 +362,60 @@ fn main() {
                 let (my_time, my_inc) = if is_white { (wtime, winc) } else { (btime, binc) };
                 let opp_time = if is_white { btime } else { wtime };
 
-                // If depth is specified (e.g. GUI analysis) but no clock time given, provide a healthy movetime
-                if depth_limit > 0 && movetime == 0.0 && my_time == 0.0 {
-                    movetime = (depth_limit as f64 * 150.0).max(500.0);
-                }
-
-                let history_str = position_history.join("|");
-                let active_threads = workers.len();
-
-                // Dispatch search tasks to all persistent workers
-                for split_id in 0..active_threads {
-                    let task = SearchTask {
-                        fen: position_fen.clone(),
-                        movetime,
-                        my_time,
-                        my_inc,
-                        opp_time,
-                        movestogo: movestogo as i32,
-                        history_str: history_str.clone(),
-                        split_id: split_id as u8,
-                        split_count: active_threads as u8,
+                let (optimum_time_ms, maximum_time_ms, max_depth) = if infinite {
+                    (1e9, 1e9, 64u8)
+                } else if movetime > 0.0 {
+                    (movetime * 0.95, movetime, if depth_limit > 0 { depth_limit as u8 } else { 64u8 })
+                } else if my_time > 0.0 {
+                    let piece_count = position_fen.split_whitespace().next().unwrap_or("").chars().filter(|c| c.is_alphabetic()).count() as u32;
+                    let clock = engine_wasm::timeman::ClockInfo {
+                        remaining_ms: my_time,
+                        increment_ms: my_inc,
+                        opponent_remaining_ms: opp_time,
+                        moves_to_go: if movestogo > 0 { Some(movestogo) } else { None },
+                        move_overhead_ms: 30.0,
+                        piece_count,
                     };
-                    let _ = workers[split_id].tx.send(WorkerMessage::Search(task));
-                }
-
-                // Collect results from persistent workers
-                let mut results: Vec<(u8, String, i32, i32, i64)> = Vec::with_capacity(active_threads);
-                for _ in 0..active_threads {
-                    if let Ok((id, json)) = result_rx.recv() {
-                        let depth = extract_json_i32(&json, "depth");
-                        let score = extract_json_i32(&json, "score");
-                        let nodes = extract_json_i64(&json, "nodes");
-                        results.push((id, json, depth, score, nodes));
-                    }
-                }
-
-                // Robust multi-thread aggregation:
-                let max_depth = results.iter().map(|r| r.2).max().unwrap_or(0);
-                let min_qualified_depth = max_depth.saturating_sub(1);
-                let mut qualified: Vec<&(u8, String, i32, i32, i64)> = results.iter()
-                    .filter(|r| r.2 >= min_qualified_depth)
-                    .collect();
-
-                qualified.sort_by(|a, b| {
-                    b.2.cmp(&a.2)
-                        .then_with(|| b.3.cmp(&a.3))
-                        .then_with(|| b.4.cmp(&a.4))
-                        .then_with(|| a.0.cmp(&b.0))
-                });
-
-                let best_entry = qualified.first().copied().or_else(|| results.first());
-                let json_result = best_entry.map(|r| r.1.clone()).unwrap_or_default();
-
-                let parsed_score: i32 = extract_json_i32(&json_result, "score");
-                let parsed_depth: i32 = extract_json_i32(&json_result, "depth");
-                let parsed_nodes: i64 = results.iter().map(|r| r.4).sum(); // Total nodes across all workers
-                let best_move = extract_json_str(&json_result, "bestMove");
-
-                if !best_move.is_empty() && best_move != "null" {
-                    println!("info depth {} score cp {} nodes {} pv {}", parsed_depth, parsed_score, parsed_nodes, best_move);
-                    println!("bestmove {}", best_move);
+                    let budget = engine_wasm::timeman::allocate(&clock);
+                    (budget.optimum_ms, budget.maximum_ms, if depth_limit > 0 { depth_limit as u8 } else { 64u8 })
+                } else if depth_limit > 0 {
+                    (1e9, 1e9, depth_limit as u8)
                 } else {
-                    if let Ok(board) = chess::Board::from_str(&position_fen) {
-                        let legal: Vec<chess::ChessMove> = chess::MoveGen::new_legal(&board).collect();
-                        if let Some(m) = legal.first() {
-                            println!("bestmove {}", m);
-                        } else {
-                            println!("bestmove 0000");
-                        }
-                    } else {
-                        println!("bestmove 0000");
-                    }
-                }
+                    (1000.0, 1200.0, 64u8)
+                };
+
+                GLOBAL_STOP.store(false, Ordering::Relaxed);
+                GLOBAL_NODES.store(0, Ordering::Relaxed);
+                SEARCH_RUNNING.store(true, Ordering::Relaxed);
+
+                let params = SearchParams {
+                    fen: position_fen.clone(),
+                    optimum_time_ms,
+                    maximum_time_ms,
+                    max_depth,
+                    split_count: pool.len() as u8,
+                    history_str: position_history.join("|"),
+                };
+
+                pool.dispatch_search(params);
+            }
+            "stop" => {
+                GLOBAL_STOP.store(true, Ordering::Relaxed);
+            }
+            "bench" => {
+                let depth = tokens.get(1).and_then(|d| d.parse().ok()).unwrap_or(12);
+                run_bench(&nnue_bytes, depth);
             }
             "quit" => {
-                for w in &workers {
-                    let _ = w.tx.send(WorkerMessage::Terminate);
-                }
+                GLOBAL_STOP.store(true, Ordering::Relaxed);
+                pool.terminate();
                 break;
             }
             _ => {}
         }
     }
-
-    for w in workers {
-        let _ = w.handle.join();
-    }
 }
 
 fn normalize_fen(fen: &str) -> String {
     fen.split_whitespace().take(4).collect::<Vec<_>>().join(" ")
-}
-
-fn extract_json_i32(json: &str, key: &str) -> i32 {
-    let needle = format!("\"{}\":", key);
-    if let Some(idx) = json.find(&needle) {
-        let rest = &json[idx + needle.len()..];
-        let end = rest.find([',', '}', ']']).unwrap_or(rest.len());
-        rest[..end].trim().parse().unwrap_or(0)
-    } else {
-        0
-    }
-}
-
-fn extract_json_i64(json: &str, key: &str) -> i64 {
-    let needle = format!("\"{}\":", key);
-    if let Some(idx) = json.find(&needle) {
-        let rest = &json[idx + needle.len()..];
-        let end = rest.find([',', '}', ']']).unwrap_or(rest.len());
-        rest[..end].trim().parse().unwrap_or(0)
-    } else {
-        0
-    }
-}
-
-fn extract_json_str(json: &str, key: &str) -> String {
-    let needle = format!("\"{}\":\"", key);
-    if let Some(idx) = json.find(&needle) {
-        let rest = &json[idx + needle.len()..];
-        if let Some(end) = rest.find('"') {
-            return rest[..end].to_string();
-        }
-    }
-    String::new()
 }

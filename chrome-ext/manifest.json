@@ -67,7 +67,6 @@
     "web_accessible_resources": [
         {
             "resources": [
-                "engine_wasm_bg.wasm",
                 "pkg/*",
                 "net.nnue",
                 "icon.png",

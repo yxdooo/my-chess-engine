@@ -27,22 +27,6 @@ let currentSendResponse = null;
 /** @type {number} Current transposition table size in MB. */
 let activeHashSize = 128;
 
-/** @type {WebAssembly.Memory|null} Shared WASM memory instance across all workers */
-let sharedWasmMemory = null;
-try {
-    if (typeof WebAssembly !== "undefined" && typeof SharedArrayBuffer !== "undefined") {
-        sharedWasmMemory = new WebAssembly.Memory({
-            initial: 512,   // 32 MB
-            maximum: 16384, // 1 GB
-            shared: true,
-        });
-        log.info('Pool', 'Shared WebAssembly.Memory created successfully (True Shared Memory SMP)');
-    }
-} catch (e) {
-    log.warn('Pool', 'Shared WebAssembly.Memory unavailable, falling back to per-worker memory', e);
-    sharedWasmMemory = null;
-}
-
 let abortFlag = null;
 let currentSearchId = 0;
 
@@ -135,31 +119,28 @@ function initWorkers(workerCount) {
     for (let i = initialLength; i < workerCount; i++) {
         try {
             const worker = new Worker("worker.js", { type: "module" });
-            const workerIndex = i;
-            worker.postMessage({ type: "INIT", memory: sharedWasmMemory });
+            worker.postMessage({ type: "INIT" });
 
             worker.onmessage = (e) => {
                 if (e.data.type === "READY") {
-                    if (sharedWasmMemory) {
-                        // True Shared Memory SMP: Worker 0 initializes the global shared TT once
-                        if (workerIndex === 0) {
-                            worker.postMessage({
-                                type: "SET_HASH_SIZE",
-                                size: activeHashSize,
-                            });
-                        }
-                    } else {
-                        // Fallback: Partition hash across isolated workers
-                        worker.postMessage({
-                            type: "SET_HASH_SIZE",
-                            size: Math.max(1, Math.floor(activeHashSize / currentWorkerCount)),
-                        });
-                    }
+                    worker.postMessage({
+                        type: "SET_HASH_SIZE",
+                        size: Math.max(1, Math.floor(activeHashSize / currentWorkerCount)),
+                    });
                     workersReady++;
                     log.info('Pool', `Worker #${workersReady}/${currentWorkerCount} ready`);
                     if (messageQueue && workersReady >= Math.min(MAX_WORKERS, Math.max(1, messageQueue.activeWorkerCount || 1), workers.length)) {
                         log.info('Pool', 'All workers ready — starting queued search');
                         processSearch(messageQueue, currentSearchId, abortFlag);
+                    }
+                } else if (e.data.type === "INIT_FAILED") {
+                    log.error('Pool', `Worker #${i} initialization failed:`, e.data.error);
+                    currentWorkerCount--;
+                    if (workersReady >= currentWorkerCount && messageQueue && currentWorkerCount > 0) {
+                        processSearch(messageQueue, currentSearchId, abortFlag);
+                    } else if (currentWorkerCount === 0 && currentSendResponse) {
+                        currentSendResponse({ bestMove: null });
+                        currentSendResponse = null;
                     }
                 }
             };
@@ -169,6 +150,9 @@ function initWorkers(workerCount) {
                 currentWorkerCount--;
                 if (workersReady >= currentWorkerCount && messageQueue && currentWorkerCount > 0) {
                     processSearch(messageQueue, currentSearchId, abortFlag);
+                } else if (currentWorkerCount === 0 && currentSendResponse) {
+                    currentSendResponse({ bestMove: null });
+                    currentSendResponse = null;
                 }
             };
 
@@ -347,30 +331,26 @@ function startEngineSearch(message, sendResponse) {
     if (message.hashSize && message.hashSize !== activeHashSize) {
         activeHashSize = message.hashSize;
         if (workers.length > 0) {
-            if (sharedWasmMemory) {
-                workers[0].postMessage({ type: "SET_HASH_SIZE", size: activeHashSize });
-            } else {
-                const perWorkerSize = Math.max(1, Math.floor(activeHashSize / workers.length));
-                for (const w of workers) {
-                    w.postMessage({ type: "SET_HASH_SIZE", size: perWorkerSize });
-                }
+            const perWorkerSize = Math.max(1, Math.floor(activeHashSize / workers.length));
+            for (const w of workers) {
+                w.postMessage({ type: "SET_HASH_SIZE", size: perWorkerSize });
             }
         }
     }
 
     const targetWorkers = Math.min(MAX_WORKERS, Math.max(1, message.activeWorkerCount || 4));
     
-    // Allocate new abort flag using SharedArrayBuffer
-    try {
-        const sab = new SharedArrayBuffer(1);
-        abortFlag = new Uint8Array(sab);
-        log.debug('SAB', 'SharedArrayBuffer abort flag allocated');
-    } catch (e) {
-        log.warn('SAB', 'SharedArrayBuffer not available — recreating workers to abort', e);
+    // Allocate new abort flag if SharedArrayBuffer is supported
+    if (typeof SharedArrayBuffer !== "undefined") {
+        try {
+            const sab = new SharedArrayBuffer(1);
+            abortFlag = new Uint8Array(sab);
+            log.debug('SAB', 'SharedArrayBuffer abort flag allocated');
+        } catch (_) {
+            abortFlag = null;
+        }
+    } else {
         abortFlag = null;
-        for (const worker of workers) worker.terminate();
-        workers = [];
-        workersReady = 0;
     }
 
     if (targetWorkers > workers.length) {

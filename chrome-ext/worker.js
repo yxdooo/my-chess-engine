@@ -13,20 +13,17 @@ let engine = null;
 let workerId = Math.random().toString(36).slice(2, 6); // e.g. "a3f7"
 
 onmessage = async (e) => {
-    const { type, size, fen, my_ms, opp_ms, inc_ms, movesToGo, elo, splitId, splitCount, history, searchId, abortFlag, memory } =
+    const { type, size, fen, my_ms, opp_ms, inc_ms, movesToGo, elo, splitId, splitCount, history, searchId, abortFlag } =
         e.data;
 
     if (type === "INIT") {
         log.info('Init', `Worker[${workerId}] starting WASM init...`);
         try {
             log.time('WasmInit');
-            const initOptions = {
-                module_or_path: new URL('./pkg/engine_wasm_bg.wasm', import.meta.url)
-            };
-            if (memory) {
-                initOptions.memory = memory;
-            }
-            await init(initOptions);
+            const wasmUrl = new URL('./pkg/engine_wasm_bg.wasm', import.meta.url);
+            const wasmResponse = await fetch(wasmUrl);
+            const wasmBytes = await wasmResponse.arrayBuffer();
+            await init({ module_or_path: wasmBytes });
             engine = new ChessEngine();
             log.timeEnd('WasmInit');
             
@@ -50,6 +47,7 @@ onmessage = async (e) => {
             postMessage({ type: "READY" });
         } catch (err) {
             log.error('Init', `Worker[${workerId}] WASM initialization FAILED`, err);
+            postMessage({ type: "INIT_FAILED", workerId, error: String(err) });
         }
         return;
     }

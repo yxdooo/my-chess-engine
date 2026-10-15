@@ -103,14 +103,19 @@ async function setupOffscreenDocument(path) {
     creatingOffscreen = (async () => {
         if (await hasDocument()) return;
         
-        await chrome.offscreen.createDocument({
-            url: path,
-            reasons: [(chrome.offscreen.Reason && chrome.offscreen.Reason.WORKERS) || "DOM_PARSER"],
-            justification: "Running SMP Web Workers for chess calculation",
-        });
-        
-        // Wait for the document to spawn and register its listeners.
-        await new Promise((r) => setTimeout(r, 150));
+        try {
+            await chrome.offscreen.createDocument({
+                url: path,
+                reasons: [(chrome.offscreen.Reason && chrome.offscreen.Reason.WORKERS) || "DOM_PARSER"],
+                justification: "Running SMP Web Workers for chess calculation",
+            });
+            // Wait for the document to spawn and register its listeners.
+            await new Promise((r) => setTimeout(r, 150));
+        } catch (e) {
+            if (!e?.message?.includes("Only a single offscreen document")) {
+                throw e;
+            }
+        }
     })();
 
     try {
@@ -141,8 +146,21 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
  * @returns {Promise<boolean>}
  */
 async function hasDocument() {
-    const matchedClients = await clients.matchAll();
-    return matchedClients.some((c) => c.url.includes("offscreen.html"));
+    if (chrome.runtime && 'getContexts' in chrome.runtime) {
+        try {
+            const contexts = await chrome.runtime.getContexts({
+                contextTypes: ['OFFSCREEN_DOCUMENT'],
+                documentUrls: [chrome.runtime.getURL('offscreen.html')]
+            });
+            return Boolean(contexts && contexts.length > 0);
+        } catch (_) {}
+    }
+    try {
+        const matchedClients = await clients.matchAll();
+        return matchedClients.some((c) => c.url.includes("offscreen.html"));
+    } catch (_) {
+        return false;
+    }
 }
 
 /**
@@ -222,41 +240,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                         return;
                     }
 
-                    if (message.isMyTurn && message.my_ms > 15000) {
-                        fetchWithTimeout(
-                            "https://explorer.lichess.ovh/masters?fen=" +
-                                encodeURIComponent(message.fen),
-                            {},
-                            1000
-                        )
-                            .then((r) => {
-                                if (!r.ok) throw new Error("Explorer API failed");
-                                if (!r.headers.get("content-type")?.includes("application/json")) {
-                                    throw new Error("Invalid content type");
-                                }
-                                return r.json();
-                            })
-                            .then((data) => {
-                                if (
-                                    data.moves &&
-                                    data.moves.length > 0 &&
-                                    elo >= 1600
-                                ) {
-                                    log.info('Background', `Played opening master book move: ${data.moves[0].uci}`);
-                                    const stats = { bestMove: data.moves[0].uci, pv: [data.moves[0].uci], score: 0, depth: 1, nodes: 1, timeMs: 50 };
-                                    chrome.storage.local.set({ engineStats: stats });
-                                    sendResponse(stats);
-                                } else {
-                                    callOffscreenEngine(message.fen, my_ms, opp_ms, inc_ms, movesToGo, elo, workerCount, message.isMyTurn, message.history, hashSize, sendResponse);
-                                }
-                            })
-                            .catch((err) => {
-                                log.warn('Background', 'Explorer API failed, falling back to engine', err);
-                                callOffscreenEngine(message.fen, my_ms, opp_ms, inc_ms, movesToGo, elo, workerCount, message.isMyTurn, message.history, hashSize, sendResponse);
-                            });
-                    } else {
-                        callOffscreenEngine(message.fen, my_ms, opp_ms, inc_ms, movesToGo, elo, workerCount, message.isMyTurn, message.history, hashSize, sendResponse);
-                    }
+                    // Directly dispatch to offscreen SMP engine — utilizes embedded Polyglot master book and SF14 NNUE
+                    callOffscreenEngine(message.fen, my_ms, opp_ms, inc_ms, movesToGo, elo, workerCount, message.isMyTurn, message.history, hashSize, sendResponse);
                 };
 
                 if (pieceCount <= 7) {
@@ -420,12 +405,7 @@ function runFallbackWorker(fen, my_ms, opp_ms, inc_ms, movesToGo, elo, history, 
 
     if (!fallbackWorker) {
         fallbackWorker = new Worker("worker.js", { type: "module" });
-        if (sabSupported) {
-            const fallbackMemory = new WebAssembly.Memory({ initial: 2048, maximum: 16384, shared: true });
-            fallbackWorker.postMessage({ type: "INIT", memory: fallbackMemory });
-        } else {
-            fallbackWorker.postMessage({ type: "INIT" });
-        }
+        fallbackWorker.postMessage({ type: "INIT" });
         fallbackWorkerReady = false;
     }
 
@@ -501,7 +481,7 @@ function handleSearchResponse(response, isMyTurn, sendResponse, my_ms, opp_ms, i
                     score: response.score,
                     depth: response.depth,
                     nodes: response.nodes,
-                    timeMs: response.my_ms, opp_ms, inc_ms, movesToGo,
+                    timeMs: response.timeMs !== undefined ? response.timeMs : 0,
                 },
             });
         }

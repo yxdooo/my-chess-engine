@@ -70,18 +70,80 @@ let flipBoard = false;
 /** @type {number|null} Debounce timer ID for MutationObserver. */
 let debounceTimer = null;
 
+/** @type {number|null} Polling interval ID. */
+let pollInterval = null;
+
+/** @type {boolean} Flag indicating if extension context has been invalidated (e.g. extension reload). */
+let isOrphaned = false;
+
+function isContextValid() {
+    if (isOrphaned) return false;
+    try {
+        if (typeof chrome === "undefined" || !chrome.runtime || !chrome.runtime.id) {
+            cleanupOrphanedScript();
+            return false;
+        }
+        return true;
+    } catch (_) {
+        cleanupOrphanedScript();
+        return false;
+    }
+}
+
+function cleanupOrphanedScript() {
+    if (isOrphaned) return;
+    isOrphaned = true;
+    if (activeObserver) {
+        try { activeObserver.disconnect(); } catch (_) {}
+        activeObserver = null;
+    }
+    if (pollInterval) {
+        clearInterval(pollInterval);
+        pollInterval = null;
+    }
+    if (debounceTimer) {
+        clearTimeout(debounceTimer);
+        debounceTimer = null;
+    }
+}
+
+function safeStorageSet(data) {
+    if (!isContextValid()) return;
+    try {
+        chrome.storage.local.set(data, () => {
+            if (chrome.runtime?.lastError) {
+                const msg = chrome.runtime.lastError.message || "";
+                if (msg.includes("context invalidated")) {
+                    cleanupOrphanedScript();
+                }
+            }
+        });
+    } catch (e) {
+        if (e?.message?.includes("context invalidated") || !isContextValid()) {
+            cleanupOrphanedScript();
+        }
+    }
+}
+
 /** @type {string} Cached engine mode. */
 let currentEngineMode = "autoplay";
 
-chrome.storage.local.get("engineMode", (res) => {
-    if (res.engineMode) currentEngineMode = res.engineMode;
-});
+try {
+    if (isContextValid()) {
+        chrome.storage.local.get("engineMode", (res) => {
+            if (!isContextValid()) return;
+            if (chrome.runtime?.lastError) return;
+            if (res && res.engineMode) currentEngineMode = res.engineMode;
+        });
 
-chrome.storage.onChanged.addListener((changes, area) => {
-    if (area === "local" && changes.engineMode) {
-        currentEngineMode = changes.engineMode.newValue;
+        chrome.storage.onChanged.addListener((changes, area) => {
+            if (!isContextValid()) return;
+            if (area === "local" && changes.engineMode) {
+                currentEngineMode = changes.engineMode.newValue;
+            }
+        });
     }
-});
+} catch (_) {}
 
 /**
  * Normalizes a FEN string to its first 4 fields
@@ -231,6 +293,7 @@ function simulateDrag(fromX, fromY, toX, toY) {
             const toEl = document.elementFromPoint(toX, toY) || fromEl;
             toEl.dispatchEvent(new PointerEvent("pointerup", evtInitUp));
             toEl.dispatchEvent(new MouseEvent("mouseup", evtInitUp));
+            toEl.dispatchEvent(new MouseEvent("click", evtInitUp));
         }, 15);
     }, 15);
 }
@@ -251,6 +314,9 @@ function showPromotionPicker(engineChar) {
 }
 
 /**
+ * Selects a promotion piece in the promotion modal.
+ * @param {string} promotionChar - One of 'q', 'r', 'b', 'n'
+ */
 function selectPromotion(promotionChar) {
     if (!promotionChar) promotionChar = 'q';
     
@@ -648,6 +714,7 @@ function renderArrows(pvLines, isMyTurn) {
  * @param {string|null} networkFen - FEN from the WebSocket interceptor, or null to parse from DOM.
  */
 function processPosition(networkFen = null) {
+    if (!isContextValid()) return;
     try {
         const fen = networkFen || parseBoard();
         if (!fen) {
@@ -708,7 +775,7 @@ function processPosition(networkFen = null) {
             renderArrows([cached.pv], isMyTurn);
             
             // Update popup stats with cached ponder result
-            chrome.storage.local.set({
+            safeStorageSet({
                 engineStats: {
                     score: cached.score,
                     depth: cached.depth,
@@ -742,58 +809,78 @@ function processPosition(networkFen = null) {
         lastMyTime = clocks.my_ms;
     }
 
-    chrome.runtime.sendMessage(
-        {
-            type: "NEW_POSITION",
-            fen,
-            timeLeft: timeLeft,
-            my_ms: clocks.my_ms || 180000.0,
-            opp_ms: clocks.opp_ms || 180000.0,
-            inc_ms: inferredIncMs,
-            isMyTurn,
-            history: historyStr,
-        },
+    if (!isContextValid()) return;
 
-        (response) => {
-            if (chrome.runtime.lastError) {
-                log.error('Background', 'Messaging error', chrome.runtime.lastError);
-                return;
-            }
-            if (!response) return;
-            
-            // Abort if the board has already changed (e.g. late ponder hit already played)
-            if (currentFEN !== fen) {
-                log.info('Engine', 'Ignoring stale search response because board has changed');
-                return;
-            }
+    try {
+        chrome.runtime.sendMessage(
+            {
+                type: "NEW_POSITION",
+                fen,
+                timeLeft: timeLeft,
+                my_ms: clocks.my_ms || 180000.0,
+                opp_ms: clocks.opp_ms || 180000.0,
+                inc_ms: inferredIncMs,
+                isMyTurn,
+                history: historyStr,
+            },
 
-            // Cache ponder result for our next turn.
-            if (response.cachedForFen) {
-                const norm = normalizeFen(response.cachedForFen);
-                ponderCache[norm] = response;
-            }
+            (response) => {
+                if (!isContextValid()) return;
+                if (chrome.runtime.lastError) {
+                    const msg = chrome.runtime.lastError.message || "";
+                    if (msg.includes("context invalidated") || msg.includes("Extension context invalidated")) {
+                        cleanupOrphanedScript();
+                        return;
+                    }
+                    log.error('Background', 'Messaging error', chrome.runtime.lastError);
+                    return;
+                }
+                if (!response) return;
+                
+                // Abort if the board has already changed (e.g. late ponder hit already played)
+                if (currentFEN !== fen) {
+                    log.info('Engine', 'Ignoring stale search response because board has changed');
+                    return;
+                }
 
-            // Play the move if it's our turn and in autoplay mode.
-            if (isMyTurn && response.bestMove && currentEngineMode === "autoplay") {
-                playMove(response.bestMove);
-            }
+                // Cache ponder result for our next turn.
+                if (response.cachedForFen) {
+                    const norm = normalizeFen(response.cachedForFen);
+                    ponderCache[norm] = response;
+                }
 
-            // Collect PV lines to render as arrows.
-            let pvLines = [];
-            if (!isMyTurn && response.multiPv && response.multiPv.length > 0) {
-                pvLines = response.multiPv
-                    .map((m) => m.pv)
-                    .filter((p) => p && p.length > 0);
-            } else if (isMyTurn && response.pv) {
-                pvLines = [response.pv];
-            }
+                // Play the move if it's our turn and in autoplay mode.
+                if (isMyTurn && response.bestMove && currentEngineMode === "autoplay") {
+                    playMove(response.bestMove);
+                }
 
-            if (pvLines.length > 0) {
-                renderArrows(pvLines, isMyTurn);
+                // Collect PV lines to render as arrows.
+                let pvLines = [];
+                if (!isMyTurn && response.multiPv && response.multiPv.length > 0) {
+                    pvLines = response.multiPv
+                        .map((m) => m.pv)
+                        .filter((p) => p && p.length > 0);
+                } else if (isMyTurn && response.pv) {
+                    pvLines = [response.pv];
+                }
+
+                if (pvLines.length > 0) {
+                    renderArrows(pvLines, isMyTurn);
+                }
             }
+        );
+    } catch (sendErr) {
+        if (sendErr?.message?.includes("context invalidated") || !isContextValid()) {
+            cleanupOrphanedScript();
+            return;
         }
-    );
+        log.error('Board', 'Messaging dispatch error', sendErr);
+    }
     } catch (e) {
+        if (e?.message?.includes("context invalidated") || !isContextValid()) {
+            cleanupOrphanedScript();
+            return;
+        }
         log.error('Board', 'Error during processPosition', e);
     }
 }
@@ -808,6 +895,8 @@ let isProcessing = false;
 let lastProcessTime = 0;
 
 function setupObserver() {
+    if (!isContextValid()) return;
+
     // For online games, chess.com uses #board-layout-main or .board-layout-main
     const board = document.querySelector(
         "wc-chess-board, .board, #board-single, #board-layout-main, .board-layout-main, .board-board, [data-cy='chess-board']"
@@ -829,6 +918,7 @@ function setupObserver() {
     if (activeObserver) activeObserver.disconnect();
     
     activeObserver = new MutationObserver((mutations) => {
+        if (!isContextValid()) return;
         // Optimization: Ignore pure style/class mutations (piece animations) if structural changes are rare
         // but since pieces can move via style transform, we must be careful.
         // We use a leading-edge + trailing-edge approach to prevent freeze.
@@ -837,6 +927,7 @@ function setupObserver() {
              isProcessing = true;
              lastProcessTime = now;
              setTimeout(() => {
+                 if (!isContextValid()) return;
                  processPosition();
                  isProcessing = false;
              }, 0);
@@ -844,10 +935,12 @@ function setupObserver() {
 
         clearTimeout(debounceTimer);
         debounceTimer = setTimeout(() => {
+             if (!isContextValid()) return;
              if (Date.now() - lastProcessTime > 100 && !isProcessing) {
                  isProcessing = true;
                  lastProcessTime = Date.now();
                  setTimeout(() => {
+                     if (!isContextValid()) return;
                      processPosition();
                      isProcessing = false;
                  }, 0);
@@ -869,16 +962,20 @@ function setupObserver() {
 
 setupObserver();
 // Periodically re-check and attach to board if navigation occurred or SPA page updated
-setInterval(() => {
+pollInterval = setInterval(() => {
+    if (!isContextValid()) return;
     setupObserver();
     processPosition();
 }, 2500);
 
 // Initial analysis after the board has had time to render.
-setTimeout(() => processPosition(), 1000);
+setTimeout(() => {
+    if (isContextValid()) processPosition();
+}, 1000);
 
 // Force re-evaluation on demand (triggered by popup when engine is started).
 chrome.runtime.onMessage.addListener((msg) => {
+    if (!isContextValid()) return;
     if (msg.type === "FORCE_EVALUATE") {
         currentFEN = "";
         processPosition();
@@ -890,6 +987,7 @@ chrome.runtime.onMessage.addListener((msg) => {
 // ---------------------------------------------------------------------------
 
 window.addEventListener("message", (event) => {
+    if (!isContextValid()) return;
     if (
         event.source !== window ||
         !event.data ||
@@ -916,6 +1014,7 @@ window.addEventListener("message", (event) => {
 // Pondering Background Listener
 // ---------------------------------------------------------------------------
 chrome.runtime.onMessage.addListener((msg) => {
+    if (!isContextValid()) return;
     if (msg.type === "PONDER_RESULT") {
         const response = msg.data;
         if (response && response.cachedForFen) {
@@ -947,7 +1046,7 @@ chrome.runtime.onMessage.addListener((msg) => {
                 }
                 if (stm === myColor) {
                     log.info('Engine', `Late Ponder hit! Instantly displaying move: ${response.bestMove}`);
-                    chrome.storage.local.set({
+                    safeStorageSet({
                         engineStats: {
                             score: response.score,
                             depth: response.depth,
