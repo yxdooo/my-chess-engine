@@ -1,4 +1,5 @@
 use chess::{Board, Color, Piece};
+use std::sync::OnceLock;
 
 pub const MAX_HIDDEN_SIZE: usize = 1024;
 pub const HALFKP_HIDDEN_SIZE: usize = 256;
@@ -23,6 +24,8 @@ pub struct Network {
     pub fc1_biases: Vec<i32>,
     pub fc2_weights: Vec<i8>,
     pub fc2_biases: Vec<i32>,
+    pub policy_weights: Vec<i8>,
+    pub policy_biases: Vec<i32>,
 }
 
 impl Network {
@@ -39,6 +42,8 @@ impl Network {
             fc1_biases: vec![0; 32],
             fc2_weights: vec![0; 32 * 1],
             fc2_biases: vec![0; 1],
+            policy_weights: vec![0; 64 * 32],
+            policy_biases: vec![0; 64],
         }
     }
 
@@ -55,7 +60,33 @@ impl Network {
             fc1_biases: vec![0; 32],
             fc2_weights: vec![0; 32 * 1],
             fc2_biases: vec![0; 1],
+            policy_weights: vec![0; 64 * 32],
+            policy_biases: vec![0; 64],
         }
+    }
+
+    pub fn evaluate_policy(&self, acc: &Accumulator, stm: Color) -> [i16; 64] {
+        let mut policy_scores = [0i16; 64];
+        let hs = self.hidden_size;
+        let us = if stm == Color::White { &acc.white } else { &acc.black };
+
+        if !self.policy_weights.is_empty() && self.policy_weights.len() >= 64 * 32 {
+            for sq in 0..64 {
+                let mut sum = if sq < self.policy_biases.len() { self.policy_biases[sq] } else { 0 };
+                let w_row = sq * 32;
+                for j in 0..32 {
+                    let act = us[j].clamp(0, 127) as i32;
+                    sum += act * (self.policy_weights[w_row + j] as i32);
+                }
+                policy_scores[sq] = (sum / 64).clamp(-30000, 30000) as i16;
+            }
+        } else {
+            for sq in 0..64 {
+                let act = (us[sq % hs].max(0) as i32).min(255);
+                policy_scores[sq] = (act / 8) as i16;
+            }
+        }
+        policy_scores
     }
 
     pub fn new() -> Self {
@@ -164,215 +195,469 @@ pub fn make_halfkav2_index(perspective: Color, sq: usize, pc_offset: usize, ksq:
 }
 
 // ---------------------------------------------------------------------------
-// Vectorized Feature Accumulation
+// Hardware-Specific Micro-Kernels Dispatch
 // ---------------------------------------------------------------------------
+
+#[derive(Clone, Copy)]
+pub struct MicroKernels {
+    pub add_feature: unsafe fn(&mut [i16; MAX_HIDDEN_SIZE], &[i16], usize, usize),
+    pub sub_feature: unsafe fn(&mut [i16; MAX_HIDDEN_SIZE], &[i16], usize, usize),
+    pub add_sub_feature: unsafe fn(&mut [i16; MAX_HIDDEN_SIZE], &[i16; MAX_HIDDEN_SIZE], &[i16], usize, usize, usize),
+    pub add_sub_sub_feature: unsafe fn(&mut [i16; MAX_HIDDEN_SIZE], &[i16; MAX_HIDDEN_SIZE], &[i16], usize, usize, usize, usize),
+    pub arch_name: &'static str,
+}
+
+#[allow(dead_code)]
+unsafe fn add_feature_scalar(acc: &mut [i16; MAX_HIDDEN_SIZE], weights: &[i16], feature: usize, hidden_size: usize) {
+    let offset = feature * hidden_size;
+    for i in 0..hidden_size {
+        acc[i] = acc[i].wrapping_add(weights[offset + i]);
+    }
+}
+
+#[allow(dead_code)]
+unsafe fn sub_feature_scalar(acc: &mut [i16; MAX_HIDDEN_SIZE], weights: &[i16], feature: usize, hidden_size: usize) {
+    let offset = feature * hidden_size;
+    for i in 0..hidden_size {
+        acc[i] = acc[i].wrapping_sub(weights[offset + i]);
+    }
+}
+
+#[allow(dead_code)]
+unsafe fn add_sub_feature_scalar(acc: &mut [i16; MAX_HIDDEN_SIZE], prev: &[i16; MAX_HIDDEN_SIZE], weights: &[i16], add_feat: usize, sub_feat: usize, hidden_size: usize) {
+    let add_offset = add_feat * hidden_size;
+    let sub_offset = sub_feat * hidden_size;
+    for i in 0..hidden_size {
+        acc[i] = prev[i].wrapping_add(weights[add_offset + i]).wrapping_sub(weights[sub_offset + i]);
+    }
+}
+
+#[allow(dead_code)]
+unsafe fn add_sub_sub_feature_scalar(acc: &mut [i16; MAX_HIDDEN_SIZE], prev: &[i16; MAX_HIDDEN_SIZE], weights: &[i16], add_feat: usize, sub_feat1: usize, sub_feat2: usize, hidden_size: usize) {
+    let add_offset = add_feat * hidden_size;
+    let sub1_offset = sub_feat1 * hidden_size;
+    let sub2_offset = sub_feat2 * hidden_size;
+    for i in 0..hidden_size {
+        acc[i] = prev[i].wrapping_add(weights[add_offset + i]).wrapping_sub(weights[sub1_offset + i]).wrapping_sub(weights[sub2_offset + i]);
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,bmi2")]
+unsafe fn add_feature_avx2(acc: &mut [i16; MAX_HIDDEN_SIZE], weights: &[i16], feature: usize, hidden_size: usize) {
+    use core::arch::x86_64::*;
+    let offset = feature * hidden_size;
+    let mut acc_ptr = acc.as_mut_ptr() as *mut __m256i;
+    let mut w_ptr = weights.as_ptr().add(offset) as *const __m256i;
+    for _ in 0..(hidden_size / 16) {
+        let a = _mm256_loadu_si256(acc_ptr);
+        let w = _mm256_loadu_si256(w_ptr);
+        _mm256_storeu_si256(acc_ptr, _mm256_add_epi16(a, w));
+        acc_ptr = acc_ptr.add(1);
+        w_ptr = w_ptr.add(1);
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,bmi2")]
+unsafe fn sub_feature_avx2(acc: &mut [i16; MAX_HIDDEN_SIZE], weights: &[i16], feature: usize, hidden_size: usize) {
+    use core::arch::x86_64::*;
+    let offset = feature * hidden_size;
+    let mut acc_ptr = acc.as_mut_ptr() as *mut __m256i;
+    let mut w_ptr = weights.as_ptr().add(offset) as *const __m256i;
+    for _ in 0..(hidden_size / 16) {
+        let a = _mm256_loadu_si256(acc_ptr);
+        let w = _mm256_loadu_si256(w_ptr);
+        _mm256_storeu_si256(acc_ptr, _mm256_sub_epi16(a, w));
+        acc_ptr = acc_ptr.add(1);
+        w_ptr = w_ptr.add(1);
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,bmi2")]
+unsafe fn add_sub_feature_avx2(acc: &mut [i16; MAX_HIDDEN_SIZE], prev: &[i16; MAX_HIDDEN_SIZE], weights: &[i16], add_feat: usize, sub_feat: usize, hidden_size: usize) {
+    use core::arch::x86_64::*;
+    let add_offset = add_feat * hidden_size;
+    let sub_offset = sub_feat * hidden_size;
+    let acc_ptr = acc.as_mut_ptr() as *mut __m256i;
+    let prev_ptr = prev.as_ptr() as *const __m256i;
+    let w_add_ptr = weights.as_ptr().add(add_offset) as *const __m256i;
+    let w_sub_ptr = weights.as_ptr().add(sub_offset) as *const __m256i;
+    let num_chunks = hidden_size / 16;
+    let mut i = 0;
+    while i < num_chunks {
+        let p0 = _mm256_loadu_si256(prev_ptr.add(i));
+        let wa0 = _mm256_loadu_si256(w_add_ptr.add(i));
+        let ws0 = _mm256_loadu_si256(w_sub_ptr.add(i));
+        let res0 = _mm256_sub_epi16(_mm256_add_epi16(p0, wa0), ws0);
+        _mm256_storeu_si256(acc_ptr.add(i), res0);
+
+        if i + 1 < num_chunks {
+            let p1 = _mm256_loadu_si256(prev_ptr.add(i + 1));
+            let wa1 = _mm256_loadu_si256(w_add_ptr.add(i + 1));
+            let ws1 = _mm256_loadu_si256(w_sub_ptr.add(i + 1));
+            let res1 = _mm256_sub_epi16(_mm256_add_epi16(p1, wa1), ws1);
+            _mm256_storeu_si256(acc_ptr.add(i + 1), res1);
+        }
+        i += 2;
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,bmi2")]
+unsafe fn add_sub_sub_feature_avx2(acc: &mut [i16; MAX_HIDDEN_SIZE], prev: &[i16; MAX_HIDDEN_SIZE], weights: &[i16], add_feat: usize, sub_feat1: usize, sub_feat2: usize, hidden_size: usize) {
+    use core::arch::x86_64::*;
+    let add_offset = add_feat * hidden_size;
+    let sub1_offset = sub_feat1 * hidden_size;
+    let sub2_offset = sub_feat2 * hidden_size;
+    let acc_ptr = acc.as_mut_ptr() as *mut __m256i;
+    let prev_ptr = prev.as_ptr() as *const __m256i;
+    let w_add_ptr = weights.as_ptr().add(add_offset) as *const __m256i;
+    let w_sub1_ptr = weights.as_ptr().add(sub1_offset) as *const __m256i;
+    let w_sub2_ptr = weights.as_ptr().add(sub2_offset) as *const __m256i;
+    let num_chunks = hidden_size / 16;
+    let mut i = 0;
+    while i < num_chunks {
+        let p0 = _mm256_loadu_si256(prev_ptr.add(i));
+        let wa0 = _mm256_loadu_si256(w_add_ptr.add(i));
+        let ws10 = _mm256_loadu_si256(w_sub1_ptr.add(i));
+        let ws20 = _mm256_loadu_si256(w_sub2_ptr.add(i));
+        let res0 = _mm256_sub_epi16(_mm256_sub_epi16(_mm256_add_epi16(p0, wa0), ws10), ws20);
+        _mm256_storeu_si256(acc_ptr.add(i), res0);
+
+        if i + 1 < num_chunks {
+            let p1 = _mm256_loadu_si256(prev_ptr.add(i + 1));
+            let wa1 = _mm256_loadu_si256(w_add_ptr.add(i + 1));
+            let ws11 = _mm256_loadu_si256(w_sub1_ptr.add(i + 1));
+            let ws21 = _mm256_loadu_si256(w_sub2_ptr.add(i + 1));
+            let res1 = _mm256_sub_epi16(_mm256_sub_epi16(_mm256_add_epi16(p1, wa1), ws11), ws21);
+            _mm256_storeu_si256(acc_ptr.add(i + 1), res1);
+        }
+        i += 2;
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx512f,avx512bw,avx512dq")]
+unsafe fn add_feature_avx512(acc: &mut [i16; MAX_HIDDEN_SIZE], weights: &[i16], feature: usize, hidden_size: usize) {
+    use core::arch::x86_64::*;
+    let offset = feature * hidden_size;
+    let mut acc_ptr = acc.as_mut_ptr() as *mut __m512i;
+    let mut w_ptr = weights.as_ptr().add(offset) as *const __m512i;
+    for _ in 0..(hidden_size / 32) {
+        let a = _mm512_loadu_si512(acc_ptr as *const _);
+        let w = _mm512_loadu_si512(w_ptr as *const _);
+        _mm512_storeu_si512(acc_ptr as *mut _, _mm512_add_epi16(a, w));
+        acc_ptr = acc_ptr.add(1);
+        w_ptr = w_ptr.add(1);
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx512f,avx512bw,avx512dq")]
+unsafe fn sub_feature_avx512(acc: &mut [i16; MAX_HIDDEN_SIZE], weights: &[i16], feature: usize, hidden_size: usize) {
+    use core::arch::x86_64::*;
+    let offset = feature * hidden_size;
+    let mut acc_ptr = acc.as_mut_ptr() as *mut __m512i;
+    let mut w_ptr = weights.as_ptr().add(offset) as *const __m512i;
+    for _ in 0..(hidden_size / 32) {
+        let a = _mm512_loadu_si512(acc_ptr as *const _);
+        let w = _mm512_loadu_si512(w_ptr as *const _);
+        _mm512_storeu_si512(acc_ptr as *mut _, _mm512_sub_epi16(a, w));
+        acc_ptr = acc_ptr.add(1);
+        w_ptr = w_ptr.add(1);
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx512f,avx512bw,avx512dq")]
+unsafe fn add_sub_feature_avx512(acc: &mut [i16; MAX_HIDDEN_SIZE], prev: &[i16; MAX_HIDDEN_SIZE], weights: &[i16], add_feat: usize, sub_feat: usize, hidden_size: usize) {
+    use core::arch::x86_64::*;
+    let add_offset = add_feat * hidden_size;
+    let sub_offset = sub_feat * hidden_size;
+    let acc_ptr = acc.as_mut_ptr() as *mut __m512i;
+    let prev_ptr = prev.as_ptr() as *const __m512i;
+    let w_add_ptr = weights.as_ptr().add(add_offset) as *const __m512i;
+    let w_sub_ptr = weights.as_ptr().add(sub_offset) as *const __m512i;
+    let num_chunks = hidden_size / 32;
+    for i in 0..num_chunks {
+        let p0 = _mm512_loadu_si512(prev_ptr.add(i) as *const _);
+        let wa0 = _mm512_loadu_si512(w_add_ptr.add(i) as *const _);
+        let ws0 = _mm512_loadu_si512(w_sub_ptr.add(i) as *const _);
+        let res0 = _mm512_sub_epi16(_mm512_add_epi16(p0, wa0), ws0);
+        _mm512_storeu_si512(acc_ptr.add(i) as *mut _, res0);
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx512f,avx512bw,avx512dq")]
+unsafe fn add_sub_sub_feature_avx512(acc: &mut [i16; MAX_HIDDEN_SIZE], prev: &[i16; MAX_HIDDEN_SIZE], weights: &[i16], add_feat: usize, sub_feat1: usize, sub_feat2: usize, hidden_size: usize) {
+    use core::arch::x86_64::*;
+    let add_offset = add_feat * hidden_size;
+    let sub1_offset = sub_feat1 * hidden_size;
+    let sub2_offset = sub_feat2 * hidden_size;
+    let acc_ptr = acc.as_mut_ptr() as *mut __m512i;
+    let prev_ptr = prev.as_ptr() as *const __m512i;
+    let w_add_ptr = weights.as_ptr().add(add_offset) as *const __m512i;
+    let w_sub1_ptr = weights.as_ptr().add(sub1_offset) as *const __m512i;
+    let w_sub2_ptr = weights.as_ptr().add(sub2_offset) as *const __m512i;
+    let num_chunks = hidden_size / 32;
+    for i in 0..num_chunks {
+        let p0 = _mm512_loadu_si512(prev_ptr.add(i) as *const _);
+        let wa0 = _mm512_loadu_si512(w_add_ptr.add(i) as *const _);
+        let ws10 = _mm512_loadu_si512(w_sub1_ptr.add(i) as *const _);
+        let ws20 = _mm512_loadu_si512(w_sub2_ptr.add(i) as *const _);
+        let res0 = _mm512_sub_epi16(_mm512_sub_epi16(_mm512_add_epi16(p0, wa0), ws10), ws20);
+        _mm512_storeu_si512(acc_ptr.add(i) as *mut _, res0);
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "sse4.1")]
+unsafe fn add_feature_sse41(acc: &mut [i16; MAX_HIDDEN_SIZE], weights: &[i16], feature: usize, hidden_size: usize) {
+    use core::arch::x86_64::*;
+    let offset = feature * hidden_size;
+    let mut acc_ptr = acc.as_mut_ptr() as *mut __m128i;
+    let mut w_ptr = weights.as_ptr().add(offset) as *const __m128i;
+    for _ in 0..(hidden_size / 8) {
+        let a = _mm_loadu_si128(acc_ptr);
+        let w = _mm_loadu_si128(w_ptr);
+        _mm_storeu_si128(acc_ptr, _mm_add_epi16(a, w));
+        acc_ptr = acc_ptr.add(1);
+        w_ptr = w_ptr.add(1);
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "sse4.1")]
+unsafe fn sub_feature_sse41(acc: &mut [i16; MAX_HIDDEN_SIZE], weights: &[i16], feature: usize, hidden_size: usize) {
+    use core::arch::x86_64::*;
+    let offset = feature * hidden_size;
+    let mut acc_ptr = acc.as_mut_ptr() as *mut __m128i;
+    let mut w_ptr = weights.as_ptr().add(offset) as *const __m128i;
+    for _ in 0..(hidden_size / 8) {
+        let a = _mm_loadu_si128(acc_ptr);
+        let w = _mm_loadu_si128(w_ptr);
+        _mm_storeu_si128(acc_ptr, _mm_sub_epi16(a, w));
+        acc_ptr = acc_ptr.add(1);
+        w_ptr = w_ptr.add(1);
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "sse4.1")]
+unsafe fn add_sub_feature_sse41(acc: &mut [i16; MAX_HIDDEN_SIZE], prev: &[i16; MAX_HIDDEN_SIZE], weights: &[i16], add_feat: usize, sub_feat: usize, hidden_size: usize) {
+    use core::arch::x86_64::*;
+    let add_offset = add_feat * hidden_size;
+    let sub_offset = sub_feat * hidden_size;
+    let acc_ptr = acc.as_mut_ptr() as *mut __m128i;
+    let prev_ptr = prev.as_ptr() as *const __m128i;
+    let w_add_ptr = weights.as_ptr().add(add_offset) as *const __m128i;
+    let w_sub_ptr = weights.as_ptr().add(sub_offset) as *const __m128i;
+    let num_chunks = hidden_size / 8;
+    for i in 0..num_chunks {
+        let p0 = _mm_loadu_si128(prev_ptr.add(i));
+        let wa0 = _mm_loadu_si128(w_add_ptr.add(i));
+        let ws0 = _mm_loadu_si128(w_sub_ptr.add(i));
+        let res0 = _mm_sub_epi16(_mm_add_epi16(p0, wa0), ws0);
+        _mm_storeu_si128(acc_ptr.add(i), res0);
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "sse4.1")]
+unsafe fn add_sub_sub_feature_sse41(acc: &mut [i16; MAX_HIDDEN_SIZE], prev: &[i16; MAX_HIDDEN_SIZE], weights: &[i16], add_feat: usize, sub_feat1: usize, sub_feat2: usize, hidden_size: usize) {
+    use core::arch::x86_64::*;
+    let add_offset = add_feat * hidden_size;
+    let sub1_offset = sub_feat1 * hidden_size;
+    let sub2_offset = sub_feat2 * hidden_size;
+    let acc_ptr = acc.as_mut_ptr() as *mut __m128i;
+    let prev_ptr = prev.as_ptr() as *const __m128i;
+    let w_add_ptr = weights.as_ptr().add(add_offset) as *const __m128i;
+    let w_sub1_ptr = weights.as_ptr().add(sub1_offset) as *const __m128i;
+    let w_sub2_ptr = weights.as_ptr().add(sub2_offset) as *const __m128i;
+    let num_chunks = hidden_size / 8;
+    for i in 0..num_chunks {
+        let p0 = _mm_loadu_si128(prev_ptr.add(i));
+        let wa0 = _mm_loadu_si128(w_add_ptr.add(i));
+        let ws10 = _mm_loadu_si128(w_sub1_ptr.add(i));
+        let ws20 = _mm_loadu_si128(w_sub2_ptr.add(i));
+        let res0 = _mm_sub_epi16(_mm_sub_epi16(_mm_add_epi16(p0, wa0), ws10), ws20);
+        _mm_storeu_si128(acc_ptr.add(i), res0);
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+unsafe fn add_feature_wasm(acc: &mut [i16; MAX_HIDDEN_SIZE], weights: &[i16], feature: usize, hidden_size: usize) {
+    use core::arch::wasm32::*;
+    let offset = feature * hidden_size;
+    let mut acc_ptr = acc.as_mut_ptr() as *mut v128;
+    let mut w_ptr = weights.as_ptr().add(offset) as *const v128;
+    for _ in 0..(hidden_size / 8) {
+        let a = v128_load(acc_ptr);
+        let w = v128_load(w_ptr);
+        v128_store(acc_ptr, i16x8_add(a, w));
+        acc_ptr = acc_ptr.add(1);
+        w_ptr = w_ptr.add(1);
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+unsafe fn sub_feature_wasm(acc: &mut [i16; MAX_HIDDEN_SIZE], weights: &[i16], feature: usize, hidden_size: usize) {
+    use core::arch::wasm32::*;
+    let offset = feature * hidden_size;
+    let mut acc_ptr = acc.as_mut_ptr() as *mut v128;
+    let mut w_ptr = weights.as_ptr().add(offset) as *const v128;
+    for _ in 0..(hidden_size / 8) {
+        let a = v128_load(acc_ptr);
+        let w = v128_load(w_ptr);
+        v128_store(acc_ptr, i16x8_sub(a, w));
+        acc_ptr = acc_ptr.add(1);
+        w_ptr = w_ptr.add(1);
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+unsafe fn add_sub_feature_wasm(acc: &mut [i16; MAX_HIDDEN_SIZE], prev: &[i16; MAX_HIDDEN_SIZE], weights: &[i16], add_feat: usize, sub_feat: usize, hidden_size: usize) {
+    use core::arch::wasm32::*;
+    let add_offset = add_feat * hidden_size;
+    let sub_offset = sub_feat * hidden_size;
+    let acc_ptr = acc.as_mut_ptr() as *mut v128;
+    let prev_ptr = prev.as_ptr() as *const v128;
+    let w_add_ptr = weights.as_ptr().add(add_offset) as *const v128;
+    let w_sub_ptr = weights.as_ptr().add(sub_offset) as *const v128;
+    let num_chunks = hidden_size / 8;
+    let mut i = 0;
+    while i < num_chunks {
+        let p0 = v128_load(prev_ptr.add(i));
+        let wa0 = v128_load(w_add_ptr.add(i));
+        let ws0 = v128_load(w_sub_ptr.add(i));
+        v128_store(acc_ptr.add(i), i16x8_sub(i16x8_add(p0, wa0), ws0));
+        if i + 1 < num_chunks {
+            let p1 = v128_load(prev_ptr.add(i + 1));
+            let wa1 = v128_load(w_add_ptr.add(i + 1));
+            let ws1 = v128_load(w_sub_ptr.add(i + 1));
+            v128_store(acc_ptr.add(i + 1), i16x8_sub(i16x8_add(p1, wa1), ws1));
+        }
+        i += 2;
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+unsafe fn add_sub_sub_feature_wasm(acc: &mut [i16; MAX_HIDDEN_SIZE], prev: &[i16; MAX_HIDDEN_SIZE], weights: &[i16], add_feat: usize, sub_feat1: usize, sub_feat2: usize, hidden_size: usize) {
+    use core::arch::wasm32::*;
+    let add_offset = add_feat * hidden_size;
+    let sub1_offset = sub_feat1 * hidden_size;
+    let sub2_offset = sub_feat2 * hidden_size;
+    let acc_ptr = acc.as_mut_ptr() as *mut v128;
+    let prev_ptr = prev.as_ptr() as *const v128;
+    let w_add_ptr = weights.as_ptr().add(add_offset) as *const v128;
+    let w_sub1_ptr = weights.as_ptr().add(sub1_offset) as *const v128;
+    let w_sub2_ptr = weights.as_ptr().add(sub2_offset) as *const v128;
+    let num_chunks = hidden_size / 8;
+    let mut i = 0;
+    while i < num_chunks {
+        let p0 = v128_load(prev_ptr.add(i));
+        let wa0 = v128_load(w_add_ptr.add(i));
+        let ws10 = v128_load(w_sub1_ptr.add(i));
+        let ws20 = v128_load(w_sub2_ptr.add(i));
+        let res0 = i16x8_sub(i16x8_sub(i16x8_add(p0, wa0), ws10), ws20);
+        v128_store(acc_ptr.add(i), res0);
+        if i + 1 < num_chunks {
+            let p1 = v128_load(prev_ptr.add(i + 1));
+            let wa1 = v128_load(w_add_ptr.add(i + 1));
+            let ws11 = v128_load(w_sub1_ptr.add(i + 1));
+            let ws21 = v128_load(w_sub2_ptr.add(i + 1));
+            let res1 = i16x8_sub(i16x8_sub(i16x8_add(p1, wa1), ws11), ws21);
+            v128_store(acc_ptr.add(i + 1), res1);
+        }
+        i += 2;
+    }
+}
+
+pub static KERNELS: OnceLock<MicroKernels> = OnceLock::new();
+
+pub fn get_kernels() -> &'static MicroKernels {
+    KERNELS.get_or_init(|| {
+        #[cfg(target_arch = "x86_64")]
+        {
+            if is_x86_feature_detected!("avx512f") && is_x86_feature_detected!("avx512bw") && is_x86_feature_detected!("avx512dq") {
+                return MicroKernels {
+                    add_feature: add_feature_avx512,
+                    sub_feature: sub_feature_avx512,
+                    add_sub_feature: add_sub_feature_avx512,
+                    add_sub_sub_feature: add_sub_sub_feature_avx512,
+                    arch_name: "AVX-512 (Zen4/5, Xeon)",
+                };
+            }
+            if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("bmi2") {
+                return MicroKernels {
+                    add_feature: add_feature_avx2,
+                    sub_feature: sub_feature_avx2,
+                    add_sub_feature: add_sub_feature_avx2,
+                    add_sub_sub_feature: add_sub_sub_feature_avx2,
+                    arch_name: "AVX2 / BMI2",
+                };
+            }
+            if is_x86_feature_detected!("sse4.1") {
+                return MicroKernels {
+                    add_feature: add_feature_sse41,
+                    sub_feature: sub_feature_sse41,
+                    add_sub_feature: add_sub_feature_sse41,
+                    add_sub_sub_feature: add_sub_sub_feature_sse41,
+                    arch_name: "SSE4.1",
+                };
+            }
+            MicroKernels {
+                add_feature: add_feature_scalar,
+                sub_feature: sub_feature_scalar,
+                add_sub_feature: add_sub_feature_scalar,
+                add_sub_sub_feature: add_sub_sub_feature_scalar,
+                arch_name: "Generic Scalar",
+            }
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            MicroKernels {
+                add_feature: add_feature_wasm,
+                sub_feature: sub_feature_wasm,
+                add_sub_feature: add_sub_feature_wasm,
+                add_sub_sub_feature: add_sub_sub_feature_wasm,
+                arch_name: "WASM-SIMD (v128)",
+            }
+        }
+        #[cfg(not(any(target_arch = "x86_64", target_arch = "wasm32")))]
+        {
+            MicroKernels {
+                add_feature: add_feature_scalar,
+                sub_feature: sub_feature_scalar,
+                add_sub_feature: add_sub_feature_scalar,
+                add_sub_sub_feature: add_sub_sub_feature_scalar,
+                arch_name: "Generic Scalar",
+            }
+        }
+    })
+}
 
 #[inline(always)]
 fn add_feature(acc: &mut [i16; MAX_HIDDEN_SIZE], weights: &[i16], feature: usize, hidden_size: usize) {
-    let offset = feature * hidden_size;
-    #[cfg(target_arch = "x86_64")]
-    unsafe {
-        use core::arch::x86_64::*;
-        let mut acc_ptr = acc.as_mut_ptr() as *mut __m256i;
-        let mut w_ptr = weights.as_ptr().add(offset) as *const __m256i;
-        for _ in 0..(hidden_size / 16) {
-            let a = _mm256_loadu_si256(acc_ptr);
-            let w = _mm256_loadu_si256(w_ptr);
-            _mm256_storeu_si256(acc_ptr, _mm256_add_epi16(a, w));
-            acc_ptr = acc_ptr.add(1);
-            w_ptr = w_ptr.add(1);
-        }
-    }
-    #[cfg(target_arch = "wasm32")]
-    unsafe {
-        use core::arch::wasm32::*;
-        let mut acc_ptr = acc.as_mut_ptr() as *mut v128;
-        let mut w_ptr = weights.as_ptr().add(offset) as *const v128;
-        for _ in 0..(hidden_size / 8) {
-            let a = v128_load(acc_ptr);
-            let w = v128_load(w_ptr);
-            v128_store(acc_ptr, i16x8_add(a, w));
-            acc_ptr = acc_ptr.add(1);
-            w_ptr = w_ptr.add(1);
-        }
-    }
-    #[cfg(not(any(target_arch = "x86_64", target_arch = "wasm32")))]
-    {
-        for i in 0..hidden_size {
-            acc[i] = acc[i].wrapping_add(weights[offset + i]);
-        }
-    }
+    unsafe { (get_kernels().add_feature)(acc, weights, feature, hidden_size) }
 }
 
 #[inline(always)]
 fn sub_feature(acc: &mut [i16; MAX_HIDDEN_SIZE], weights: &[i16], feature: usize, hidden_size: usize) {
-    let offset = feature * hidden_size;
-    #[cfg(target_arch = "x86_64")]
-    unsafe {
-        use core::arch::x86_64::*;
-        let mut acc_ptr = acc.as_mut_ptr() as *mut __m256i;
-        let mut w_ptr = weights.as_ptr().add(offset) as *const __m256i;
-        for _ in 0..(hidden_size / 16) {
-            let a = _mm256_loadu_si256(acc_ptr);
-            let w = _mm256_loadu_si256(w_ptr);
-            _mm256_storeu_si256(acc_ptr, _mm256_sub_epi16(a, w));
-            acc_ptr = acc_ptr.add(1);
-            w_ptr = w_ptr.add(1);
-        }
-    }
-    #[cfg(target_arch = "wasm32")]
-    unsafe {
-        use core::arch::wasm32::*;
-        let mut acc_ptr = acc.as_mut_ptr() as *mut v128;
-        let mut w_ptr = weights.as_ptr().add(offset) as *const v128;
-        for _ in 0..(hidden_size / 8) {
-            let a = v128_load(acc_ptr);
-            let w = v128_load(w_ptr);
-            v128_store(acc_ptr, i16x8_sub(a, w));
-            acc_ptr = acc_ptr.add(1);
-            w_ptr = w_ptr.add(1);
-        }
-    }
-    #[cfg(not(any(target_arch = "x86_64", target_arch = "wasm32")))]
-    {
-        for i in 0..hidden_size {
-            acc[i] = acc[i].wrapping_sub(weights[offset + i]);
-        }
-    }
+    unsafe { (get_kernels().sub_feature)(acc, weights, feature, hidden_size) }
 }
 
 #[inline(always)]
 fn add_sub_feature(acc: &mut [i16; MAX_HIDDEN_SIZE], prev: &[i16; MAX_HIDDEN_SIZE], weights: &[i16], add_feat: usize, sub_feat: usize, hidden_size: usize) {
-    let add_offset = add_feat * hidden_size;
-    let sub_offset = sub_feat * hidden_size;
-    #[cfg(target_arch = "x86_64")]
-    unsafe {
-        use core::arch::x86_64::*;
-        let acc_ptr = acc.as_mut_ptr() as *mut __m256i;
-        let prev_ptr = prev.as_ptr() as *const __m256i;
-        let w_add_ptr = weights.as_ptr().add(add_offset) as *const __m256i;
-        let w_sub_ptr = weights.as_ptr().add(sub_offset) as *const __m256i;
-        let num_chunks = hidden_size / 16;
-        let mut i = 0;
-        while i < num_chunks {
-            let p0 = _mm256_loadu_si256(prev_ptr.add(i));
-            let wa0 = _mm256_loadu_si256(w_add_ptr.add(i));
-            let ws0 = _mm256_loadu_si256(w_sub_ptr.add(i));
-            let res0 = _mm256_sub_epi16(_mm256_add_epi16(p0, wa0), ws0);
-            _mm256_storeu_si256(acc_ptr.add(i), res0);
-
-            if i + 1 < num_chunks {
-                let p1 = _mm256_loadu_si256(prev_ptr.add(i + 1));
-                let wa1 = _mm256_loadu_si256(w_add_ptr.add(i + 1));
-                let ws1 = _mm256_loadu_si256(w_sub_ptr.add(i + 1));
-                let res1 = _mm256_sub_epi16(_mm256_add_epi16(p1, wa1), ws1);
-                _mm256_storeu_si256(acc_ptr.add(i + 1), res1);
-            }
-            i += 2;
-        }
-    }
-    #[cfg(target_arch = "wasm32")]
-    unsafe {
-        use core::arch::wasm32::*;
-        let acc_ptr = acc.as_mut_ptr() as *mut v128;
-        let prev_ptr = prev.as_ptr() as *const v128;
-        let w_add_ptr = weights.as_ptr().add(add_offset) as *const v128;
-        let w_sub_ptr = weights.as_ptr().add(sub_offset) as *const v128;
-        let num_chunks = hidden_size / 8;
-        let mut i = 0;
-        while i < num_chunks {
-            let p0 = v128_load(prev_ptr.add(i));
-            let wa0 = v128_load(w_add_ptr.add(i));
-            let ws0 = v128_load(w_sub_ptr.add(i));
-            v128_store(acc_ptr.add(i), i16x8_sub(i16x8_add(p0, wa0), ws0));
-
-            if i + 1 < num_chunks {
-                let p1 = v128_load(prev_ptr.add(i + 1));
-                let wa1 = v128_load(w_add_ptr.add(i + 1));
-                let ws1 = v128_load(w_sub_ptr.add(i + 1));
-                v128_store(acc_ptr.add(i + 1), i16x8_sub(i16x8_add(p1, wa1), ws1));
-            }
-            i += 2;
-        }
-    }
-    #[cfg(not(any(target_arch = "x86_64", target_arch = "wasm32")))]
-    {
-        for i in 0..hidden_size {
-            acc[i] = prev[i].wrapping_add(weights[add_offset + i]).wrapping_sub(weights[sub_offset + i]);
-        }
-    }
+    unsafe { (get_kernels().add_sub_feature)(acc, prev, weights, add_feat, sub_feat, hidden_size) }
 }
 
 #[inline(always)]
 fn add_sub_sub_feature(acc: &mut [i16; MAX_HIDDEN_SIZE], prev: &[i16; MAX_HIDDEN_SIZE], weights: &[i16], add_feat: usize, sub_feat1: usize, sub_feat2: usize, hidden_size: usize) {
-    let add_offset = add_feat * hidden_size;
-    let sub1_offset = sub_feat1 * hidden_size;
-    let sub2_offset = sub_feat2 * hidden_size;
-    #[cfg(target_arch = "x86_64")]
-    unsafe {
-        use core::arch::x86_64::*;
-        let acc_ptr = acc.as_mut_ptr() as *mut __m256i;
-        let prev_ptr = prev.as_ptr() as *const __m256i;
-        let w_add_ptr = weights.as_ptr().add(add_offset) as *const __m256i;
-        let w_sub1_ptr = weights.as_ptr().add(sub1_offset) as *const __m256i;
-        let w_sub2_ptr = weights.as_ptr().add(sub2_offset) as *const __m256i;
-        let num_chunks = hidden_size / 16;
-        let mut i = 0;
-        while i < num_chunks {
-            let p0 = _mm256_loadu_si256(prev_ptr.add(i));
-            let wa0 = _mm256_loadu_si256(w_add_ptr.add(i));
-            let ws10 = _mm256_loadu_si256(w_sub1_ptr.add(i));
-            let ws20 = _mm256_loadu_si256(w_sub2_ptr.add(i));
-            let res0 = _mm256_sub_epi16(_mm256_sub_epi16(_mm256_add_epi16(p0, wa0), ws10), ws20);
-            _mm256_storeu_si256(acc_ptr.add(i), res0);
-
-            if i + 1 < num_chunks {
-                let p1 = _mm256_loadu_si256(prev_ptr.add(i + 1));
-                let wa1 = _mm256_loadu_si256(w_add_ptr.add(i + 1));
-                let ws11 = _mm256_loadu_si256(w_sub1_ptr.add(i + 1));
-                let ws21 = _mm256_loadu_si256(w_sub2_ptr.add(i + 1));
-                let res1 = _mm256_sub_epi16(_mm256_sub_epi16(_mm256_add_epi16(p1, wa1), ws11), ws21);
-                _mm256_storeu_si256(acc_ptr.add(i + 1), res1);
-            }
-            i += 2;
-        }
-    }
-    #[cfg(target_arch = "wasm32")]
-    unsafe {
-        use core::arch::wasm32::*;
-        let acc_ptr = acc.as_mut_ptr() as *mut v128;
-        let prev_ptr = prev.as_ptr() as *const v128;
-        let w_add_ptr = weights.as_ptr().add(add_offset) as *const v128;
-        let w_sub1_ptr = weights.as_ptr().add(sub1_offset) as *const v128;
-        let w_sub2_ptr = weights.as_ptr().add(sub2_offset) as *const v128;
-        let num_chunks = hidden_size / 8;
-        let mut i = 0;
-        while i < num_chunks {
-            let p0 = v128_load(prev_ptr.add(i));
-            let wa0 = v128_load(w_add_ptr.add(i));
-            let ws10 = v128_load(w_sub1_ptr.add(i));
-            let ws20 = v128_load(w_sub2_ptr.add(i));
-            v128_store(acc_ptr.add(i), i16x8_sub(i16x8_sub(i16x8_add(p0, wa0), ws10), ws20));
-
-            if i + 1 < num_chunks {
-                let p1 = v128_load(prev_ptr.add(i + 1));
-                let wa1 = v128_load(w_add_ptr.add(i + 1));
-                let ws11 = v128_load(w_sub1_ptr.add(i + 1));
-                let ws21 = v128_load(w_sub2_ptr.add(i + 1));
-                v128_store(acc_ptr.add(i + 1), i16x8_sub(i16x8_sub(i16x8_add(p1, wa1), ws11), ws21));
-            }
-            i += 2;
-        }
-    }
-    #[cfg(not(any(target_arch = "x86_64", target_arch = "wasm32")))]
-    {
-        for i in 0..hidden_size {
-            acc[i] = prev[i]
-                .wrapping_add(weights[add_offset + i])
-                .wrapping_sub(weights[sub1_offset + i])
-                .wrapping_sub(weights[sub2_offset + i]);
-        }
-    }
+    unsafe { (get_kernels().add_sub_sub_feature)(acc, prev, weights, add_feat, sub_feat1, sub_feat2, hidden_size) }
 }
 
 pub fn refresh_accumulator(network: &Network, acc: &mut Accumulator, board: &Board) {

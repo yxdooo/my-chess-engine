@@ -17,15 +17,15 @@ from concurrent.futures import ThreadPoolExecutor
 # Default tunable parameters with (initial_value, min_val, max_val, step_c)
 DEFAULT_TUNABLES = {
     "lmr_base": (75, 20, 150, 5),
-    "lmr_divisor": (230, 100, 400, 10),
+    "lmr_divisor": (195, 100, 400, 10),
     "null_move_base": (3, 2, 5, 1),
-    "null_move_divisor": (4, 2, 8, 1),
-    "rfp_depth": (8, 4, 14, 1),
+    "null_move_divisor": (3, 2, 8, 1),
+    "rfp_depth": (6, 4, 14, 1),
     "rfp_margin": (75, 30, 150, 5),
     "futility_base": (80, 30, 180, 5),
-    "futility_margin": (60, 20, 120, 5),
+    "futility_margin": (100, 20, 150, 5),
     "history_pruning_depth": (4, 2, 8, 1),
-    "history_pruning_margin": (2000, 500, 6000, 200),
+    "history_pruning_margin": (3500, 500, 6000, 200),
     "see_quiet_margin": (65, 20, 150, 5),
     "see_tactical_margin": (100, 30, 250, 10),
 }
@@ -154,6 +154,75 @@ class SPSAOptimizer:
         }
 
 
+def generate_params_rs(theta, output_path="engine-wasm/src/params.rs"):
+    """
+    Exports tuned parameters directly into a typed Rust source file (engine-wasm/src/params.rs).
+    """
+    lmr_b = theta.get("lmr_base", 75) / 100.0
+    lmr_d = theta.get("lmr_divisor", 195) / 100.0
+    nmp_b = int(theta.get("null_move_base", 3))
+    nmp_d = int(theta.get("null_move_divisor", 3))
+    rfp_d = int(theta.get("rfp_depth", 6))
+    rfp_m = int(theta.get("rfp_margin", 75))
+    fp_b = int(theta.get("futility_base", 80))
+    fp_m = int(theta.get("futility_margin", 100))
+    hp_d = int(theta.get("history_pruning_depth", 4))
+    hp_m = int(theta.get("history_pruning_margin", 3500))
+    see_q = int(theta.get("see_quiet_margin", 65))
+    see_t = int(theta.get("see_tactical_margin", 100))
+
+    content = f"""// Aether Chess Engine Hyperparameters
+// Auto-generated via Distributed SPSA (scripts/spsa_cluster.py)
+// Tuned values generated automatically from SPSA checkpoints.
+
+// Late Move Reductions (LMR)
+pub const LMR_BASE: f64 = {lmr_b:.2f};
+pub const LMR_DIVISOR: f64 = {lmr_d:.2f};
+
+// Null Move Pruning (NMP)
+pub const NMP_BASE_REDUCTION: u8 = {nmp_b};
+pub const NMP_DIVISOR: u8 = {nmp_d};
+pub const NMP_MIN_DEPTH: u8 = 3;
+pub const NMP_VERIFY_DEPTH: u8 = 12;
+
+// Reverse Futility Pruning (RFP)
+pub const RFP_MAX_DEPTH: u8 = {rfp_d};
+pub const RFP_MARGIN: i32 = {rfp_m};
+pub const RFP_IMPROVING_BONUS: i32 = 30;
+pub const RFP_EVAL_DIFF_BONUS: i32 = 20;
+
+// Futility Pruning (FP)
+pub const FP_MAX_DEPTH: u8 = 4;
+pub const FP_BASE_MARGIN: i32 = {fp_b};
+pub const FP_MARGIN_PER_DEPTH: i32 = {fp_m};
+
+// Quiet History Pruning
+pub const HIST_PRUNING_MAX_DEPTH: u8 = {hp_d};
+pub const HIST_PRUNING_MARGIN: i32 = {hp_m};
+
+// ProbCut
+pub const PROBCUT_MIN_DEPTH: u8 = 5;
+pub const PROBCUT_MARGIN: i32 = 170;
+pub const PROBCUT_DEPTH_REDUCTION: u8 = 4;
+
+// Static Exchange Evaluation (SEE) Pruning
+pub const SEE_TACTICAL_MARGIN: i32 = {see_t};
+pub const SEE_QUIET_MARGIN: i32 = {see_q};
+
+// Correction History Scales
+pub const PAWN_CORR_SCALE: i32 = 128;
+pub const CONT_CORR_SCALE: i32 = 128;
+
+// Policy Head Move Ordering Bonus
+pub const POLICY_MOVE_BONUS: i32 = 12_000;
+"""
+    # Ensure directory exists
+    os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
+    with open(output_path, "w", encoding="utf-8") as f:
+        f.write(content)
+    print(f"[SPSA] Successfully generated Rust hyperparameters at: {output_path}")
+
+
 def main():
     parser = argparse.ArgumentParser(description="Aether Distributed SPSA Tuning Cluster")
     parser.add_argument("--engine", default="engine-wasm/target/release/uci.exe", help="Engine binary path")
@@ -161,15 +230,13 @@ def main():
     parser.add_argument("--games", type=int, default=8, help="Games per iteration")
     parser.add_argument("--threads", type=int, default=4, help="Concurrency threads")
     parser.add_argument("--checkpoint", default="spsa_checkpoint.json", help="Checkpoint save file")
+    parser.add_argument("--generate-params", nargs="?", const="engine-wasm/src/params.rs", default=None,
+                        help="Generate typed Rust params file (engine-wasm/src/params.rs) and exit, or specify custom path")
     args = parser.parse_args()
 
     print("===========================================================")
     print("      Aether Distributed SPSA Tuning Cluster                ")
     print("===========================================================")
-    print(f"Engine:      {args.engine}")
-    print(f"Iterations:  {args.iterations}")
-    print(f"Games/iter:  {args.games}")
-    print(f"Threads:     {args.threads}")
 
     opt = SPSAOptimizer(args.engine)
     if os.path.exists(args.checkpoint):
@@ -182,6 +249,16 @@ def main():
         except Exception as e:
             print(f"Could not load checkpoint: {e}")
 
+    # If --generate-params was called without tuning
+    if args.generate_params:
+        generate_params_rs(opt.theta, args.generate_params)
+        return
+
+    print(f"Engine:      {args.engine}")
+    print(f"Iterations:  {args.iterations}")
+    print(f"Games/iter:  {args.games}")
+    print(f"Threads:     {args.threads}")
+
     start_time = time.time()
     for i in range(args.iterations):
         res = opt.step(num_games_per_eval=args.games, num_threads=args.threads)
@@ -193,6 +270,7 @@ def main():
 
     elapsed = time.time() - start_time
     print(f"\nTuning complete in {elapsed:.1f}s. Final tuned parameters saved to {args.checkpoint}.")
+    generate_params_rs(opt.theta, "engine-wasm/src/params.rs")
 
 
 if __name__ == "__main__":

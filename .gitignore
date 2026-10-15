@@ -32,8 +32,11 @@ engine-wasm/out.txt
 *.sw?
 .DS_Store
 
-# Logs
+# Logs & Reports
 *.log
+*.pgn
+crash_log.txt
+TOURNAMENT_REPORT.md
 
 .junie/
 engine-wasm/results/*.csv

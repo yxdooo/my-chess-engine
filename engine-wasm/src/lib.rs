@@ -8,6 +8,7 @@ pub mod types;
 pub mod movegen;
 pub mod board;
 pub mod cuckoo;
+pub mod params;
 use nnue::{Network, Accumulator};
 
 use wasm_bindgen::prelude::*;
@@ -113,7 +114,7 @@ fn get_lmr(depth: u8, moves_evaluated: usize) -> u8 {
             for m in 0..256 {
                 if d >= 1 && m >= 1 {
                     // Aggressive LMR tuning: larger base and steeper curve
-                    let r = 0.75 + ((d as f64).ln() * (m as f64).ln() / 1.95);
+                    let r = params::LMR_BASE + ((d as f64).ln() * (m as f64).ln() / params::LMR_DIVISOR);
                     t[d][m] = r as u8;
                 }
             }
@@ -1361,6 +1362,7 @@ impl ChessEngine {
         prev_was_capture: bool,
         prev_cap_piece: Piece,
         prev_dest: Square,
+        policy_scores: &[i16; 64],
     ) -> i32 {
         if Some(*m) == tt_best_move { return 10_000_000; }
 
@@ -1425,6 +1427,9 @@ impl ChessEngine {
                 hist += self.get_cap_cont_history(prev_cap_piece.to_index(), prev_dest.to_index(), moved_idx, m.get_dest().to_index());
             }
 
+            let pol_bonus = ((policy_scores[m.get_dest().to_index()] as i32) * params::POLICY_MOVE_BONUS) / 1000;
+            hist += pol_bonus.clamp(-3000, params::POLICY_MOVE_BONUS);
+
             // Strict clamping to [-40_000, 40_000] ensures quiet moves never surpass Counter (70k),
             // Killers (75k/80k), Queen promotions (95k), or Good Captures (100k+)
             return hist.clamp(-40_000, 40_000);
@@ -1447,6 +1452,16 @@ impl ChessEngine {
                 }
             }
         }
+        let policy_scores = if let Some(ref net) = self.network {
+            if (ply as usize) < self.accumulators.len() {
+                let acc = &self.accumulators[ply as usize];
+                net.evaluate_policy(acc, board.side_to_move())
+            } else {
+                [0i16; 64]
+            }
+        } else {
+            [0i16; 64]
+        };
         moves
             .iter()
             .map(|&m| {
@@ -1460,6 +1475,7 @@ impl ChessEngine {
                     prev_was_capture,
                     prev_cap_piece,
                     prev_dest,
+                    &policy_scores,
                 )
             })
             .collect()

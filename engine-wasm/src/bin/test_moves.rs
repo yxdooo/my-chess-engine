@@ -1,4 +1,3 @@
-use engine_wasm::ChessEngine;
 use chess::{Board, MoveGen};
 use std::str::FromStr;
 

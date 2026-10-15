@@ -1,0 +1,79 @@
+name: Aether Chess Engine CI
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  native-and-wasm:
+    name: Native Regression, Benchmarks & WASM Verification
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Rust Toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Install wasm-pack
+        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install Python Dependencies
+        run: pip install python-chess
+
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: engine-wasm -> target
+
+      - name: Run Unit Tests (Release)
+        working-directory: engine-wasm
+        run: cargo test --release --lib
+
+      - name: Build Native UCI Binary
+        working-directory: engine-wasm
+        run: cargo build --release --bin uci
+
+      - name: Execute UCI Bench (Depth 14 NPS Gate)
+        working-directory: engine-wasm
+        run: |
+          BENCH_OUT=$(cargo run --release --bin uci -- bench 14)
+          echo "$BENCH_OUT"
+          NODES=$(echo "$BENCH_OUT" | grep -oP 'Nodes searched:\s*\K\d+' || echo "0")
+          NPS=$(echo "$BENCH_OUT" | grep -oP 'NPS:\s*\K\d+' || echo "0")
+          echo "Nodes: $NODES, NPS: $NPS"
+          if [ "$NODES" -lt 100000 ]; then
+            echo "Error: Bench searched fewer than 100,000 nodes ($NODES)"
+            exit 1
+          fi
+          if [ "$NPS" -lt 400000 ]; then
+            echo "Warning: NPS ($NPS) below 400,000 gate threshold"
+          fi
+
+      - name: Execute Autonomous SPRT Regression Suite
+        run: |
+          python scripts/tcec_bot.py --engine1 engine-wasm/target/release/uci --rounds 10 --tc 0.2+0.02 --threads 2
+
+      - name: Verify WebAssembly Target Compilation
+        working-directory: engine-wasm
+        run: wasm-pack build --target web --release
+
+      - name: Upload Tournament Report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tcec-tournament-report
+          path: |
+            TOURNAMENT_REPORT.md
+            tournament.pgn
