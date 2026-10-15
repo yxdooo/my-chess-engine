@@ -7,6 +7,7 @@ pub mod tune;
 pub mod types;
 pub mod movegen;
 pub mod board;
+pub mod cuckoo;
 use nnue::{Network, Accumulator};
 
 use wasm_bindgen::prelude::*;
@@ -14,12 +15,43 @@ use chess::{Board, ChessMove, Color, Piece, MoveGen, Rank, Square};
 use std::collections::HashMap;
 use arrayvec::ArrayVec;
 use std::str::FromStr;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock, RwLock};
 
 pub static GLOBAL_STOP: AtomicBool = AtomicBool::new(false);
 pub static GLOBAL_NODES: AtomicU64 = AtomicU64::new(0);
 pub static GLOBAL_PONDER: AtomicBool = AtomicBool::new(false);
+
+pub static GLOBAL_PAWN_CORR: OnceLock<Box<[[AtomicI32; 16384]; 2]>> = OnceLock::new();
+pub static GLOBAL_CONT_CORR: OnceLock<Box<[AtomicI32]>> = OnceLock::new();
+
+#[inline(always)]
+pub fn get_global_pawn_corr() -> &'static [[AtomicI32; 16384]; 2] {
+    GLOBAL_PAWN_CORR.get_or_init(|| {
+        let mut v: Vec<[AtomicI32; 16384]> = Vec::with_capacity(2);
+        for _ in 0..2 {
+            let row: Vec<AtomicI32> = (0..16384).map(|_| AtomicI32::new(0)).collect();
+            let row_boxed: Box<[AtomicI32; 16384]> = match row.into_boxed_slice().try_into() {
+                Ok(b) => b,
+                Err(_) => unreachable!(),
+            };
+            v.push(*row_boxed);
+        }
+        let boxed: Box<[[AtomicI32; 16384]; 2]> = match v.into_boxed_slice().try_into() {
+            Ok(b) => b,
+            Err(_) => unreachable!(),
+        };
+        boxed
+    })
+}
+
+#[inline(always)]
+pub fn get_global_cont_corr() -> &'static [AtomicI32] {
+    GLOBAL_CONT_CORR.get_or_init(|| {
+        let v: Vec<AtomicI32> = (0..147_456).map(|_| AtomicI32::new(0)).collect();
+        v.into_boxed_slice()
+    })
+}
 
 pub fn score_to_wdl(score: i32) -> (i32, i32, i32) {
     if score.abs() > MATE - 128 {
@@ -215,8 +247,9 @@ pub struct ChessEngine {
     network: Option<Box<Network>>,
     accumulators: Box<[Accumulator; 130]>,
     capture_history: Box<[[[i32; 6]; 64]; 6]>,
-    pawn_corr_table: Box<[[i32; 16384]; 2]>,
-    cont_corr_table: Box<[i32]>,
+    pawn_history: Box<[i16]>,
+    threat_history: Box<[i16]>,
+    cap_cont_history: Box<[i16]>,
     multi_pv: usize,
     show_wdl: bool,
     custom_polyglot_book: Option<Vec<u8>>,
@@ -256,8 +289,9 @@ impl ChessEngine {
             network: None,
             accumulators,
             capture_history: Box::new([[[0; 6]; 64]; 6]),
-            pawn_corr_table: Box::new([[0; 16384]; 2]),
-            cont_corr_table: vec![0i32; 147_456].into_boxed_slice(),
+            pawn_history: vec![0i16; 512 * 12 * 64].into_boxed_slice(),
+            threat_history: vec![0i16; 2 * 2 * 2 * 64 * 64].into_boxed_slice(),
+            cap_cont_history: vec![0i16; 6 * 64 * 6 * 64].into_boxed_slice(),
             multi_pv: 1,
             show_wdl: false,
             custom_polyglot_book: None,
@@ -410,19 +444,88 @@ impl ChessEngine {
     #[inline(always)]
     fn update_cont_corr(&mut self, p_piece: usize, p_to: usize, c_piece: usize, c_to: usize, bonus: i32) {
         let idx = Self::cont_corr_idx(p_piece, p_to, c_piece, c_to);
-        if idx < self.cont_corr_table.len() {
-            let entry = &mut self.cont_corr_table[idx];
-            *entry += (bonus * 16 - *entry) / 128;
+        let table = get_global_cont_corr();
+        if idx < table.len() {
+            let curr = table[idx].load(Ordering::Relaxed);
+            let new_val = curr + (bonus * 16 - curr) / 128;
+            table[idx].store(new_val, Ordering::Relaxed);
         }
     }
 
     #[inline(always)]
     fn get_cont_corr(&self, p_piece: usize, p_to: usize, c_piece: usize, c_to: usize) -> i32 {
         let idx = Self::cont_corr_idx(p_piece, p_to, c_piece, c_to);
-        if idx < self.cont_corr_table.len() {
-            self.cont_corr_table[idx] / 256
+        let table = get_global_cont_corr();
+        if idx < table.len() {
+            table[idx].load(Ordering::Relaxed) / 256
         } else {
             0
+        }
+    }
+
+    #[inline(always)]
+    fn pawn_hist_idx(pawn_hash: u64, piece_idx: usize, to_sq: usize) -> usize {
+        ((pawn_hash as usize & 511) * 12 + piece_idx) * 64 + to_sq
+    }
+
+    #[inline(always)]
+    fn get_pawn_history(&self, pawn_hash: u64, piece_idx: usize, to_sq: usize) -> i32 {
+        let idx = Self::pawn_hist_idx(pawn_hash, piece_idx, to_sq);
+        self.pawn_history[idx] as i32
+    }
+
+    #[inline(always)]
+    fn update_pawn_history(&mut self, pawn_hash: u64, piece_idx: usize, to_sq: usize, bonus: i32) {
+        let idx = Self::pawn_hist_idx(pawn_hash, piece_idx, to_sq);
+        let entry = &mut self.pawn_history[idx];
+        let bonus_clamped = bonus.clamp(-16384, 16384);
+        let abs_b = bonus_clamped.abs();
+        *entry = ((*entry as i32) + bonus_clamped - ((*entry as i32) * abs_b) / 16384).clamp(-16384, 16384) as i16;
+    }
+
+    #[inline(always)]
+    fn threat_hist_idx(stm: usize, from_att: bool, to_att: bool, from_sq: usize, to_sq: usize) -> usize {
+        ((((stm * 2 + from_att as usize) * 2 + to_att as usize) * 64 + from_sq) * 64) + to_sq
+    }
+
+    #[inline(always)]
+    fn get_threat_history(&self, stm: Color, from_att: bool, to_att: bool, from_sq: usize, to_sq: usize) -> i32 {
+        let idx = Self::threat_hist_idx(stm as usize, from_att, to_att, from_sq, to_sq);
+        self.threat_history[idx] as i32
+    }
+
+    #[inline(always)]
+    fn update_threat_history(&mut self, stm: Color, from_att: bool, to_att: bool, from_sq: usize, to_sq: usize, bonus: i32) {
+        let idx = Self::threat_hist_idx(stm as usize, from_att, to_att, from_sq, to_sq);
+        let entry = &mut self.threat_history[idx];
+        let bonus_clamped = bonus.clamp(-16384, 16384);
+        let abs_b = bonus_clamped.abs();
+        *entry = ((*entry as i32) + bonus_clamped - ((*entry as i32) * abs_b) / 16384).clamp(-16384, 16384) as i16;
+    }
+
+    #[inline(always)]
+    fn cap_cont_idx(prev_piece: usize, prev_to: usize, moved_piece: usize, to_sq: usize) -> usize {
+        (((prev_piece * 64 + prev_to) * 6 + moved_piece) * 64) + to_sq
+    }
+
+    #[inline(always)]
+    fn get_cap_cont_history(&self, prev_piece: usize, prev_to: usize, moved_piece: usize, to_sq: usize) -> i32 {
+        let idx = Self::cap_cont_idx(prev_piece, prev_to, moved_piece, to_sq);
+        if idx < self.cap_cont_history.len() {
+            self.cap_cont_history[idx] as i32
+        } else {
+            0
+        }
+    }
+
+    #[inline(always)]
+    fn update_cap_cont_history(&mut self, prev_piece: usize, prev_to: usize, moved_piece: usize, to_sq: usize, bonus: i32) {
+        let idx = Self::cap_cont_idx(prev_piece, prev_to, moved_piece, to_sq);
+        if idx < self.cap_cont_history.len() {
+            let entry = &mut self.cap_cont_history[idx];
+            let bonus_clamped = bonus.clamp(-16384, 16384);
+            let abs_b = bonus_clamped.abs();
+            *entry = ((*entry as i32) + bonus_clamped - ((*entry as i32) * abs_b) / 16384).clamp(-16384, 16384) as i16;
         }
     }
 
@@ -1160,6 +1263,74 @@ const KING_EG_PST: [i32; 64] = [
     -53, -34, -21, -11, -28, -14, -24, -43
 ];
 
+pub fn get_all_attacks(board: &Board, color: Color) -> chess::BitBoard {
+    let occ = board.color_combined(Color::White) | board.color_combined(Color::Black);
+    let mut att = chess::BitBoard(0);
+
+    // Pawns
+    let pawns = board.pieces(Piece::Pawn) & board.color_combined(color);
+    if color == Color::White {
+        att |= chess::BitBoard((pawns.0 & !0x0101010101010101) << 7);
+        att |= chess::BitBoard((pawns.0 & !0x8080808080808080) << 9);
+    } else {
+        att |= chess::BitBoard((pawns.0 & !0x8080808080808080) >> 7);
+        att |= chess::BitBoard((pawns.0 & !0x0101010101010101) >> 9);
+    }
+
+    // Knights
+    let knights = board.pieces(Piece::Knight) & board.color_combined(color);
+    for sq in knights {
+        att |= chess::get_knight_moves(sq);
+    }
+
+    // Bishops / Queens
+    let bishops = (board.pieces(Piece::Bishop) | board.pieces(Piece::Queen)) & board.color_combined(color);
+    for sq in bishops {
+        att |= chess::get_bishop_moves(sq, occ);
+    }
+
+    // Rooks / Queens
+    let rooks = (board.pieces(Piece::Rook) | board.pieces(Piece::Queen)) & board.color_combined(color);
+    for sq in rooks {
+        att |= chess::get_rook_moves(sq, occ);
+    }
+
+    // King
+    let kings = board.pieces(Piece::King) & board.color_combined(color);
+    for sq in kings {
+        att |= chess::get_king_moves(sq);
+    }
+
+    att
+}
+
+pub fn is_fortress_or_blocked_center(board: &Board, halfmove_clock: u8) -> i32 {
+    if halfmove_clock < 16 {
+        return 0;
+    }
+    let white_pawns = board.pieces(Piece::Pawn) & board.color_combined(Color::White);
+    let black_pawns = board.pieces(Piece::Pawn) & board.color_combined(Color::Black);
+
+    let pawn_rams = (white_pawns.0 << 8) & black_pawns.0;
+    let center_files = 0x003C3C3C3C3C3C00u64; // files c, d, e, f
+    let center_rams = (pawn_rams & center_files).count_ones();
+
+    if center_rams >= 3 {
+        let all_pawns = (white_pawns | black_pawns).0;
+        let mut open_files = 0;
+        for file in 0..8 {
+            let file_mask = 0x0101010101010101u64 << file;
+            if (all_pawns & file_mask) == 0 {
+                open_files += 1;
+            }
+        }
+        if open_files == 0 {
+            return (halfmove_clock - 16).min(32) as i32;
+        }
+    }
+    0
+}
+
 impl ChessEngine {
     fn check_time(&mut self) {
         if GLOBAL_STOP.load(Ordering::Relaxed) {
@@ -1179,7 +1350,18 @@ impl ChessEngine {
         }
     }
 
-    fn score_move(&self, board: &Board, m: &ChessMove, ply: u8, tt_best_move: Option<ChessMove>) -> i32 {
+    fn score_move(
+        &self,
+        board: &Board,
+        m: &ChessMove,
+        ply: u8,
+        tt_best_move: Option<ChessMove>,
+        opp_attacks: chess::BitBoard,
+        p_key: u64,
+        prev_was_capture: bool,
+        prev_cap_piece: Piece,
+        prev_dest: Square,
+    ) -> i32 {
         if Some(*m) == tt_best_move { return 10_000_000; }
 
         // Captures: order by SEE value.
@@ -1230,6 +1412,19 @@ impl ChessEngine {
                     hist += self.followup_history[idx];
                 }
             }
+            let moved_piece = board.piece_on(m.get_source()).unwrap_or(Piece::Pawn);
+            let moved_idx = moved_piece.to_index();
+            let p_idx = if board.side_to_move() == Color::White { moved_idx } else { moved_idx + 6 };
+            hist += self.get_pawn_history(p_key, p_idx, m.get_dest().to_index()) / 2;
+
+            let from_att = (opp_attacks & chess::BitBoard::from_square(m.get_source())).popcnt() > 0;
+            let to_att = (opp_attacks & chess::BitBoard::from_square(m.get_dest())).popcnt() > 0;
+            hist += self.get_threat_history(board.side_to_move(), from_att, to_att, m.get_source().to_index(), m.get_dest().to_index());
+
+            if prev_was_capture {
+                hist += self.get_cap_cont_history(prev_cap_piece.to_index(), prev_dest.to_index(), moved_idx, m.get_dest().to_index());
+            }
+
             // Strict clamping to [-40_000, 40_000] ensures quiet moves never surpass Counter (70k),
             // Killers (75k/80k), Queen promotions (95k), or Good Captures (100k+)
             return hist.clamp(-40_000, 40_000);
@@ -1238,7 +1433,36 @@ impl ChessEngine {
     }
 
     fn score_moves(&self, board: &Board, moves: &[ChessMove], ply: u8, tt_best_move: Option<ChessMove>) -> ArrayVec<i32, 256> {
-        moves.iter().map(|&m| self.score_move(board, &m, ply, tt_best_move)).collect()
+        let opp_attacks = get_all_attacks(board, !board.side_to_move());
+        let p_key = get_pawn_key(board);
+        let mut prev_was_capture = false;
+        let mut prev_cap_piece = Piece::Pawn;
+        let mut prev_dest = Square::default();
+        if ply > 0 {
+            if let Some(prev) = self.search_path_moves[(ply - 1) as usize] {
+                prev_dest = prev.get_dest();
+                if let Some(p) = board.piece_on(prev_dest) {
+                    prev_cap_piece = p;
+                    prev_was_capture = true;
+                }
+            }
+        }
+        moves
+            .iter()
+            .map(|&m| {
+                self.score_move(
+                    board,
+                    &m,
+                    ply,
+                    tt_best_move,
+                    opp_attacks,
+                    p_key,
+                    prev_was_capture,
+                    prev_cap_piece,
+                    prev_dest,
+                )
+            })
+            .collect()
     }
 
     fn pick_move(&self, moves: &mut [ChessMove], scores: &mut [i32], start: usize) {
@@ -1532,6 +1756,16 @@ impl ChessEngine {
         if (ply as usize) < 128 {
             self.search_path[ply as usize] = hash;
         }
+
+        // Stockfish-Style Cuckoo 1-Ply Ahead Repetition Detection:
+        if ply > 0 && alpha < 0 && halfmove_clock >= 3 {
+            if cuckoo::has_upcoming_repetition(board, &self.game_history, self.game_history_len, &self.search_path, ply, halfmove_clock) {
+                alpha = 0;
+                if alpha >= beta {
+                    return alpha;
+                }
+            }
+        }
         
         let is_check = board.checkers().popcnt() > 0;
         
@@ -1716,8 +1950,8 @@ impl ChessEngine {
 
         let mut moves_evaluated = 0;
         let mut b_search_pv = true;
-        let mut quiet_moves: ArrayVec<ChessMove, 256> = ArrayVec::new();
-        let mut captured_moves: ArrayVec<ChessMove, 256> = ArrayVec::new();
+        let mut quiet_moves: ArrayVec<ChessMove, 32> = ArrayVec::new();
+        let mut captured_moves: ArrayVec<ChessMove, 32> = ArrayVec::new();
 
         for i in 0..moves.len() {
             self.pick_move(&mut moves, &mut scores, i);
@@ -1728,9 +1962,9 @@ impl ChessEngine {
             let is_promotion = m.get_promotion().is_some();
             
             if !is_capture && !is_promotion {
-                quiet_moves.push(m);
+                if quiet_moves.len() < 32 { quiet_moves.push(m); }
             } else if is_capture {
-                captured_moves.push(m);
+                if captured_moves.len() < 32 { captured_moves.push(m); }
             }
 
             // Pruning rules for quiet moves — only apply AFTER at least one move has been evaluated (moves_evaluated > 0)
@@ -1933,15 +2167,26 @@ impl ChessEngine {
                         }
                         let h = &mut self.history[m.get_source().to_index()][m.get_dest().to_index()];
                         *h += stat_bonus - (*h * stat_bonus) / 16384;
+
+                        let p_key = get_pawn_key(board);
+                        let curr_piece = board.piece_on(m.get_source()).unwrap_or(Piece::Pawn);
+                        let p_idx = if board.side_to_move() == Color::White { curr_piece.to_index() } else { curr_piece.to_index() + 6 };
+                        self.update_pawn_history(p_key, p_idx, m.get_dest().to_index(), stat_bonus);
+
+                        let opp_attacks = get_all_attacks(board, !board.side_to_move());
+                        let from_att = (opp_attacks & chess::BitBoard::from_square(m.get_source())).popcnt() > 0;
+                        let to_att = (opp_attacks & chess::BitBoard::from_square(m.get_dest())).popcnt() > 0;
+                        self.update_threat_history(board.side_to_move(), from_att, to_att, m.get_source().to_index(), m.get_dest().to_index(), stat_bonus);
                         
                         if ply > 0 {
                             if let Some(prev) = self.search_path_moves[(ply - 1) as usize] {
                                 let prev_piece = board.piece_on(prev.get_dest()).unwrap_or(Piece::Pawn);
                                 self.counter_moves[(!board.side_to_move()) as usize][prev_piece as usize][prev.get_dest().to_index()] = Some(m);
 
-                                let curr_piece = board.piece_on(m.get_source()).unwrap_or(Piece::Pawn).to_index();
                                 let corr_bonus = (best_score - static_eval).clamp(-1024, 1024);
-                                self.update_cont_corr(prev_piece.to_index(), prev.get_dest().to_index(), curr_piece, m.get_dest().to_index(), corr_bonus);
+                                self.update_cont_corr(prev_piece.to_index(), prev.get_dest().to_index(), curr_piece.to_index(), m.get_dest().to_index(), corr_bonus);
+
+                                self.update_cap_cont_history(prev_piece.to_index(), prev.get_dest().to_index(), curr_piece.to_index(), m.get_dest().to_index(), stat_bonus);
                             }
                         }
                         if ply > 1 {
@@ -1976,17 +2221,27 @@ impl ChessEngine {
                         }
                     }
                     
+                    let p_key = get_pawn_key(board);
+                    let opp_attacks = get_all_attacks(board, !board.side_to_move());
                     for &qm in &quiet_moves {
                         if qm != m {
                             let h2 = &mut self.history[qm.get_source().to_index()][qm.get_dest().to_index()];
                             *h2 -= stat_bonus + (*h2 * stat_bonus) / 16384;
+
+                            let qm_piece = board.piece_on(qm.get_source()).unwrap_or(Piece::Pawn);
+                            let qm_p_idx = if board.side_to_move() == Color::White { qm_piece.to_index() } else { qm_piece.to_index() + 6 };
+                            self.update_pawn_history(p_key, qm_p_idx, qm.get_dest().to_index(), -stat_bonus / 2);
+
+                            let q_from_att = (opp_attacks & chess::BitBoard::from_square(qm.get_source())).popcnt() > 0;
+                            let q_to_att = (opp_attacks & chess::BitBoard::from_square(qm.get_dest())).popcnt() > 0;
+                            self.update_threat_history(board.side_to_move(), q_from_att, q_to_att, qm.get_source().to_index(), qm.get_dest().to_index(), -stat_bonus / 2);
                             
                             if ply > 0 {
                                 if let Some(prev) = self.search_path_moves[(ply - 1) as usize] {
                                     let prev_piece = board.piece_on(prev.get_dest()).unwrap_or(Piece::Pawn).to_index();
-                                    let qm_piece = board.piece_on(qm.get_source()).unwrap_or(Piece::Pawn).to_index();
                                     let malus = (stat_bonus / 2).clamp(0, 512);
-                                    self.update_cont_corr(prev_piece, prev.get_dest().to_index(), qm_piece, qm.get_dest().to_index(), -malus);
+                                    self.update_cont_corr(prev_piece, prev.get_dest().to_index(), qm_piece.to_index(), qm.get_dest().to_index(), -malus);
+                                    self.update_cap_cont_history(prev_piece, prev.get_dest().to_index(), qm_piece.to_index(), qm.get_dest().to_index(), -malus);
                                 }
                             }
                             if ply > 1 {
@@ -2013,8 +2268,10 @@ impl ChessEngine {
                 let p_key = get_pawn_key(board);
                 let corr_idx = (p_key as usize) & 16383;
                 let bonus = (best_score - static_eval).clamp(-1024, 1024);
-                let entry = &mut self.pawn_corr_table[stm_idx][corr_idx];
-                *entry += (bonus * 16 - *entry) / 128;
+                let table = get_global_pawn_corr();
+                let curr = table[stm_idx][corr_idx].load(Ordering::Relaxed);
+                let new_val = curr + (bonus * 16 - curr) / 128;
+                table[stm_idx][corr_idx].store(new_val, Ordering::Relaxed);
             }
         }
         if !is_pv_node && !is_check && best_score >= beta && best_score.abs() < MATE - 128 {
@@ -2194,7 +2451,10 @@ impl ChessEngine {
         let stm_idx = if board.side_to_move() == Color::White { 0 } else { 1 };
         let p_key = get_pawn_key(board);
         let corr_idx = (p_key as usize) & 16383;
-        let pawn_corr = (self.pawn_corr_table[stm_idx][corr_idx] / 16).clamp(-200, 200);
+        let table = get_global_pawn_corr();
+        let pawn_corr = (table[stm_idx][corr_idx].load(Ordering::Relaxed) / 16).clamp(-200, 200);
+
+        let blocked_factor = is_fortress_or_blocked_center(board, halfmove_clock);
 
         if let Some(network) = &self.network {
             // Dual-NNUE fast path:
@@ -2206,6 +2466,9 @@ impl ChessEngine {
                 let mut eval = base_eval * stm_sign + pawn_corr;
                 if halfmove_clock >= 20 {
                     eval = (eval * (220 - halfmove_clock as i32)) / 220;
+                }
+                if blocked_factor > 0 {
+                    eval = (eval * (64 - blocked_factor)) / 64;
                 }
                 return eval.clamp(-MATE + 128, MATE - 128);
             }
@@ -2221,6 +2484,9 @@ impl ChessEngine {
 
             if halfmove_clock >= 20 {
                 eval = (eval * (220 - halfmove_clock as i32)) / 220;
+            }
+            if blocked_factor > 0 {
+                eval = (eval * (64 - blocked_factor)) / 64;
             }
 
             return eval.clamp(-MATE + 128, MATE - 128);
@@ -2868,6 +3134,27 @@ mod tests {
                 board = next_board;
                 acc_inc = acc_next;
             }
+        }
+    }
+
+    #[test]
+    fn test_cuckoo_table_population() {
+        let cuckoo = cuckoo::get_cuckoo();
+        let mut count = 0;
+        for &k in &cuckoo.keys {
+            if k != 0 && cuckoo.probe(k).is_some() {
+                count += 1;
+            }
+        }
+        assert!(count > 1000, "Cuckoo table must contain > 1000 reversible move keys, found {}", count);
+    }
+
+    #[test]
+    fn test_fortress_or_blocked_center_detection() {
+        let fen = "r1b1k2r/pp1n1ppp/2p1p3/3p4/2PP4/2P1P3/P4PPP/R1B1KB1R w KQkq - 1 17";
+        if let Ok(board) = Board::from_str(fen) {
+            let blocked = is_fortress_or_blocked_center(&board, 17);
+            assert!(blocked >= 0);
         }
     }
 }

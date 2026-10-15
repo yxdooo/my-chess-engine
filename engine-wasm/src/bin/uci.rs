@@ -5,6 +5,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Sender};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
+use chess::ChessMove;
 use engine_wasm::{ChessEngine, GLOBAL_NODES, GLOBAL_STOP, GLOBAL_PONDER};
 
 fn load_nnue_data() -> Vec<u8> {
@@ -58,6 +59,7 @@ struct WorkerPool {
     hash_mb: usize,
     multipv: usize,
     show_wdl: bool,
+    thread_results: Arc<std::sync::Mutex<Vec<(u8, Option<ChessMove>, Option<ChessMove>, i32, u8)>>>,
 }
 
 impl WorkerPool {
@@ -69,6 +71,7 @@ impl WorkerPool {
             hash_mb: 64,
             multipv: 1,
             show_wdl: false,
+            thread_results: Arc::new(std::sync::Mutex::new(Vec::new())),
         };
         pool.resize(count);
         pool
@@ -91,6 +94,7 @@ impl WorkerPool {
             let hash_mb = self.hash_mb;
             let multipv = self.multipv;
             let show_wdl = self.show_wdl;
+            let results_arc = Arc::clone(&self.thread_results);
 
             let handle = thread::spawn(move || {
                 let mut engine = ChessEngine::new();
@@ -119,15 +123,42 @@ impl WorkerPool {
                                 print_info,
                             );
 
+                            results_arc.lock().unwrap().push((id, res.best_move, res.ponder_move, res.score, res.depth));
+
                             if id == 0 {
                                 // While pondering, wait for ponderhit or stop before releasing bestmove
                                 while GLOBAL_PONDER.load(Ordering::Relaxed) && !GLOBAL_STOP.load(Ordering::Relaxed) {
                                     thread::sleep(std::time::Duration::from_millis(5));
                                 }
 
-                                // Master thread outputs bestmove
-                                if let Some(bm) = res.best_move {
-                                    if let Some(pm) = res.ponder_move {
+                                // Best-Thread Voting across the Lazy SMP pool
+                                let results = results_arc.lock().unwrap().clone();
+                                let mut chosen_move = res.best_move;
+                                let mut chosen_ponder = res.ponder_move;
+
+                                if results.len() > 1 && res.best_move.is_some() {
+                                    let max_depth = results.iter().map(|r| r.4).max().unwrap_or(0);
+                                    let min_score = results.iter().map(|r| r.3).min().unwrap_or(0);
+
+                                    let mut votes: std::collections::HashMap<ChessMove, i64> = std::collections::HashMap::new();
+                                    for (_tid, bm, _pm, score, depth) in &results {
+                                        if let Some(m) = bm {
+                                            if *depth + 1 >= max_depth {
+                                                let weight = ((*score - min_score + 14).max(1) as i64) * (*depth as i64);
+                                                *votes.entry(*m).or_insert(0) += weight;
+                                            }
+                                        }
+                                    }
+                                    if let Some((&voted_m, _)) = votes.iter().max_by_key(|(_, &v)| v) {
+                                        chosen_move = Some(voted_m);
+                                        if let Some(matching) = results.iter().filter(|r| r.1 == Some(voted_m)).max_by_key(|r| r.4) {
+                                            chosen_ponder = matching.2;
+                                        }
+                                    }
+                                }
+
+                                if let Some(bm) = chosen_move {
+                                    if let Some(pm) = chosen_ponder {
                                         println!("bestmove {} ponder {}", bm, pm);
                                     } else {
                                         println!("bestmove {}", bm);
@@ -169,6 +200,7 @@ impl WorkerPool {
     }
 
     fn dispatch_search(&self, params: SearchParams) {
+        self.thread_results.lock().unwrap().clear();
         for (idx, (tx, _)) in self.threads.iter().enumerate() {
             let _ = tx.send(WorkerMessage::Search {
                 params: params.clone(),
