@@ -31,6 +31,11 @@ function copyDir(src, dest) {
     if (!fs.existsSync(dest)) fs.mkdirSync(dest, { recursive: true });
 
     for (const entry of fs.readdirSync(src, { withFileTypes: true })) {
+        // Chromium rejects unpacked extensions containing files or directories starting with "_"
+        // except official "_locales". Also ignore Python cache files and source scripts.
+        if (entry.name.startsWith('_') && entry.name !== '_locales') continue;
+        if (entry.name.endsWith('.py') || entry.name.endsWith('.pyc') || entry.name === 'package.json') continue;
+
         const srcPath  = path.join(src, entry.name);
         const destPath = path.join(dest, entry.name);
 
