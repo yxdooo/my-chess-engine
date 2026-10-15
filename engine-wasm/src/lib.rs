@@ -19,6 +19,20 @@ use std::sync::{Arc, OnceLock, RwLock};
 
 pub static GLOBAL_STOP: AtomicBool = AtomicBool::new(false);
 pub static GLOBAL_NODES: AtomicU64 = AtomicU64::new(0);
+pub static GLOBAL_PONDER: AtomicBool = AtomicBool::new(false);
+
+pub fn score_to_wdl(score: i32) -> (i32, i32, i32) {
+    if score.abs() > MATE - 128 {
+        return if score > 0 { (1000, 0, 0) } else { (0, 0, 1000) };
+    }
+    let s = score as f64;
+    let win = (1000.0 / (1.0 + (-(s - 160.0) / 200.0).exp())) as i32;
+    let loss = (1000.0 / (1.0 + ((s + 160.0) / 200.0).exp())) as i32;
+    let win = win.clamp(0, 1000);
+    let loss = loss.clamp(0, 1000);
+    let draw = (1000 - win - loss).max(0);
+    (win, draw, loss)
+}
 
 static GLOBAL_TT: OnceLock<RwLock<Arc<TranspositionTable>>> = OnceLock::new();
 static GLOBAL_PAWN_HASH: OnceLock<RwLock<Arc<PawnHashTable>>> = OnceLock::new();
@@ -188,6 +202,8 @@ pub struct ChessEngine {
     elo: u32,
     /// Zobrist hashes of previously seen positions for 3-fold repetition detection.
     history_hashes: HashMap<u64, u8>,
+    game_history: [u64; 1024],
+    game_history_len: usize,
     /// Array of Zobrist hashes for the current search path to detect perpetual checks in the search tree.
     search_path: [u64; 128],
     /// Generation counter for TT age-based replacement.
@@ -200,6 +216,9 @@ pub struct ChessEngine {
     accumulators: Box<[Accumulator; 130]>,
     capture_history: Box<[[[i32; 6]; 64]; 6]>,
     pawn_corr_table: Box<[[i32; 16384]; 2]>,
+    cont_corr_table: Box<[i32]>,
+    multi_pv: usize,
+    show_wdl: bool,
     custom_polyglot_book: Option<Vec<u8>>,
     nmp_min_ply: u8,
     static_eval_history: [i32; 130],
@@ -226,6 +245,8 @@ impl ChessEngine {
             nodes: 0,
             elo: 3000,
             history_hashes: HashMap::new(),
+            game_history: [0; 1024],
+            game_history_len: 0,
             search_path: [0; 128],
             search_generation: 0,
             abort_flag: None,
@@ -236,6 +257,9 @@ impl ChessEngine {
             accumulators,
             capture_history: Box::new([[[0; 6]; 64]; 6]),
             pawn_corr_table: Box::new([[0; 16384]; 2]),
+            cont_corr_table: vec![0i32; 147_456].into_boxed_slice(),
+            multi_pv: 1,
+            show_wdl: false,
             custom_polyglot_book: None,
             nmp_min_ply: 0,
             static_eval_history: [0; 130],
@@ -370,6 +394,69 @@ impl ChessEngine {
 }
 
 impl ChessEngine {
+    pub fn set_multipv(&mut self, multipv: usize) {
+        self.multi_pv = multipv.max(1);
+    }
+
+    pub fn set_show_wdl(&mut self, show: bool) {
+        self.show_wdl = show;
+    }
+
+    #[inline(always)]
+    fn cont_corr_idx(p_piece: usize, p_to: usize, c_piece: usize, c_to: usize) -> usize {
+        p_piece * 24576 + p_to * 384 + c_piece * 64 + c_to
+    }
+
+    #[inline(always)]
+    fn update_cont_corr(&mut self, p_piece: usize, p_to: usize, c_piece: usize, c_to: usize, bonus: i32) {
+        let idx = Self::cont_corr_idx(p_piece, p_to, c_piece, c_to);
+        if idx < self.cont_corr_table.len() {
+            let entry = &mut self.cont_corr_table[idx];
+            *entry += (bonus * 16 - *entry) / 128;
+        }
+    }
+
+    #[inline(always)]
+    fn get_cont_corr(&self, p_piece: usize, p_to: usize, c_piece: usize, c_to: usize) -> i32 {
+        let idx = Self::cont_corr_idx(p_piece, p_to, c_piece, c_to);
+        if idx < self.cont_corr_table.len() {
+            self.cont_corr_table[idx] / 256
+        } else {
+            0
+        }
+    }
+
+    #[inline(always)]
+    fn is_repetition(&self, hash: u64, ply: u8, halfmove_clock: u8) -> bool {
+        let limit = ply.saturating_sub(halfmove_clock);
+        if ply > limit {
+            let mut i = ply;
+            while i >= limit + 2 {
+                i -= 2;
+                if self.search_path[i as usize] == hash {
+                    return true;
+                }
+            }
+        }
+        if halfmove_clock >= ply && self.game_history_len > 0 {
+            let max_lookback = (halfmove_clock - ply) as usize;
+            let start = self.game_history_len.saturating_sub(max_lookback);
+            let mut idx = if ply % 2 == 0 {
+                self.game_history_len.saturating_sub(2)
+            } else {
+                self.game_history_len.saturating_sub(1)
+            };
+            while idx >= start {
+                if self.game_history[idx] == hash {
+                    return true;
+                }
+                if idx < 2 { break; }
+                idx -= 2;
+            }
+        }
+        false
+    }
+
     pub fn get_best_move_timed_native(&mut self, fen: &str, my_ms: f64, inc_ms: f64, opp_ms: f64, moves_to_go: i32, overhead_ms: f64, _elo: f64, split_id: u8, split_count: u8, history: &str) -> String {
         self.search_timed_native(fen, my_ms, inc_ms, opp_ms, moves_to_go, overhead_ms, 64, split_id, split_count, history, false).to_json()
     }
@@ -491,28 +578,23 @@ impl ChessEngine {
         self.elo = elo as u32;
         // Bump generation every search so old TT entries are more aggressively replaced.
         self.search_generation = self.search_generation.wrapping_add(1);
-
-        // History gravity: age heuristic scores to prevent stale move ordering.
-        for from in 0..64usize {
-            for to in 0..64usize {
-                self.history[from][to] /= 2;
-            }
-        }
-        for val in &mut self.followup_history {
-            *val /= 2;
-        }
-        for a in 0..6 {
-            for s in 0..64 {
-                for v in 0..6 {
-                    self.capture_history[a][s][v] /= 2;
-                }
-            }
-        }
         self.killers = [[None; 2]; 128];
 
         let halfmove_clock: u8 = fen.split_whitespace().nth(4).unwrap_or("0").parse().unwrap_or(0);
         
-        // Rebuild the set of past position hashes for 3-fold repetition detection.
+        // Rebuild flat game history array for zero-allocation repetition detection.
+        self.game_history_len = 0;
+        for normalized_fen in history.split('|') {
+            let normalized_fen = normalized_fen.trim();
+            if normalized_fen.is_empty() { continue; }
+            let full_fen = format!("{} 0 1", normalized_fen);
+            if let Ok(b) = Board::from_str(&full_fen) {
+                if self.game_history_len < 1024 {
+                    self.game_history[self.game_history_len] = b.get_hash();
+                    self.game_history_len += 1;
+                }
+            }
+        }
         self.history_hashes = parse_history_hashes(history);
 
         let moves: ArrayVec<ChessMove, 256> = MoveGen::new_legal(&board).collect();
@@ -582,125 +664,151 @@ impl ChessEngine {
             if depth > max_horizon { break; }
             if self.stop_search || GLOBAL_STOP.load(Ordering::Relaxed) { break; }
 
-            let (mut alpha, mut beta, mut delta) = if depth <= 4 || best_score == -INF {
-                (-INF, INF, INF)
-            } else {
-                let init_delta = if split_count > 1 && split_id > 0 { 75 } else { 50 };
-                (best_score - init_delta, best_score + init_delta, init_delta)
-            };
+            let num_pv = self.multi_pv.min(my_moves).max(1);
+            let mut excluded_root_moves: Vec<ChessMove> = Vec::with_capacity(num_pv);
 
-            let mut completed_search = false;
-            let mut current_move = None;
-            let mut current_best_score = -INF;
-            let mut current_second_best = -INF;
+            let mut iter_best_move = None;
+            let mut iter_best_score = -INF;
+            let mut iter_second_best = -INF;
 
-            loop {
-                let result = self.search_root(&board, depth, alpha, beta, split_id as u32, split_count as u32, halfmove_clock, &tt, &pawn_hash);
+            for pv_idx in 0..num_pv {
                 if self.stop_search || GLOBAL_STOP.load(Ordering::Relaxed) { break; }
-                
-                let elapsed_check = current_time_ms() - self.start_time;
-                if elapsed_check >= self.maximum_time_ms {
-                    self.stop_search = true;
-                    GLOBAL_STOP.store(true, Ordering::Relaxed);
-                }
 
-                if delta == INF {
-                    current_move = result.0;
-                    current_best_score = result.1;
-                    current_second_best = result.2;
-                    completed_search = true;
-                    break;
-                }
-
-                if result.1 <= alpha {
-                    alpha = (alpha - delta).max(-INF);
-                    delta += delta / 2;
-                    if delta > 2000 { alpha = -INF; beta = INF; delta = INF; }
-                } else if result.1 >= beta {
-                    beta = (beta + delta).min(INF);
-                    delta += delta / 2;
-                    if delta > 2000 { alpha = -INF; beta = INF; delta = INF; }
+                let (mut alpha, mut beta, mut delta) = if depth <= 4 || best_score == -INF || pv_idx > 0 {
+                    (-INF, INF, INF)
                 } else {
-                    current_move = result.0;
-                    current_best_score = result.1;
-                    current_second_best = result.2;
-                    completed_search = true;
+                    let init_delta = if split_count > 1 && split_id > 0 { 75 } else { 50 };
+                    (best_score - init_delta, best_score + init_delta, init_delta)
+                };
+
+                let mut completed_search = false;
+                let mut current_move = None;
+                let mut current_best_score = -INF;
+                let mut current_second_best = -INF;
+
+                loop {
+                    let result = self.search_root(&board, depth, alpha, beta, split_id as u32, split_count as u32, halfmove_clock, &tt, &pawn_hash, &excluded_root_moves);
+                    if self.stop_search || GLOBAL_STOP.load(Ordering::Relaxed) { break; }
+                    
+                    let elapsed_check = current_time_ms() - self.start_time;
+                    if !GLOBAL_PONDER.load(Ordering::Relaxed) && elapsed_check >= self.maximum_time_ms {
+                        self.stop_search = true;
+                        GLOBAL_STOP.store(true, Ordering::Relaxed);
+                    }
+
+                    if delta == INF {
+                        current_move = result.0;
+                        current_best_score = result.1;
+                        current_second_best = result.2;
+                        completed_search = true;
+                        break;
+                    }
+
+                    if result.1 <= alpha {
+                        alpha = (alpha - delta).max(-INF);
+                        delta += delta / 2;
+                        if delta > 2000 { alpha = -INF; beta = INF; delta = INF; }
+                    } else if result.1 >= beta {
+                        beta = (beta + delta).min(INF);
+                        delta += delta / 2;
+                        if delta > 2000 { alpha = -INF; beta = INF; delta = INF; }
+                    } else {
+                        current_move = result.0;
+                        current_best_score = result.1;
+                        current_second_best = result.2;
+                        completed_search = true;
+                        break;
+                    }
+
+                    if self.stop_search || GLOBAL_STOP.load(Ordering::Relaxed) { break; }
+                }
+
+                if (self.stop_search || GLOBAL_STOP.load(Ordering::Relaxed)) && !completed_search {
                     break;
                 }
 
-                if self.stop_search || GLOBAL_STOP.load(Ordering::Relaxed) { break; }
+                if let Some(m) = current_move {
+                    if pv_idx == 0 {
+                        iter_best_move = Some(m);
+                        iter_best_score = current_best_score;
+                        iter_second_best = current_second_best;
+                    }
+                    excluded_root_moves.push(m);
+
+                    if print_uci_info && split_id == 0 {
+                        let elapsed = (current_time_ms() - self.start_time).max(1.0);
+                        let total_nodes = self.nodes + if split_id == 0 { GLOBAL_NODES.load(Ordering::Relaxed) } else { 0 };
+                        let nps = ((total_nodes as f64) / (elapsed / 1000.0)) as u64;
+
+                        let mut current_pv = vec![m];
+                        let mut pv_board = board.make_move_new(m);
+                        for _ in 0..15 {
+                            if let Some(entry) = tt.probe(pv_board.get_hash(), 0) {
+                                if let Some(pv_m) = entry.best_move {
+                                    if MoveGen::new_legal(&pv_board).any(|lm| lm == pv_m) {
+                                        current_pv.push(pv_m);
+                                        pv_board = pv_board.make_move_new(pv_m);
+                                        continue;
+                                    }
+                                }
+                            }
+                            break;
+                        }
+                        let pv_str = current_pv.iter().map(|mv| mv.to_string()).collect::<Vec<_>>().join(" ");
+                        let wdl_str = if self.show_wdl {
+                            let (w, d, l) = score_to_wdl(current_best_score);
+                            format!(" wdl {} {} {}", w, d, l)
+                        } else {
+                            String::new()
+                        };
+                        let multipv_str = if num_pv > 1 {
+                            format!(" multipv {}", pv_idx + 1)
+                        } else {
+                            String::new()
+                        };
+                        if current_best_score.abs() > MATE - 128 {
+                            let mate_plies = MATE - current_best_score.abs();
+                            let mate_moves = (mate_plies + 1) / 2;
+                            let mate_score = if current_best_score > 0 { mate_moves } else { -mate_moves };
+                            println!("info depth {}{} score mate {}{} nodes {} nps {} time {} pv {}", depth, multipv_str, mate_score, wdl_str, total_nodes, nps, elapsed as u64, pv_str);
+                        } else {
+                            println!("info depth {}{} score cp {}{} nodes {} nps {} time {} pv {}", depth, multipv_str, current_best_score, wdl_str, total_nodes, nps, elapsed as u64, pv_str);
+                        }
+                    }
+                }
             }
 
-            if (self.stop_search || GLOBAL_STOP.load(Ordering::Relaxed)) && !completed_search {
-                // Incomplete or timed out search on this depth — keep previous completed best_move!
+            if (self.stop_search || GLOBAL_STOP.load(Ordering::Relaxed)) && iter_best_move.is_none() {
                 break;
             }
 
-            if let Some(m) = current_move {
+            if let Some(m) = iter_best_move {
                 best_move = Some(m);
-                best_score = current_best_score;
+                best_score = iter_best_score;
             }
             if self.stop_search || GLOBAL_STOP.load(Ordering::Relaxed) { break; }
             
             depth_reached = depth;
-
-            // Extract current PV from TT for live reporting:
-            let mut current_pv = Vec::new();
-            let mut pv_board = board.clone();
-            for _ in 0..16 {
-                if let Some(entry) = tt.probe(pv_board.get_hash(), 0) {
-                    if let Some(pv_m) = entry.best_move {
-                        if MoveGen::new_legal(&pv_board).any(|m| m == pv_m) {
-                            current_pv.push(pv_m);
-                            pv_board = pv_board.make_move_new(pv_m);
-                            continue;
-                        }
-                    }
-                }
-                break;
-            }
-            if current_pv.is_empty() {
-                if let Some(m) = best_move { current_pv.push(m); }
-            }
-
-            if print_uci_info && split_id == 0 {
-                let elapsed = (current_time_ms() - self.start_time).max(1.0);
-                let total_nodes = self.nodes + if split_id == 0 { GLOBAL_NODES.load(Ordering::Relaxed) } else { 0 };
-                let nps = ((total_nodes as f64) / (elapsed / 1000.0)) as u64;
-                let pv_str = current_pv.iter().map(|m| m.to_string()).collect::<Vec<_>>().join(" ");
-                if best_score.abs() > MATE - 128 {
-                    let mate_plies = MATE - best_score.abs();
-                    let mate_moves = (mate_plies + 1) / 2;
-                    let mate_score = if best_score > 0 { mate_moves } else { -mate_moves };
-                    println!("info depth {} score mate {} nodes {} nps {} time {} pv {}", depth, mate_score, total_nodes, nps, elapsed as u64, pv_str);
-                } else {
-                    println!("info depth {} score cp {} nodes {} nps {} time {} pv {}", depth, best_score, total_nodes, nps, elapsed as u64, pv_str);
-                }
-            }
             
             // TimeScaler logic
             if previous_best_move == best_move {
                 best_move_stable_iterations += 1;
             } else {
                 best_move_stable_iterations = 0;
-                // Best move changed: extend time slightly
                 time_scale = (time_scale * 1.3).min(self.maximum_time_ms / base_opt.max(1.0));
             }
             
-            // Score dropped significantly: extend time
             if depth > 1 && previous_best_score - best_score > 40 {
                 time_scale = (time_scale * 1.5).min(self.maximum_time_ms / base_opt.max(1.0));
             }
             
-            // Reductions for stable or easy move: calculated per depth from base, not accumulated indefinitely
             let mut reduction_factor = 1.0f64;
             if best_move_stable_iterations >= 4 {
-                reduction_factor *= 0.85; // conservative reduction
+                reduction_factor *= 0.85;
             }
             
-            // "Easy move": best move is significantly better than the second best (> 120 cp)
-            if depth >= 8 && best_move_stable_iterations >= 3 && (best_score - current_second_best > 120) {
-                reduction_factor *= 0.80; // genuine easy move, save time
+            if depth >= 8 && best_move_stable_iterations >= 3 && (best_score - iter_second_best > 120) {
+                reduction_factor *= 0.80;
             }
 
             self.optimum_time_ms = ((base_opt * time_scale) * reduction_factor).clamp(10.0, self.maximum_time_ms);
@@ -710,10 +818,9 @@ impl ChessEngine {
 
             // Do not start next depth if soft time is up.
             let elapsed = current_time_ms() - self.start_time;
-            if elapsed > self.optimum_time_ms * 0.75 {
+            if !GLOBAL_PONDER.load(Ordering::Relaxed) && elapsed > self.optimum_time_ms * 0.75 {
                 break;
             }
-
         }
         
         if split_id == 0 {
@@ -1147,7 +1254,19 @@ impl ChessEngine {
         scores.swap(start, best_idx);
     }
 
-    fn search_root(&mut self, board: &Board, depth: u8, mut alpha: i32, beta: i32, split_id: u32, split_count: u32, halfmove_clock: u8, tt: &TranspositionTable, pawn_hash: &PawnHashTable) -> (Option<ChessMove>, i32, i32) {
+    fn search_root(
+        &mut self,
+        board: &Board,
+        depth: u8,
+        mut alpha: i32,
+        beta: i32,
+        split_id: u32,
+        split_count: u32,
+        halfmove_clock: u8,
+        tt: &TranspositionTable,
+        pawn_hash: &PawnHashTable,
+        excluded_root_moves: &[ChessMove],
+    ) -> (Option<ChessMove>, i32, i32) {
         let mut best_move = None;
         let mut best_score = -INF;
         let mut second_best = -INF;
@@ -1192,6 +1311,9 @@ impl ChessEngine {
         for i in 0..moves.len() {
             self.pick_move(&mut moves, &mut scores, i);
             let m = moves[i];
+            if excluded_root_moves.contains(&m) {
+                continue;
+            }
             
             let next_board = board.make_move_new(m);
             self.update_nnue(0, board, &next_board, m);
@@ -1224,7 +1346,7 @@ impl ChessEngine {
             if score > alpha { alpha = score; }
             if alpha >= beta { break; }
         }
-        if !self.stop_search {
+        if !self.stop_search && excluded_root_moves.is_empty() {
             let flag = if best_score <= original_alpha { UPPERBOUND } else if best_score >= beta { LOWERBOUND } else { EXACT };
             tt.store(hash, best_move, depth, best_score, flag, 0, self.search_generation);
         }
@@ -1240,33 +1362,16 @@ impl ChessEngine {
     }
 
     fn quiescence_search(&mut self, board: &Board, mut alpha: i32, beta: i32, ply: u8, halfmove_clock: u8, tt: &TranspositionTable, pawn_hash: &PawnHashTable) -> i32 {
-        if ply >= 127 { return self.evaluate_full(board, pawn_hash, ply); }
+        if ply >= 127 { return self.evaluate_full(board, pawn_hash, ply, halfmove_clock); }
         self.nodes += 1;
         if (self.nodes & 4095) == 0 { self.check_time(); }
         if self.stop_search { return 0; }
 
         let hash = board.get_hash();
-        let history_count = if halfmove_clock >= ply && !self.history_hashes.is_empty() {
-            self.history_hashes.get(&hash).copied().unwrap_or(0)
-        } else {
-            0
-        };
-        let mut path_rep = 0;
-        let limit = ply.saturating_sub(halfmove_clock);
-        if ply > limit {
-            let mut i = ply;
-            while i >= limit + 2 {
-                i -= 2;
-                if self.search_path[i as usize] == hash {
-                    path_rep += 1;
-                }
-            }
-        }
-        if history_count >= 2 || path_rep >= 1 { return 0; }
+        if self.is_repetition(hash, ply, halfmove_clock) { return 0; }
         if (ply as usize) < 128 {
             self.search_path[ply as usize] = hash;
         }
-
 
         let mut tt_move = None;
         if let Some(entry) = tt.probe(hash, ply) {
@@ -1280,12 +1385,7 @@ impl ChessEngine {
         let stand_pat = if in_check { 
             0 
         } else { 
-            let base_eval = self.evaluate_full(board, pawn_hash, ply);
-            if halfmove_clock > 40 && base_eval.abs() < MATE - 1000 {
-                (base_eval * (200 - halfmove_clock as i32)) / 200
-            } else {
-                base_eval
-            }
+            self.evaluate_full(board, pawn_hash, ply, halfmove_clock)
         };
         let original_alpha = alpha;
         
@@ -1299,6 +1399,20 @@ impl ChessEngine {
 
         let mut moves: ArrayVec<ChessMove, 256> = if in_check {
             MoveGen::new_legal(board).collect()
+        } else if ply <= 1 {
+            let mut legals: ArrayVec<ChessMove, 256> = ArrayVec::new();
+            for m in MoveGen::new_legal(board) {
+                let (is_cap, _, _) = get_move_props(board, m);
+                if is_cap || m.get_promotion().is_some() {
+                    legals.push(m);
+                } else {
+                    let next_b = board.make_move_new(m);
+                    if next_b.checkers().popcnt() > 0 && see_value(board, m) >= 0 {
+                        legals.push(m);
+                    }
+                }
+            }
+            legals
         } else {
             let mut gen = MoveGen::new_legal(board);
             let enemies = board.color_combined(!board.side_to_move()).0;
@@ -1331,7 +1445,7 @@ impl ChessEngine {
             
             let (is_capture, is_ep, is_pawn_move) = get_move_props(board, m);
 
-            if !in_check && stand_pat + 1225 < alpha && m.get_promotion().is_none() {
+            if !in_check && stand_pat + 1225 < alpha && m.get_promotion().is_none() && is_capture {
                 continue;
             }
 
@@ -1405,7 +1519,7 @@ impl ChessEngine {
         pawn_hash: &PawnHashTable,
         excluded_move: Option<ChessMove>,
     ) -> i32 {
-        if ply >= 127 { return self.evaluate_full(board, pawn_hash, ply); }
+        if ply >= 127 { return self.evaluate_full(board, pawn_hash, ply, halfmove_clock); }
         self.nodes += 1;
         if (self.nodes & 4095) == 0 { self.check_time(); }
         if self.stop_search { return 0; }
@@ -1414,23 +1528,7 @@ impl ChessEngine {
         if self.is_insufficient_material(board) { return 0; }
         
         let hash = board.get_hash();
-        let history_count = if halfmove_clock >= ply && !self.history_hashes.is_empty() {
-            self.history_hashes.get(&hash).copied().unwrap_or(0)
-        } else {
-            0
-        };
-        let mut path_rep = 0;
-        let limit = ply.saturating_sub(halfmove_clock);
-        if ply > limit {
-            let mut i = ply;
-            while i >= limit + 2 {
-                i -= 2;
-                if self.search_path[i as usize] == hash {
-                    path_rep += 1;
-                }
-            }
-        }
-        if history_count >= 2 || path_rep >= 1 { return 0; }
+        if self.is_repetition(hash, ply, halfmove_clock) { return 0; }
         if (ply as usize) < 128 {
             self.search_path[ply as usize] = hash;
         }
@@ -1497,7 +1595,15 @@ impl ChessEngine {
         }
 
         // Compute static eval & track improving heuristic
-        let static_eval = if !is_check { self.evaluate_full(board, pawn_hash, ply) } else { 0 };
+        let mut static_eval = if !is_check { self.evaluate_full(board, pawn_hash, ply, halfmove_clock) } else { 0 };
+        if !is_check && ply >= 2 {
+            if let (Some(p2), Some(p1)) = (self.search_path_moves[(ply - 2) as usize], self.search_path_moves[(ply - 1) as usize]) {
+                let p2_piece = board.piece_on(p2.get_dest()).unwrap_or(Piece::Pawn).to_index();
+                let p1_piece = board.piece_on(p1.get_dest()).unwrap_or(Piece::Pawn).to_index();
+                let cont_corr = self.get_cont_corr(p2_piece, p2.get_dest().to_index(), p1_piece, p1.get_dest().to_index());
+                static_eval = (static_eval + cont_corr).clamp(-MATE + 128, MATE - 128);
+            }
+        }
         if (ply as usize) < self.static_eval_history.len() {
             self.static_eval_history[ply as usize] = static_eval;
         }
@@ -1751,6 +1857,39 @@ impl ChessEngine {
                         r += 1;
                     }
 
+                    // Recapture reduction adjustment
+                    if ply > 0 {
+                        if let Some(prev) = self.search_path_moves[(ply - 1) as usize] {
+                            if m.get_dest() == prev.get_dest() {
+                                r = r.saturating_sub(1);
+                            }
+                        }
+                    }
+
+                    // 7th-rank pawn push reduction adjustment
+                    if board.piece_on(m.get_source()) == Some(Piece::Pawn) {
+                        let dest_rank = m.get_dest().get_rank();
+                        if (board.side_to_move() == Color::White && dest_rank == Rank::Seventh)
+                            || (board.side_to_move() == Color::Black && dest_rank == Rank::Second)
+                        {
+                            r = r.saturating_sub(1);
+                        }
+                    }
+
+                    // Continuation Correction History adjustment for LMR
+                    if ply > 0 {
+                        if let Some(prev) = self.search_path_moves[(ply - 1) as usize] {
+                            let prev_piece = board.piece_on(prev.get_dest()).unwrap_or(Piece::Pawn).to_index();
+                            let curr_piece = board.piece_on(m.get_source()).unwrap_or(Piece::Pawn).to_index();
+                            let move_corr = self.get_cont_corr(prev_piece, prev.get_dest().to_index(), curr_piece, m.get_dest().to_index());
+                            if move_corr > 180 {
+                                r = r.saturating_sub(1);
+                            } else if move_corr < -180 {
+                                r += 1;
+                            }
+                        }
+                    }
+
                     // History heuristic bonus/malus for LMR
                     let history_score = self.history[m.get_source().to_index()][m.get_dest().to_index()];
                     if history_score > 4000 {
@@ -1799,6 +1938,10 @@ impl ChessEngine {
                             if let Some(prev) = self.search_path_moves[(ply - 1) as usize] {
                                 let prev_piece = board.piece_on(prev.get_dest()).unwrap_or(Piece::Pawn);
                                 self.counter_moves[(!board.side_to_move()) as usize][prev_piece as usize][prev.get_dest().to_index()] = Some(m);
+
+                                let curr_piece = board.piece_on(m.get_source()).unwrap_or(Piece::Pawn).to_index();
+                                let corr_bonus = (best_score - static_eval).clamp(-1024, 1024);
+                                self.update_cont_corr(prev_piece.to_index(), prev.get_dest().to_index(), curr_piece, m.get_dest().to_index(), corr_bonus);
                             }
                         }
                         if ply > 1 {
@@ -1838,6 +1981,14 @@ impl ChessEngine {
                             let h2 = &mut self.history[qm.get_source().to_index()][qm.get_dest().to_index()];
                             *h2 -= stat_bonus + (*h2 * stat_bonus) / 16384;
                             
+                            if ply > 0 {
+                                if let Some(prev) = self.search_path_moves[(ply - 1) as usize] {
+                                    let prev_piece = board.piece_on(prev.get_dest()).unwrap_or(Piece::Pawn).to_index();
+                                    let qm_piece = board.piece_on(qm.get_source()).unwrap_or(Piece::Pawn).to_index();
+                                    let malus = (stat_bonus / 2).clamp(0, 512);
+                                    self.update_cont_corr(prev_piece, prev.get_dest().to_index(), qm_piece, qm.get_dest().to_index(), -malus);
+                                }
+                            }
                             if ply > 1 {
                                 if let Some(prev2) = self.search_path_moves[(ply - 2) as usize] {
                                     let idx = (prev2.get_dest().to_index() * 4096) + (qm.get_source().to_index() * 64) + qm.get_dest().to_index();
@@ -1865,6 +2016,9 @@ impl ChessEngine {
                 let entry = &mut self.pawn_corr_table[stm_idx][corr_idx];
                 *entry += (bonus * 16 - *entry) / 128;
             }
+        }
+        if !is_pv_node && !is_check && best_score >= beta && best_score.abs() < MATE - 128 {
+            return (best_score * 3 + beta) / 4;
         }
         best_score
     }
@@ -2031,7 +2185,7 @@ impl ChessEngine {
         0
     }
 
-    fn evaluate_full(&mut self, board: &Board, pawn_hash: &PawnHashTable, ply: u8) -> i32 {
+    fn evaluate_full(&mut self, board: &Board, pawn_hash: &PawnHashTable, ply: u8, halfmove_clock: u8) -> i32 {
         // Specialized theoretical endgame check (insufficient material, KPK, KBNK)
         if let Some(eg_score) = evaluate_specialized_endgame(board) {
             return eg_score;
@@ -2049,11 +2203,27 @@ impl ChessEngine {
             let base_eval = evaluate(board);
             if base_eval.abs() > 950 {
                 let stm_sign = if board.side_to_move() == Color::White { 1 } else { -1 };
-                return (base_eval * stm_sign + pawn_corr).clamp(-MATE + 128, MATE - 128);
+                let mut eval = base_eval * stm_sign + pawn_corr;
+                if halfmove_clock >= 20 {
+                    eval = (eval * (220 - halfmove_clock as i32)) / 220;
+                }
+                return eval.clamp(-MATE + 128, MATE - 128);
             }
 
             let val = nnue::evaluate(network, &self.accumulators[ply as usize], board.side_to_move());
-            return (val + pawn_corr).clamp(-MATE + 128, MATE - 128);
+            let pawn_count = board.pieces(Piece::Pawn).popcnt() as i32;
+            let non_pawn_mat = (board.pieces(Piece::Knight).popcnt() as i32 * 320)
+                + (board.pieces(Piece::Bishop).popcnt() as i32 * 330)
+                + (board.pieces(Piece::Rook).popcnt() as i32 * 500)
+                + (board.pieces(Piece::Queen).popcnt() as i32 * 1000);
+            let mut eval = (val * (720 + 32 * pawn_count + non_pawn_mat / 32)) / 1024;
+            eval += pawn_corr;
+
+            if halfmove_clock >= 20 {
+                eval = (eval * (220 - halfmove_clock as i32)) / 220;
+            }
+
+            return eval.clamp(-MATE + 128, MATE - 128);
         }
 
         let mut score = evaluate(board); // Base PeSTO evaluation
@@ -2302,8 +2472,12 @@ impl ChessEngine {
             let pawns = board.pieces(Piece::Pawn).popcnt() as i32;
             score = (score * (pawns * 8 + 36)) / 100;
         }
-        let final_score = if board.side_to_move() == Color::White { score } else { -score };
-        (final_score + pawn_corr).clamp(-MATE + 128, MATE - 128)
+        let mut final_score = if board.side_to_move() == Color::White { score } else { -score };
+        final_score += pawn_corr;
+        if halfmove_clock >= 20 {
+            final_score = (final_score * (220 - halfmove_clock as i32)) / 220;
+        }
+        final_score.clamp(-MATE + 128, MATE - 128)
     }
 }
 
@@ -2647,7 +2821,7 @@ mod tests {
         let board = Board::default();
         let mut engine = ChessEngine::new();
         let pawn_hash = PawnHashTable::new(131_072);
-        let score = engine.evaluate_full(&board, &pawn_hash, 0);
+        let score = engine.evaluate_full(&board, &pawn_hash, 0, 0);
         assert!(score.abs() < 60, "start position should be near zero, got {}", score);
     }
 

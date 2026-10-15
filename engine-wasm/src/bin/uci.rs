@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Sender};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
-use engine_wasm::{ChessEngine, GLOBAL_NODES, GLOBAL_STOP};
+use engine_wasm::{ChessEngine, GLOBAL_NODES, GLOBAL_STOP, GLOBAL_PONDER};
 
 fn load_nnue_data() -> Vec<u8> {
     let candidate_paths = [
@@ -43,6 +43,8 @@ enum WorkerMessage {
         split_id: u8,
     },
     SetHash(usize),
+    SetMultiPV(usize),
+    SetShowWDL(bool),
     LoadBook(Arc<Vec<u8>>),
     Terminate,
 }
@@ -54,6 +56,8 @@ struct WorkerPool {
     nnue_bytes: Arc<Vec<u8>>,
     book_bytes: Option<Arc<Vec<u8>>>,
     hash_mb: usize,
+    multipv: usize,
+    show_wdl: bool,
 }
 
 impl WorkerPool {
@@ -63,6 +67,8 @@ impl WorkerPool {
             nnue_bytes,
             book_bytes: None,
             hash_mb: 64,
+            multipv: 1,
+            show_wdl: false,
         };
         pool.resize(count);
         pool
@@ -83,6 +89,8 @@ impl WorkerPool {
             let thread_nnue = Arc::clone(&self.nnue_bytes);
             let thread_book = self.book_bytes.clone();
             let hash_mb = self.hash_mb;
+            let multipv = self.multipv;
+            let show_wdl = self.show_wdl;
 
             let handle = thread::spawn(move || {
                 let mut engine = ChessEngine::new();
@@ -93,6 +101,8 @@ impl WorkerPool {
                     engine.load_polyglot_book_native(&book);
                 }
                 engine.set_hash_size(hash_mb);
+                engine.set_multipv(multipv);
+                engine.set_show_wdl(show_wdl);
 
                 while let Ok(msg) = rx.recv() {
                     match msg {
@@ -110,6 +120,11 @@ impl WorkerPool {
                             );
 
                             if id == 0 {
+                                // While pondering, wait for ponderhit or stop before releasing bestmove
+                                while GLOBAL_PONDER.load(Ordering::Relaxed) && !GLOBAL_STOP.load(Ordering::Relaxed) {
+                                    thread::sleep(std::time::Duration::from_millis(5));
+                                }
+
                                 // Master thread outputs bestmove
                                 if let Some(bm) = res.best_move {
                                     if let Some(pm) = res.ponder_move {
@@ -134,6 +149,12 @@ impl WorkerPool {
                         }
                         WorkerMessage::SetHash(mb) => {
                             engine.set_hash_size(mb);
+                        }
+                        WorkerMessage::SetMultiPV(val) => {
+                            engine.set_multipv(val);
+                        }
+                        WorkerMessage::SetShowWDL(val) => {
+                            engine.set_show_wdl(val);
                         }
                         WorkerMessage::LoadBook(bytes) => {
                             engine.load_polyglot_book_native(&bytes);
@@ -160,6 +181,20 @@ impl WorkerPool {
         self.hash_mb = mb;
         for (tx, _) in &self.threads {
             let _ = tx.send(WorkerMessage::SetHash(mb));
+        }
+    }
+
+    fn set_multipv(&mut self, val: usize) {
+        self.multipv = val;
+        for (tx, _) in &self.threads {
+            let _ = tx.send(WorkerMessage::SetMultiPV(val));
+        }
+    }
+
+    fn set_show_wdl(&mut self, val: bool) {
+        self.show_wdl = val;
+        for (tx, _) in &self.threads {
+            let _ = tx.send(WorkerMessage::SetShowWDL(val));
         }
     }
 
@@ -249,6 +284,7 @@ fn main() {
 
     let mut position_fen = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1".to_string();
     let mut position_history: Vec<String> = Vec::new();
+    let mut move_overhead_ms: f64 = 10.0;
 
     println!("id name Aether v2.2.0");
     println!("id author Aether Team");
@@ -263,6 +299,9 @@ fn main() {
                 println!("id author Aether Team");
                 println!("option name Hash type spin default 64 min 1 max 2048");
                 println!("option name Threads type spin default {} min 1 max 64", default_threads);
+                println!("option name MultiPV type spin default 1 min 1 max 500");
+                println!("option name Move Overhead type spin default 10 min 0 max 5000");
+                println!("option name UCI_ShowWDL type check default false");
                 println!("option name BookFile type string default <empty>");
                 println!("option name SyzygyPath type string default <empty>");
                 println!("option name SyzygyProbeDepth type spin default 1 min 1 max 64");
@@ -285,6 +324,17 @@ fn main() {
                             if let Ok(count) = tokens.get(val_idx + 1).unwrap_or(&"4").parse::<usize>() {
                                 pool.resize(count);
                             }
+                        } else if opt_name == "MultiPV" {
+                            if let Ok(mpv) = tokens.get(val_idx + 1).unwrap_or(&"1").parse::<usize>() {
+                                pool.set_multipv(mpv);
+                            }
+                        } else if opt_name == "Move" && tokens.get(name_idx + 2) == Some(&"Overhead") {
+                            if let Ok(ov) = tokens.get(val_idx + 1).unwrap_or(&"10").parse::<f64>() {
+                                move_overhead_ms = ov;
+                            }
+                        } else if opt_name == "UCI_ShowWDL" {
+                            let b = tokens.get(val_idx + 1).map(|v| *v == "true").unwrap_or(false);
+                            pool.set_show_wdl(b);
                         } else if opt_name == "BookFile" {
                             let book_path = tokens[val_idx + 1..].join(" ");
                             if let Ok(bytes) = std::fs::read(&book_path) {
@@ -312,6 +362,7 @@ fn main() {
                 println!("readyok");
             }
             "ucinewgame" => {
+                GLOBAL_PONDER.store(false, Ordering::Relaxed);
                 GLOBAL_STOP.store(true, Ordering::Relaxed);
                 while SEARCH_RUNNING.load(Ordering::Relaxed) {
                     thread::sleep(std::time::Duration::from_millis(2));
@@ -348,10 +399,18 @@ fn main() {
             "go" => {
                 // If previous search is running, stop it first:
                 if SEARCH_RUNNING.load(Ordering::Relaxed) {
+                    GLOBAL_PONDER.store(false, Ordering::Relaxed);
                     GLOBAL_STOP.store(true, Ordering::Relaxed);
                     while SEARCH_RUNNING.load(Ordering::Relaxed) {
                         thread::sleep(std::time::Duration::from_millis(2));
                     }
+                }
+
+                let is_ponder = tokens.iter().any(|&t| t == "ponder");
+                if is_ponder {
+                    GLOBAL_PONDER.store(true, Ordering::Relaxed);
+                } else {
+                    GLOBAL_PONDER.store(false, Ordering::Relaxed);
                 }
 
                 let mut wtime: f64 = 0.0;
@@ -383,7 +442,7 @@ fn main() {
                 let (my_time, my_inc) = if is_white { (wtime, winc) } else { (btime, binc) };
                 let opp_time = if is_white { btime } else { wtime };
 
-                let (optimum_time_ms, maximum_time_ms, max_depth) = if infinite {
+                let (optimum_time_ms, maximum_time_ms, max_depth) = if infinite || is_ponder {
                     (1e9, 1e9, 64u8)
                 } else if movetime > 0.0 {
                     (movetime * 0.95, movetime, if depth_limit > 0 { depth_limit as u8 } else { 64u8 })
@@ -394,7 +453,7 @@ fn main() {
                         increment_ms: my_inc,
                         opponent_remaining_ms: opp_time,
                         moves_to_go: if movestogo > 0 { Some(movestogo) } else { None },
-                        move_overhead_ms: 30.0,
+                        move_overhead_ms,
                         piece_count,
                     };
                     let budget = engine_wasm::timeman::allocate(&clock);
@@ -420,7 +479,11 @@ fn main() {
 
                 pool.dispatch_search(params);
             }
+            "ponderhit" => {
+                GLOBAL_PONDER.store(false, Ordering::Relaxed);
+            }
             "stop" => {
+                GLOBAL_PONDER.store(false, Ordering::Relaxed);
                 GLOBAL_STOP.store(true, Ordering::Relaxed);
             }
             "bench" => {
