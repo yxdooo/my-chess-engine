@@ -1408,7 +1408,7 @@ function processPosition(networkFen = null) {
         return;
     }
     try {
-        const fen = networkFen || parseBoard();
+        let fen = networkFen || parseBoard();
         if (!fen) {
             // This is completely normal during page load or when waiting for a match.
             // We use debug instead of warn to avoid spamming the console.
@@ -1422,7 +1422,7 @@ function processPosition(networkFen = null) {
     clearOverlay();
 
     const timeLeft = getMyTimeLeft();
-    const stm = fen.split(" ")[1];
+    let stm = fen.split(" ")[1];
     
     // Better color detection for online games:
     // If flipBoard detection is uncertain, try to infer from pawn structure
@@ -1437,6 +1437,15 @@ function processPosition(networkFen = null) {
                        boardEl.getAttribute("data-orientation");
         if (orient === "black") myColor = "b";
         else if (orient === "white") myColor = "w";
+    }
+
+    if (forceMyTurnOnce) {
+        stm = myColor;
+        forceMyTurnOnce = false;
+        const parts = fen.split(" ");
+        parts[1] = stm;
+        fen = parts.join(" ");
+        addDebugLog(`⚡ Force Move applied: forced turn to ${myColor.toUpperCase()}`);
     }
     
     const isMyTurn = stm === myColor;
@@ -1705,6 +1714,7 @@ try {
             boardFound: !!document.querySelector("wc-chess-board, chess-board"),
         }),
         forceMove: () => {
+            forceMyTurnOnce = true;
             isSearchInFlight = false;
             currentFEN = "";
             processPosition();
