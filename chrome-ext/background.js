@@ -209,7 +209,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         chrome.storage.local.get(
             ["isActive", "elo", "targetWorkers", "hashSize", "increment"],
             (result) => {
-                if (!result.isActive) {
+                if (result.isActive === false) {
                     log.debug('Background', 'Engine is inactive, dropping NEW_POSITION');
                     sendResponse({ bestMove: null });
                     return;
@@ -341,6 +341,15 @@ function callOffscreenEngine(
     const budget = calculateSearchBudget(my_ms, inc_ms);
 
     setupOffscreenDocument("offscreen.html").then(() => {
+        let responded = false;
+        const failsafeTimeout = setTimeout(() => {
+            if (!responded) {
+                responded = true;
+                log.warn('Background', 'Offscreen document timed out — falling back to single worker');
+                runFallbackWorker(fen, my_ms, opp_ms, inc_ms, movesToGo, elo, history, hashSize, isMyTurn, sendResponse, workerCount);
+            }
+        }, (budget.maxTimeMs || 1600) + 3500);
+
         chrome.runtime.sendMessage(
             {
                 type: "START_SMP_SEARCH",
@@ -355,6 +364,10 @@ function callOffscreenEngine(
                 hashSize,
             },
             (response) => {
+                if (responded) return;
+                responded = true;
+                clearTimeout(failsafeTimeout);
+
                 if (chrome.runtime.lastError) {
                     log.warn('Background', `Offscreen error (sending to fallback): ${chrome.runtime.lastError.message}`);
                     runFallbackWorker(fen, my_ms, opp_ms, inc_ms, movesToGo, elo, history, hashSize, isMyTurn, sendResponse, workerCount);

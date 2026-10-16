@@ -24,8 +24,11 @@ let currentWorkerCount = 1;
 /** @type {object|null} Queued search message waiting for workers to be ready. */
 let messageQueue = null;
 
-/** @type {Function|null} sendResponse callback for the pending search request. */
-let currentSendResponse = null;
+/** @type {Array<Function>} sendResponse callbacks waiting for the active search result. */
+let activeResponseCallbacks = [];
+
+/** @type {string} Normalized 4-field FEN currently being searched by the active search. */
+let activeSearchFen = "";
 
 /** @type {number} Current transposition table size in MB. */
 let activeHashSize = 128;
@@ -250,9 +253,12 @@ function handleWorkerMessage(workerIndex, data) {
             const queued = messageQueue;
             messageQueue = null;
             processSearch(queued, currentSearchId, abortFlag);
-        } else if (workersReady === 0 && currentSendResponse) {
-            currentSendResponse({ bestMove: null });
-            currentSendResponse = null;
+        } else if (workersReady === 0 && activeResponseCallbacks.length > 0) {
+            const cbs = [...activeResponseCallbacks];
+            activeResponseCallbacks = [];
+            for (const cb of cbs) {
+                try { cb({ bestMove: null }); } catch (_) {}
+            }
         }
         return;
     }
@@ -430,8 +436,8 @@ function finalizeActiveSearch() {
 
         log.info('SMP', `Search #${activeSearchId} finalized in ${elapsed}ms | best=${aggregated.bestMove} score=${aggregated.score}cp depth=${aggregated.depth} nodes=${totalNodes.toLocaleString()} nps=${nps}`);
 
-        if (currentSendResponse) {
-            currentSendResponse({
+        if (activeResponseCallbacks.length > 0) {
+            const payload = {
                 bestMove:  aggregated.bestMove,
                 pv:        aggregated.pv,
                 ponderFen: aggregated.ponderFen,
@@ -440,14 +446,18 @@ function finalizeActiveSearch() {
                 depth:     aggregated.depth,
                 nodes:     totalNodes,
                 timeMs:    elapsed,
-            });
-            currentSendResponse = null;
+            };
+            const cbs = [...activeResponseCallbacks];
+            activeResponseCallbacks = [];
+            for (const cb of cbs) {
+                try { cb(payload); } catch (_) {}
+            }
         }
     } catch (err) {
         log.error('SMP', 'Error during finalizeActiveSearch', err);
-        if (currentSendResponse) {
+        if (activeResponseCallbacks.length > 0) {
             const fallbackMove = activeWorkerResults.find(r => r && r.bestMove)?.bestMove || null;
-            currentSendResponse({
+            const errPayload = {
                 bestMove: fallbackMove,
                 pv: fallbackMove ? [fallbackMove] : [],
                 ponderFen: "",
@@ -456,8 +466,12 @@ function finalizeActiveSearch() {
                 depth: 0,
                 nodes: 0,
                 timeMs: 0,
-            });
-            currentSendResponse = null;
+            };
+            const cbs = [...activeResponseCallbacks];
+            activeResponseCallbacks = [];
+            for (const cb of cbs) {
+                try { cb(errPayload); } catch (_) {}
+            }
         }
     }
 }
@@ -476,44 +490,77 @@ if (typeof chrome !== "undefined" && chrome.runtime?.onMessage) {
 }
 
 /**
- * Aborts any previous search and dispatches or queues the new search.
+ * Dispatches or queues an SMP search request.
+ * Incorporates robust FEN-deduplication: if a search is already running for the exact
+ * same position, attaches the caller's callback instead of destructively aborting.
  *
  * @param {object}   message      - The search request payload.
  * @param {Function} sendResponse - Chrome messaging response callback.
  */
 function startEngineSearch(message, sendResponse) {
+    const normFen = (message.fen || "").split(" ").slice(0, 4).join(" ");
     const logTime = message.searchTimeMs || (message.my_ms ? Math.round(message.my_ms / 35) : 1200);
-    log.info('SMP', `New search request received | elo=${message.elo} targetTimeMs=${logTime} workers=${message.activeWorkerCount}`);
-    
-    // Abort previous search via SharedArrayBuffer flag
-    if (abortFlag) {
-        try { abortFlag[0] = 1; } catch (_) {}
+    log.info('SMP', `New search request received | elo=${message.elo} targetTimeMs=${logTime} workers=${message.activeWorkerCount} fen=${normFen.substring(0, 35)}`);
+
+    // 1. If an active search is ALREADY running for the EXACT SAME position:
+    // Do NOT abort! Attach the caller's callback so it receives the result when ready.
+    if (activeSearchRunning && !activeSearchCompleted && activeSearchFen === normFen) {
+        log.info('SMP', `Search #${activeSearchId} already running for this exact FEN — attaching response listener`);
+        if (sendResponse) {
+            activeResponseCallbacks.push(sendResponse);
+        }
+        return;
     }
 
-    // Cancel previously running search
+    // 2. If workers are still booting and a search is already queued:
+    if (messageQueue && workersReady < 1) {
+        const queuedFen = (messageQueue.fen || "").split(" ").slice(0, 4).join(" ");
+        if (queuedFen === normFen) {
+            log.info('SMP', `Search #${currentSearchId} already queued for this exact FEN — attaching response listener`);
+            if (sendResponse) {
+                activeResponseCallbacks.push(sendResponse);
+            }
+            return;
+        }
+        // Different position queued while waiting for workers: update queued message
+        log.info('SMP', `Replacing queued search with newer position FEN`);
+        messageQueue = message;
+        activeSearchFen = normFen;
+        const oldCbs = [...activeResponseCallbacks];
+        activeResponseCallbacks = sendResponse ? [sendResponse] : [];
+        for (const cb of oldCbs) {
+            try { cb({ bestMove: null }); } catch (_) {}
+        }
+        return;
+    }
+
+    // 3. If an active search is running for a DIFFERENT position:
+    // Abort the previous search gracefully WITHOUT destroying healthy workers!
     if (activeSearchRunning && !activeSearchCompleted) {
-        log.info('SMP', 'Aborting previous running search for new position');
-        if (currentSendResponse) {
-            currentSendResponse({ bestMove: null });
-            currentSendResponse = null;
+        log.info('SMP', `Aborting running search #${activeSearchId} for new position`);
+        if (abortFlag) {
+            try { abortFlag[0] = 1; } catch (_) {}
         }
         activeSearchRunning = false;
         activeSearchCompleted = true;
-
-        if (!abortFlag) {
-            restartWorkerPool();
+        if (activeGraceTimer) {
+            clearTimeout(activeGraceTimer);
+            activeGraceTimer = null;
+        }
+        if (activeFailsafeTimer) {
+            clearTimeout(activeFailsafeTimer);
+            activeFailsafeTimer = null;
+        }
+        const oldCbs = [...activeResponseCallbacks];
+        activeResponseCallbacks = [];
+        for (const cb of oldCbs) {
+            try { cb({ bestMove: null }); } catch (_) {}
         }
     }
 
     currentSearchId++;
-
-    if (currentSendResponse) {
-        log.info('SMP', 'Previous search response uncalled — sending null fallback');
-        currentSendResponse({ bestMove: null });
-        currentSendResponse = null;
-    }
-
-    currentSendResponse = sendResponse;
+    activeSearchFen = normFen;
+    activeResponseCallbacks = sendResponse ? [sendResponse] : [];
 
     if (message.hashSize && message.hashSize !== activeHashSize) {
         activeHashSize = message.hashSize;

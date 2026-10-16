@@ -45,8 +45,13 @@ const log = {
 
 log.info('Content', 'Logger initialized');
 
+const AETHER_VERSION = "2.4.7";
+
 /** @type {string} The last FEN position that was sent for analysis. */
 let currentFEN = "";
+
+/** @type {boolean} True while a search request is in-flight to prevent duplicate message storms. */
+let isSearchInFlight = false;
 
 /** Maximum number of prior positions kept for repetition detection. */
 const MAX_FEN_HISTORY = 50;
@@ -112,7 +117,7 @@ function renderDebugHUD() {
     if (isCollapsed) {
         hud.innerHTML = `
             <div style="padding: 6px 12px; display: flex; align-items: center; justify-content: space-between; cursor: pointer; background: #0f172a;" id="aether-hud-header">
-                <span style="font-weight: bold; color: #2ecc71;">⚡ Aether v2.4.5</span>
+                <span style="font-weight: bold; color: #2ecc71;">⚡ Aether v${AETHER_VERSION}</span>
                 <span style="background: ${isMyTurn ? '#22c55e' : '#64748b'}; color: #fff; padding: 2px 6px; border-radius: 4px; font-weight: bold;">
                     ${isMyTurn ? "MY TURN" : "WAITING"}
                 </span>
@@ -124,7 +129,7 @@ function renderDebugHUD() {
             <div style="padding: 8px 12px; background: #1e293b; border-bottom: 1px solid rgba(255,255,255,0.1); display: flex; align-items: center; justify-content: space-between;" id="aether-hud-header">
                 <div style="display: flex; align-items: center; gap: 6px;">
                     <span style="color: #2ecc71; font-weight: bold; font-size: 12px;">⚡ Aether Chess</span>
-                    <span style="background: rgba(46,204,113,0.15); color: #2ecc71; padding: 1px 5px; border-radius: 3px; font-size: 10px;">v2.4.5</span>
+                    <span style="background: rgba(46,204,113,0.15); color: #2ecc71; padding: 1px 5px; border-radius: 3px; font-size: 10px;">v${AETHER_VERSION}</span>
                 </div>
                 <div style="display: flex; gap: 6px; align-items: center;">
                     <span style="color: #94a3b8; font-size: 10px;">${(currentEngineMode || 'autoplay').toUpperCase()}</span>
@@ -191,6 +196,7 @@ function renderDebugHUD() {
     if (forceBtn) {
         forceBtn.onclick = () => {
             addDebugLog("User triggered [Force Move]");
+            isSearchInFlight = false;
             currentFEN = "";
             processPosition();
         };
@@ -199,7 +205,7 @@ function renderDebugHUD() {
     if (copyBtn) {
         copyBtn.onclick = () => {
             const report = {
-                version: "2.4.6",
+                version: AETHER_VERSION,
                 currentFEN,
                 myColor,
                 lastDeterminedStm,
@@ -1208,6 +1214,10 @@ function renderArrows(pvLines, isMyTurn) {
  */
 function processPosition(networkFen = null) {
     if (!isContextValid()) return;
+    if (isSearchInFlight) {
+        log.debug('Board', 'Search already in flight, skipping duplicate position processing');
+        return;
+    }
     try {
         const fen = networkFen || parseBoard();
         if (!fen) {
@@ -1307,19 +1317,21 @@ function processPosition(networkFen = null) {
     if (!isContextValid()) return;
 
     try {
+        isSearchInFlight = true;
         chrome.runtime.sendMessage(
             {
                 type: "NEW_POSITION",
                 fen,
                 timeLeft: timeLeft,
-                my_ms: clocks.my_ms || 180000.0,
-                opp_ms: clocks.opp_ms || 180000.0,
+                my_ms: clocks.my_ms !== null ? clocks.my_ms : 0,
+                opp_ms: clocks.opp_ms !== null ? clocks.opp_ms : 0,
                 inc_ms: inferredIncMs,
                 isMyTurn,
                 history: historyStr,
             },
 
             (response) => {
+                isSearchInFlight = false;
                 if (!isContextValid()) return;
                 if (chrome.runtime.lastError) {
                     const msg = chrome.runtime.lastError.message || "";
@@ -1332,10 +1344,12 @@ function processPosition(networkFen = null) {
                 }
                 if (!response || !response.bestMove) {
                     if (isMyTurn) {
-                        addDebugLog('⚠️ Null move received — auto-retrying in 400ms');
-                        currentFEN = "";
+                        addDebugLog('⚠️ Null move received — retrying in 400ms');
                         setTimeout(() => {
-                            if (isMyTurn) processPosition();
+                            if (isMyTurn) {
+                                currentFEN = "";
+                                processPosition();
+                            }
                         }, 400);
                     }
                     return;
@@ -1379,6 +1393,7 @@ function processPosition(networkFen = null) {
             }
         );
     } catch (sendErr) {
+        isSearchInFlight = false;
         if (sendErr?.message?.includes("context invalidated") || !isContextValid()) {
             cleanupOrphanedScript();
             return;
@@ -1386,6 +1401,7 @@ function processPosition(networkFen = null) {
         log.error('Board', 'Messaging dispatch error', sendErr);
     }
     } catch (e) {
+        isSearchInFlight = false;
         if (e?.message?.includes("context invalidated") || !isContextValid()) {
             cleanupOrphanedScript();
             return;
@@ -1475,7 +1491,7 @@ try { renderDebugHUD(); } catch (_) {}
 try {
     window.__AETHER_DEBUG__ = {
         getState: () => ({
-            version: "2.4.5",
+            version: AETHER_VERSION,
             currentFEN,
             lastDeterminedStm,
             myColor: flipBoard ? "b" : "w",
@@ -1486,6 +1502,7 @@ try {
             boardFound: !!document.querySelector("wc-chess-board, chess-board"),
         }),
         forceMove: () => {
+            isSearchInFlight = false;
             currentFEN = "";
             processPosition();
         },
