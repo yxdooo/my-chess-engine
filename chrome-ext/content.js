@@ -298,6 +298,8 @@ function simulateDrag(fromX, fromY, toX, toY) {
     
     // Add a tiny async delay so React DND / Chess.com can register the drag start
     setTimeout(() => {
+        window.dispatchEvent(new PointerEvent("pointermove", evtInitTo));
+        window.dispatchEvent(new MouseEvent("mousemove", evtInitTo));
         fromEl.dispatchEvent(new PointerEvent("pointermove", evtInitTo));
         fromEl.dispatchEvent(new MouseEvent("mousemove", evtInitTo));
         
@@ -541,37 +543,135 @@ function parseBoard() {
         if (r > 0) fenPlacement += "/";
     }
 
-    // Determine side to move from move list
-    let stm = "w";
-    const moveNodes = document.querySelectorAll(
-        "wc-move-list .node:not(.icon-font-chess), .move-list-item .node, l4x rm, l4x u32"
-    );
-
+    // Determine side to move using board highlights, active clocks, and move list
     let maxPly = 0;
     document.querySelectorAll("[data-ply]").forEach((el) => {
         const p = parseInt(el.getAttribute("data-ply"), 10);
         if (!isNaN(p) && p > maxPly) maxPly = p;
     });
 
-    if (maxPly > 0) {
-        stm = maxPly % 2 === 1 ? "b" : "w";
-    } else if (moveNodes && moveNodes.length > 0) {
-        stm = moveNodes.length % 2 === 1 ? "b" : "w";
-    } else {
-        // Fallback for online games: count all played move elements
-        // chess.com live uses move elements with .move-san or .node inside wc-move-list
-        const allMoves = document.querySelectorAll(
-            "wc-move-list .move, wc-move-list .node, " +
-            ".move-list .move, .vertical-move-list .move, " +
-            ".rmoves .move, [data-ply]"
-        );
-        if (allMoves.length > 0) {
-            stm = allMoves.length % 2 === 1 ? "b" : "w";
+    const moveNodes = document.querySelectorAll(
+        "wc-move-list .node:not(.icon-font-chess), .move-list-item .node, l4x rm, l4x u32"
+    );
+
+    const isStartPos = board[4] === "K" && board[60] === "k" &&
+                       board[0] === "R" && board[7] === "R" &&
+                       board[56] === "r" && board[63] === "r" &&
+                       board[8] === "P" && board[15] === "P" &&
+                       board[48] === "p" && board[55] === "p";
+
+    let stm = "w";
+    let highlightDetermined = false;
+
+    if (isStartPos) {
+        stm = "w";
+        highlightDetermined = true;
+    }
+
+    // Primary authority: Board square highlights (.highlight on Chess.com, square.last-move on Lichess)
+    // Whenever a move is completed, the origin square is empty, and the destination square contains the moved piece!
+    if (!highlightDetermined) {
+        try {
+            const hlEls = boardEl.querySelectorAll(".highlight, square.last-move");
+            if (hlEls && hlEls.length >= 2) {
+                const hlSquares = [];
+                hlEls.forEach((el) => {
+                    el.classList.forEach((cls) => {
+                        let f = -1, r = -1;
+                        const m1 = cls.match(/^square-([a-h])([1-8])$/);
+                        if (m1) {
+                            f = m1[1].charCodeAt(0) - 97;
+                            r = parseInt(m1[2], 10) - 1;
+                        }
+                        const m2 = cls.match(/^square-(\d)(\d)$/);
+                        if (m2) {
+                            f = parseInt(m2[1], 10) - 1;
+                            r = parseInt(m2[2], 10) - 1;
+                        }
+                        if (f >= 0 && f <= 7 && r >= 0 && r <= 7) {
+                            const sq = r * 8 + f;
+                            if (!hlSquares.includes(sq)) hlSquares.push(sq);
+                        }
+                    });
+                });
+
+                const emptyHls = hlSquares.filter(sq => board[sq] === null);
+                const pieceHls = hlSquares.filter(sq => board[sq] !== null);
+
+                if (emptyHls.length >= 1 && pieceHls.length >= 1) {
+                    let movedPiece = null;
+                    if (pieceHls.length === 1) {
+                        movedPiece = board[pieceHls[0]];
+                    } else {
+                        // In check situations, king in check is also highlighted.
+                        // Filter for non-king piece, or use the piece that isn't the defender king.
+                        const nonKings = pieceHls.filter(sq => board[sq] !== "K" && board[sq] !== "k");
+                        if (nonKings.length > 0) {
+                            movedPiece = board[nonKings[0]];
+                        } else {
+                            movedPiece = board[pieceHls[0]];
+                        }
+                    }
+
+                    if (movedPiece) {
+                        const isWhiteMoved = movedPiece >= "A" && movedPiece <= "Z";
+                        stm = isWhiteMoved ? "b" : "w";
+                        highlightDetermined = true;
+                    }
+                }
+            }
+        } catch (_) {}
+    }
+
+    if (!highlightDetermined) {
+        // Fallback 1: Active clock detection (the ticking clock belongs to the player whose turn it is)
+        try {
+            const bottomClock = document.querySelector(".clock-bottom, [data-cy='clock-bottom'], #board-layout-player-bottom");
+            const topClock = document.querySelector(".clock-top, [data-cy='clock-top'], #board-layout-player-top");
+            const isBottomActive = bottomClock && (
+                bottomClock.classList.contains("clock-player-turn") ||
+                bottomClock.classList.contains("running") ||
+                bottomClock.querySelector(".clock-player-turn, .running, .clock-running") !== null
+            );
+            const isTopActive = topClock && (
+                topClock.classList.contains("clock-player-turn") ||
+                topClock.classList.contains("running") ||
+                topClock.querySelector(".clock-player-turn, .running, .clock-running") !== null
+            );
+            if (isBottomActive && !isTopActive) {
+                stm = flipBoard ? "b" : "w";
+                highlightDetermined = true;
+            } else if (isTopActive && !isBottomActive) {
+                stm = flipBoard ? "w" : "b";
+                highlightDetermined = true;
+            }
+        } catch (_) {}
+    }
+
+    if (!highlightDetermined) {
+        // Fallback 2: Move list / data-ply count
+        if (maxPly > 0) {
+            stm = maxPly % 2 === 1 ? "b" : "w";
+        } else if (moveNodes && moveNodes.length > 0) {
+            stm = moveNodes.length % 2 === 1 ? "b" : "w";
+        } else {
+            const allMoves = document.querySelectorAll(
+                "wc-move-list .move, wc-move-list .node, " +
+                ".move-list .move, .vertical-move-list .move, " +
+                ".rmoves .move, [data-ply]"
+            );
+            if (allMoves.length > 0) {
+                stm = allMoves.length % 2 === 1 ? "b" : "w";
+            }
         }
     }
 
-    // Reset persistent tracking if a new game started
-    if (maxPly === 0 || (board[4] === "K" && board[60] === "k" && maxPly <= 1 && (!moveNodes || moveNodes.length <= 1))) {
+    // Keep maxPly synchronized with physical board stm
+    if (stm === "w" && maxPly % 2 === 1) maxPly++;
+    if (stm === "b" && maxPly % 2 === 0 && maxPly > 0) maxPly++;
+
+    // Reset persistent tracking ONLY if a new starting position is detected
+    if (isStartPos) {
         persistentCastling = {
             wKingMoved: false,
             bKingMoved: false,
@@ -836,9 +936,10 @@ function processPosition(networkFen = null) {
             log.info('Board', 'Failed to parse FEN from DOM (parseBoard returned null)');
             return;
         }
-        if (fen === currentFEN) return;
+        const normFen = normalizeFen(fen);
+        if (normFen === currentFEN) return;
 
-        currentFEN = fen;
+        currentFEN = normFen;
     clearOverlay();
 
     const timeLeft = getMyTimeLeft();
@@ -860,7 +961,6 @@ function processPosition(networkFen = null) {
     }
     
     const isMyTurn = stm === myColor;
-    const normFen = normalizeFen(fen);
     
     log.info('Board', `Parsed FEN`, { fenShort: fen.substring(0, 50), myColor, stm, isMyTurn, flipBoard });
 
@@ -950,9 +1050,9 @@ function processPosition(networkFen = null) {
                 }
                 if (!response) return;
                 
-                // Abort if the board has already changed (e.g. late ponder hit already played)
-                if (currentFEN !== fen) {
-                    log.info('Engine', 'Ignoring stale search response because board has changed');
+                // Abort if the board has already changed to a DIFFERENT chess position
+                if (currentFEN !== normFen) {
+                    log.info('Engine', 'Ignoring stale search response because position has changed');
                     return;
                 }
 
