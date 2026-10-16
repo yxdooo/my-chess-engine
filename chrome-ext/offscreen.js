@@ -499,7 +499,7 @@ if (typeof chrome !== "undefined" && chrome.runtime?.onMessage) {
  */
 function startEngineSearch(message, sendResponse) {
     const normFen = (message.fen || "").split(" ").slice(0, 4).join(" ");
-    const logTime = message.searchTimeMs || (message.my_ms ? Math.round(message.my_ms / 35) : 1200);
+    const logTime = message.searchTimeMs || (message.my_ms ? Math.round(message.my_ms / 35) : 450);
     log.info('SMP', `New search request received | elo=${message.elo} targetTimeMs=${logTime} workers=${message.activeWorkerCount} fen=${normFen.substring(0, 35)}`);
 
     // 1. If an active search is ALREADY running for the EXACT SAME position:
