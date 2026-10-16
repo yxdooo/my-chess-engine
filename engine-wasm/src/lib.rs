@@ -433,6 +433,8 @@ impl ChessEngine {
     #[wasm_bindgen]
     pub fn get_best_move_timed(&mut self, fen: &str, my_ms: f64, inc_ms: f64, opp_ms: f64, moves_to_go: i32, overhead_ms: f64, elo: f64, split_id: u8, split_count: u8, history: &str, abort_flag: Option<js_sys::Uint8Array>) -> String {
         self.abort_flag = abort_flag;
+        self.stop_search = false;
+        GLOBAL_STOP.store(false, Ordering::Relaxed);
         let piece_count = fen.split_whitespace().next().unwrap_or("").chars().filter(|c| c.is_alphabetic()).count() as u32;
         let clock = timeman::ClockInfo {
             remaining_ms: my_ms,
@@ -451,6 +453,8 @@ impl ChessEngine {
     #[wasm_bindgen]
     pub fn get_best_move(&mut self, fen: &str, optimum_time_ms: f64, elo: f64, split_id: u8, split_count: u8, history: &str, abort_flag: Option<js_sys::Uint8Array>) -> String {
         self.abort_flag = abort_flag;
+        self.stop_search = false;
+        GLOBAL_STOP.store(false, Ordering::Relaxed);
         self.optimum_time_ms = optimum_time_ms;
         self.maximum_time_ms = optimum_time_ms * 1.2;
         self.search_internal(fen, elo, 64, split_id, split_count, history, false).to_json()
@@ -711,6 +715,7 @@ impl ChessEngine {
 
         self.nodes = 0;
         self.stop_search = false;
+        GLOBAL_STOP.store(false, Ordering::Relaxed);
         if split_id == 0 {
             GLOBAL_NODES.store(0, Ordering::Relaxed);
         }
@@ -3450,6 +3455,21 @@ mod tests {
             assert!(set.insert(*m), "Duplicate move yielded: {}", m);
         }
         assert_eq!(all_legal.len(), staged.len(), "all_legal: {}, staged: {}", all_legal.len(), staged.len());
+    }
+
+    #[test]
+    fn test_consecutive_searches_reset_global_stop() {
+        let mut engine = ChessEngine::new();
+        let non_book = "r1bqk2r/pp1n1ppp/2p1p3/3p4/2PP4/2P1P3/P4PPP/R1B1KB1R w KQkq - 1 17";
+        // First search runs iterative deepening to completion and sets GLOBAL_STOP = true for split_id 0
+        let _ = engine.get_best_move_native(non_book, 50.0, 3000.0, 0, 1, "");
+        assert!(GLOBAL_STOP.load(Ordering::Relaxed), "First search must set GLOBAL_STOP on split_id 0 completion");
+
+        // Second search - must reset GLOBAL_STOP and explore depth >= 1 with real nodes
+        let res2 = engine.search_native(non_book, 50.0, 100.0, 10, 0, 1, "", false, None);
+        assert!(res2.depth >= 1, "Second search must reach at least depth 1, got {}", res2.depth);
+        assert!(res2.nodes > 0, "Second search must explore nodes, got {}", res2.nodes);
+        assert!(res2.best_move.is_some(), "Second search must return a best move");
     }
 }
 
