@@ -66,13 +66,11 @@ export function aggregateWorkerResults(workerResults) {
     qualified.sort((a, b) => {
         const depthDiff = (b.depth || 0) - (a.depth || 0);
         if (depthDiff !== 0) return depthDiff;
-        const scoreDiff = (b.score || 0) - (a.score || 0);
-        if (scoreDiff !== 0) return scoreDiff;
-        const nodeDiff = (b.nodes || 0) - (a.nodes || 0);
-        if (nodeDiff !== 0) return nodeDiff;
         if (a.splitId === 0) return -1;
         if (b.splitId === 0) return 1;
-        return 0;
+        const nodeDiff = (b.nodes || 0) - (a.nodes || 0);
+        if (nodeDiff !== 0) return nodeDiff;
+        return (b.score || 0) - (a.score || 0);
     });
 
     const best = qualified[0];
@@ -228,7 +226,7 @@ function processSearch(message, searchId, abortFlag) {
             workerResults.push(e.data);
             totalNodes += (e.data.nodes || 0);
             const isBetter = e.data.depth > bestDepth || 
-                             (e.data.depth === bestDepth && e.data.score > bestOverallScore) ||
+                             (e.data.depth === bestDepth && e.data.splitId === 0) ||
                              (bestDepth === 0);
             if (isBetter) {
                 bestOverallScore = e.data.score;

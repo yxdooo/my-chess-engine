@@ -47,13 +47,49 @@ impl CuckooTable {
         let pieces = [Piece::Knight, Piece::Bishop, Piece::Rook, Piece::Queen, Piece::King];
         let colors = [Color::White, Color::Black];
 
+        let aux_sq0_base_fen = "7k/8/8/8/8/8/8/1K6 w - - 0 1";
+        let aux_sq0_base_board = match Board::from_str(aux_sq0_base_fen) {
+            Ok(b) => b,
+            Err(_) => return Self { keys, moves },
+        };
+        let aux_sq0_base_hash = aux_sq0_base_board.get_hash();
+
+        let aux_sq63_base_fen = "6k1/8/8/8/8/8/8/K7 w - - 0 1";
+        let aux_sq63_base_board = match Board::from_str(aux_sq63_base_fen) {
+            Ok(b) => b,
+            Err(_) => return Self { keys, moves },
+        };
+        let aux_sq63_base_hash = aux_sq63_base_board.get_hash();
+
         for &c in &colors {
             let c_idx = if c == Color::White { 0 } else { 1 };
             for &p in &pieces {
                 let p_idx = p.to_index();
+                let ch = match p {
+                    Piece::Knight => if c == Color::White { 'N' } else { 'n' },
+                    Piece::Bishop => if c == Color::White { 'B' } else { 'b' },
+                    Piece::Rook => if c == Color::White { 'R' } else { 'r' },
+                    Piece::Queen => if c == Color::White { 'Q' } else { 'q' },
+                    Piece::King => if c == Color::White { 'K' } else { 'k' },
+                    _ => 'P',
+                };
+
                 for sq_idx in 0..64 {
-                    // Skip squares occupied by kings (0 and 63)
-                    if sq_idx == 0 || sq_idx == 63 {
+                    if sq_idx == 0 {
+                        // Square 0 (a1): White King is at b1, Black King at h8
+                        let test_fen = format!("7k/8/8/8/8/8/8/{}K6 w - - 0 1", ch);
+                        if let Ok(b) = Board::from_str(&test_fen) {
+                            zob_piece[c_idx][p_idx][0] = b.get_hash() ^ aux_sq0_base_hash;
+                        }
+                        continue;
+                    }
+
+                    if sq_idx == 63 {
+                        // Square 63 (h8): White King is at a1, Black King at g8
+                        let test_fen = format!("6k{}/8/8/8/8/8/8/K7 w - - 0 1", ch);
+                        if let Ok(b) = Board::from_str(&test_fen) {
+                            zob_piece[c_idx][p_idx][63] = b.get_hash() ^ aux_sq63_base_hash;
+                        }
                         continue;
                     }
 
@@ -71,14 +107,6 @@ impl CuckooTable {
                                 row.push('k');
                             } else if curr_sq == sq_idx {
                                 if empty > 0 { row.push_str(&empty.to_string()); empty = 0; }
-                                let ch = match p {
-                                    Piece::Knight => if c == Color::White { 'N' } else { 'n' },
-                                    Piece::Bishop => if c == Color::White { 'B' } else { 'b' },
-                                    Piece::Rook => if c == Color::White { 'R' } else { 'r' },
-                                    Piece::Queen => if c == Color::White { 'Q' } else { 'q' },
-                                    Piece::King => if c == Color::White { 'K' } else { 'k' },
-                                    _ => 'P',
-                                };
                                 row.push(ch);
                             } else {
                                 empty += 1;
@@ -221,4 +249,29 @@ pub fn has_upcoming_repetition(
     }
 
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_cuckoo_corner_squares_non_zero() {
+        let table = CuckooTable::new();
+        let non_zero_count = table.keys.iter().filter(|&&k| k != 0).count();
+        // Cuckoo table should be substantially populated (> 2500 keys)
+        assert!(non_zero_count > 2500, "Cuckoo table must contain > 2500 moves, found {}", non_zero_count);
+
+        // Verify corner rook move a1-a2 can be probed
+        let base_fen = "7k/8/8/8/8/8/8/R6K w - - 0 1";
+        let next_fen = "7k/8/8/8/8/8/R7/7K b - - 1 1";
+        let b1 = Board::from_str(base_fen).unwrap();
+        let b2 = Board::from_str(next_fen).unwrap();
+        let key = b1.get_hash() ^ b2.get_hash();
+        let probed = table.probe(key);
+        assert!(probed.is_some(), "Cuckoo must successfully probe corner move a1-a2");
+        let m = probed.unwrap();
+        assert_eq!(m.get_source().to_index(), 0, "Source square must be a1 (0)");
+        assert_eq!(m.get_dest().to_index(), 8, "Dest square must be a2 (8)");
+    }
 }

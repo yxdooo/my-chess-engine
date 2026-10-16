@@ -477,7 +477,7 @@ impl ChessEngine {
         let table = get_global_cont_corr();
         if idx < table.len() {
             let curr = table[idx].load(Ordering::Relaxed);
-            let new_val = curr + (bonus * 16 - curr) / 128;
+            let new_val = curr + (bonus * 16 - curr) / params::CONT_CORR_SCALE;
             table[idx].store(new_val, Ordering::Relaxed);
         }
     }
@@ -969,8 +969,15 @@ impl ChessEngine {
             // Do not start next depth if soft time is up (on native SMP, only main thread controls soft time).
             let is_main_timer = cfg!(target_arch = "wasm32") || split_id == 0;
             let elapsed = current_time_ms() - self.start_time;
-            if is_main_timer && !GLOBAL_PONDER.load(Ordering::Relaxed) && elapsed > self.optimum_time_ms * 0.75 {
-                break;
+            if is_main_timer && !GLOBAL_PONDER.load(Ordering::Relaxed) {
+                let threshold = if best_move_stable_iterations >= 2 {
+                    self.optimum_time_ms * 0.90
+                } else {
+                    self.optimum_time_ms
+                };
+                if elapsed >= threshold {
+                    break;
+                }
             }
         }
         
@@ -1104,21 +1111,29 @@ impl TranspositionTable {
             || depth >= old_depth0
             || (old_gen0 != generation && depth + 4 >= old_depth0);
         if replace_slot0 {
-            // Displace older slot 0 entry to slot 1 when overwriting a different valid position
-            if stored_hash0 != 0 && stored_hash0 != hash {
-                let entry1 = &self.entries[index + 1];
-                entry1.data.store(stored_data0, Ordering::Relaxed);
-                entry1.hash.store(stored_hash0 ^ stored_data0, Ordering::Release);
-            }
             entry0.data.store(data, Ordering::Relaxed);
             entry0.hash.store(hash ^ data, Ordering::Release);
             return;
         }
 
-        // Slot 1: Always-Replace slot
+        // Slot 1: Always-Replace fallback slot
         let entry1 = &self.entries[index + 1];
-        entry1.data.store(data, Ordering::Relaxed);
-        entry1.hash.store(hash ^ data, Ordering::Release);
+        let stored_data1 = entry1.data.load(Ordering::Relaxed);
+        let stored_hash1 = entry1.hash.load(Ordering::Acquire) ^ stored_data1;
+
+        let final_move1 = if best_move.is_none() && stored_hash1 == hash {
+            unpack_move((stored_data1 & 0xFFFF) as u16)
+        } else {
+            final_move
+        };
+        let data1 = if final_move1 != final_move {
+            (data & !0xFFFF) | (pack_move(final_move1) as u64)
+        } else {
+            data
+        };
+
+        entry1.data.store(data1, Ordering::Relaxed);
+        entry1.hash.store(hash ^ data1, Ordering::Release);
     }
     
     fn probe(&self, hash: u64, ply: u8) -> Option<TTProbeResult> {
@@ -1810,7 +1825,7 @@ impl ChessEngine {
                 } else {
                     board.piece_on(m.get_dest()).map_or(0, piece_value_mg)
                 };
-                if stand_pat + captured_val + 150 <= alpha { continue; }
+                if stand_pat + captured_val + 220 <= alpha { continue; }
             }
 
             let next_board = board.make_move_new(m);
@@ -1980,8 +1995,8 @@ impl ChessEngine {
         };
 
         // Reverse Futility Pruning (RFP) — only on non-PV nodes without excluded_move
-        if !is_pv_node && !is_check && depth <= 6 && beta.abs() < MATE - 128 && excluded_move.is_none() {
-            let margin = (depth as i32 * 75) - (if improving { 30 } else { 0 }) - (if eval_diff > 100 { 20 } else { 0 });
+        if !is_pv_node && !is_check && depth <= params::RFP_MAX_DEPTH && beta.abs() < MATE - 128 && excluded_move.is_none() {
+            let margin = (depth as i32 * params::RFP_MARGIN) - (if improving { params::RFP_IMPROVING_BONUS } else { 0 }) - (if eval_diff > 100 { params::RFP_EVAL_DIFF_BONUS } else { 0 });
             if static_eval - margin >= beta {
                 return static_eval;
             }
@@ -1991,12 +2006,12 @@ impl ChessEngine {
         let has_pieces = stm_pieces.popcnt() > 0;
 
         let prev_was_null = ply > 0 && self.search_path_moves[(ply - 1) as usize].is_none();
-        if !is_pv_node && !is_check && !prev_was_null && ply >= self.nmp_min_ply && depth >= 3 && static_eval >= beta && beta.abs() < MATE - 128 && has_pieces && (ply as usize) < 128 && excluded_move.is_none() {
+        if !is_pv_node && !is_check && !prev_was_null && ply >= self.nmp_min_ply && depth >= params::NMP_MIN_DEPTH && static_eval >= beta && beta.abs() < MATE - 128 && has_pieces && (ply as usize) < 128 && excluded_move.is_none() {
             if let Some(null_board) = board.null_move() {
                 if self.network.is_some() && ((ply + 1) as usize) < self.accumulators.len() {
                     self.accumulators[(ply + 1) as usize] = self.accumulators[ply as usize];
                 }
-                let mut r = 3 + depth / 3;
+                let mut r = params::NMP_BASE_REDUCTION + depth / params::NMP_DIVISOR;
                 let eval_diff = static_eval.saturating_sub(beta);
                 if eval_diff > 0 {
                     r += (eval_diff / 200).min(3) as u8;
@@ -2009,7 +2024,7 @@ impl ChessEngine {
                 if self.stop_search { return 0; }
                 if null_score >= beta {
                     let clamped_null = if null_score >= MATE - 128 { beta } else { null_score };
-                    if depth >= 12 {
+                    if depth >= params::NMP_VERIFY_DEPTH {
                         let old_nmp_min = self.nmp_min_ply;
                         self.nmp_min_ply = ply + 1;
                         let verify_score = self.negamax(board, reduced_depth, beta - 1, beta, ply, halfmove_clock, tt, pawn_hash, None);
@@ -2023,8 +2038,8 @@ impl ChessEngine {
         }
 
         // ProbCut Modernization: two-stage verification (QSearch first, then shallow negamax)
-        if !is_pv_node && !is_check && depth >= 5 && beta < MATE - 128 && excluded_move.is_none() {
-            let bound = beta + 170;
+        if !is_pv_node && !is_check && depth >= params::PROBCUT_MIN_DEPTH && beta < MATE - 128 && excluded_move.is_none() {
+            let bound = beta + params::PROBCUT_MARGIN;
             let can_probcut = tt_score_for_singular.map(|s| s >= bound).unwrap_or(true);
             if can_probcut {
                 let mut prob_gen = MoveGen::new_legal(board);
@@ -2054,10 +2069,10 @@ impl ChessEngine {
                     }
 
                     // Stage 2: Verification search at depth - 4
-                    let probcut_score = -self.negamax(&next_board, depth - 4, -bound, -bound + 1, ply.saturating_add(1), next_halfmove, tt, pawn_hash, None);
+                    let probcut_score = -self.negamax(&next_board, depth.saturating_sub(params::PROBCUT_DEPTH_REDUCTION), -bound, -bound + 1, ply.saturating_add(1), next_halfmove, tt, pawn_hash, None);
                     if self.stop_search { return 0; }
                     if probcut_score >= bound {
-                        tt.store(hash, Some(m), depth - 3, probcut_score, LOWERBOUND, ply, self.search_generation);
+                        tt.store(hash, Some(m), depth.saturating_sub(params::PROBCUT_DEPTH_REDUCTION.saturating_sub(1)), probcut_score, LOWERBOUND, ply, self.search_generation);
                         return probcut_score;
                     }
                 }
@@ -2187,7 +2202,7 @@ impl ChessEngine {
                 && best_score > -MATE + 128
                 && depth <= 3
             {
-                if see_value(board, m) < -95 * depth as i32 {
+                if see_value(board, m) < -params::SEE_TACTICAL_MARGIN * depth as i32 {
                     i += 1;
                     continue;
                 }
@@ -2205,8 +2220,8 @@ impl ChessEngine {
                 && best_score > -MATE + 128
             {
                 // Futility Pruning — only on non-PV nodes at low depth
-                if depth <= 4 {
-                    let fp_margin = 80 + 100 * depth as i32;
+                if depth <= params::FP_MAX_DEPTH {
+                    let fp_margin = params::FP_BASE_MARGIN + params::FP_MARGIN_PER_DEPTH * depth as i32;
                     if static_eval + fp_margin <= alpha {
                         i += 1;
                         continue; 
@@ -2215,8 +2230,8 @@ impl ChessEngine {
 
                 // Quiet History Pruning: at depth <= 4, prune moves with heavily negative history
                 let hist = self.history[stm_idx][m.get_source().to_index()][m.get_dest().to_index()];
-                if depth <= 4 {
-                    if hist < -3500 * depth as i32 {
+                if depth <= params::HIST_PRUNING_MAX_DEPTH {
+                    if hist < -params::HIST_PRUNING_MARGIN * depth as i32 {
                         i += 1;
                         continue;
                     }
@@ -2225,7 +2240,7 @@ impl ChessEngine {
                 // History-Scaled SEE Pruning: scale quiet SEE threshold by -history_score / 128 (clamped <= 0)
                 if depth <= 4 {
                     let hist_adj = (hist / 128).clamp(-40, 40);
-                    let see_thresh = (-28 * depth as i32 - hist_adj).min(0);
+                    let see_thresh = (-params::SEE_QUIET_BASE_MARGIN * depth as i32 - hist_adj).min(0);
                     if see_value(board, m) < see_thresh {
                         i += 1;
                         continue;
@@ -2522,7 +2537,7 @@ impl ChessEngine {
                 let bonus = (best_score - static_eval).clamp(-1024, 1024);
                 let table = get_global_pawn_corr();
                 let curr = table[stm_idx][corr_idx].load(Ordering::Relaxed);
-                let new_val = curr + (bonus * 16 - curr) / 128;
+                let new_val = curr + (bonus * 16 - curr) / params::PAWN_CORR_SCALE;
                 table[stm_idx][corr_idx].store(new_val, Ordering::Relaxed);
 
                 if ply >= 2 && (ply as usize) < 128 {
@@ -3215,6 +3230,7 @@ fn evaluate(board: &Board) -> i32 {
 /// The contract is a `|`-joined list of normalized FENs (first four FEN fields)
 /// describing every PRIOR position of the game; the current position is excluded.
 /// Malformed entries are skipped.
+#[allow(dead_code)]
 fn parse_history_hashes(history: &str) -> HashMap<u64, u8> {
     let mut hashes: HashMap<u64, u8> = HashMap::new();
     for normalized_fen in history.split('|') {

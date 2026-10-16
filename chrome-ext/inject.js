@@ -11,8 +11,8 @@
 
 const OriginalWebSocket = window.WebSocket;
 
-window.WebSocket = function WebSocketProxy(url, protocols) {
-    const ws = new OriginalWebSocket(url, protocols);
+function WebSocketProxy(...args) {
+    const ws = Reflect.construct(OriginalWebSocket, args);
 
     ws.addEventListener("message", (event) => {
         try {
@@ -34,7 +34,20 @@ window.WebSocket = function WebSocketProxy(url, protocols) {
     });
 
     return ws;
-};
+}
 
-// Preserve the original prototype so instanceof checks still work.
-window.WebSocket.prototype = OriginalWebSocket.prototype;
+// Preserve prototype chain and static constants (CONNECTING, OPEN, CLOSING, CLOSED)
+WebSocketProxy.prototype = OriginalWebSocket.prototype;
+Object.setPrototypeOf(WebSocketProxy, OriginalWebSocket);
+["CONNECTING", "OPEN", "CLOSING", "CLOSED"].forEach((prop) => {
+    if (prop in OriginalWebSocket) {
+        Object.defineProperty(WebSocketProxy, prop, {
+            value: OriginalWebSocket[prop],
+            writable: false,
+            enumerable: true,
+            configurable: true,
+        });
+    }
+});
+
+window.WebSocket = WebSocketProxy;

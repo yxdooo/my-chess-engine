@@ -987,7 +987,19 @@ fn bisect_key_left(book_bytes: &[u8], key: u64) -> usize {
 }
 
 /// Probes a Polyglot book slice for a board position.
-/// Returns the highest-weighted legal move, if found.
+#[cfg(target_arch = "wasm32")]
+fn current_seed() -> u64 {
+    js_sys::Date::now() as u64
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn current_seed() -> u64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_nanos() as u64).unwrap_or(123456789)
+}
+
+/// Returns a legally verified move from the Polyglot opening book.
+/// Selects proportionally to entry weights, ensuring diverse grandmaster openings.
 pub fn probe_polyglot(book_bytes: &[u8], board: &Board) -> Option<ChessMove> {
     if book_bytes.len() < PolyglotEntry::SIZE || book_bytes.len() % PolyglotEntry::SIZE != 0 {
         return None;
@@ -997,8 +1009,8 @@ pub fn probe_polyglot(book_bytes: &[u8], board: &Board) -> Option<ChessMove> {
     let mut idx = bisect_key_left(book_bytes, key);
     let num_entries = book_bytes.len() / PolyglotEntry::SIZE;
 
-    let mut best_move = None;
-    let mut best_weight = 0u16;
+    let mut candidates: Vec<(ChessMove, u32)> = Vec::with_capacity(8);
+    let mut total_weight: u32 = 0;
 
     while idx < num_entries {
         let offset = idx * PolyglotEntry::SIZE;
@@ -1007,16 +1019,38 @@ pub fn probe_polyglot(book_bytes: &[u8], board: &Board) -> Option<ChessMove> {
             break;
         }
 
-        if entry.weight > best_weight {
-            if let Some(m) = entry.to_move(board) {
-                best_weight = entry.weight;
-                best_move = Some(m);
-            }
+        if let Some(m) = entry.to_move(board) {
+            let weight = (entry.weight as u32).max(1);
+            candidates.push((m, weight));
+            total_weight += weight;
         }
         idx += 1;
     }
 
-    best_move
+    if candidates.is_empty() {
+        return None;
+    }
+
+    if candidates.len() == 1 || total_weight == 0 {
+        return Some(candidates[0].0);
+    }
+
+    // Fast, zero-dependency Xorshift64 PRNG seeded by nanos and board hash
+    let mut x = (current_seed() ^ key).max(1);
+    x ^= x << 13;
+    x ^= x >> 7;
+    x ^= x << 17;
+
+    let target = (x % (total_weight as u64)) as u32;
+    let mut accum = 0u32;
+    for (m, weight) in candidates {
+        accum += weight;
+        if target < accum {
+            return Some(m);
+        }
+    }
+
+    None
 }
 
 /// Embedded master opening book covering ECO A00-E99 lines.

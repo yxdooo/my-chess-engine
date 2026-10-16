@@ -33,12 +33,9 @@ pub const PROBCUT_MARGIN: i32 = 170;
 pub const PROBCUT_DEPTH_REDUCTION: u8 = 4;
 
 // Static Exchange Evaluation (SEE) Pruning
-pub const SEE_TACTICAL_MARGIN: i32 = 100;
-pub const SEE_QUIET_MARGIN: i32 = 65;
+pub const SEE_TACTICAL_MARGIN: i32 = 95;
+pub const SEE_QUIET_BASE_MARGIN: i32 = 28;
 
 // Correction History Scales
 pub const PAWN_CORR_SCALE: i32 = 128;
 pub const CONT_CORR_SCALE: i32 = 128;
-
-// Policy Head Move Ordering Bonus
-pub const POLICY_MOVE_BONUS: i32 = 12_000;

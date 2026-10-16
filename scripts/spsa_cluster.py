@@ -26,8 +26,8 @@ DEFAULT_TUNABLES = {
     "futility_margin": (100, 20, 150, 5),
     "history_pruning_depth": (4, 2, 8, 1),
     "history_pruning_margin": (3500, 500, 6000, 200),
-    "see_quiet_margin": (65, 20, 150, 5),
-    "see_tactical_margin": (100, 30, 250, 10),
+    "see_quiet_margin": (28, 10, 80, 2),
+    "see_tactical_margin": (95, 30, 200, 5),
 }
 
 
@@ -67,12 +67,19 @@ class SPSAOptimizer:
         Runs a game between two configurations of the engine.
         Returns 1.0 if White wins, 0.5 if Draw, 0.0 if Black wins.
         """
-        # If cutechess-cli is available, launch cutechess-cli; else simulate/stub with fast direct UCI match
+        # 1. Try cutechess-cli if available
         try:
+            white_args = []
+            black_args = []
+            for k, v in params_white.items():
+                white_args.extend(["-setoption", f"{k}={v}"])
+            for k, v in params_black.items():
+                black_args.extend(["-setoption", f"{k}={v}"])
+
             cmd = [
                 "cutechess-cli",
-                "-engine", f"cmd={self.engine_path}", "name=EnginePlus",
-                "-engine", f"cmd={self.engine_path}", "name=EngineMinus",
+                "-engine", f"cmd={self.engine_path}", "name=EnginePlus", *white_args,
+                "-engine", f"cmd={self.engine_path}", "name=EngineMinus", *black_args,
                 "-each", "proto=uci", time_control,
                 "-rounds", "1",
                 "-concurrency", "1"
@@ -84,16 +91,100 @@ class SPSAOptimizer:
                 return 0.0
             return 0.5
         except Exception:
-            # Synthetic evaluation fallback if cutechess-cli is not on system
-            time.sleep(0.01)
-            # Quadratic distance penalty toward ideal synthetic optima
-            err_w = sum((v - self.tunables[k][0]) ** 2 for k, v in params_white.items())
-            err_b = sum((v - self.tunables[k][0]) ** 2 for k, v in params_black.items())
-            if err_w < err_b:
-                return 0.55 + random.uniform(-0.1, 0.1)
-            elif err_b < err_w:
-                return 0.45 + random.uniform(-0.1, 0.1)
-            return 0.50 + random.uniform(-0.05, 0.05)
+            pass
+
+        # 2. Real fallback: direct python-chess match with engine subprocesses
+        try:
+            import chess
+
+            p1 = subprocess.Popen([self.engine_path], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, bufsize=1)
+            p2 = subprocess.Popen([self.engine_path], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, bufsize=1)
+
+            def send(p, msg):
+                p.stdin.write(msg + "\n")
+                p.stdin.flush()
+
+            def read_until(p, expected):
+                while True:
+                    line = p.stdout.readline()
+                    if not line:
+                        break
+                    line = line.strip()
+                    if line == expected or line.startswith(expected):
+                        return line
+
+            send(p1, "uci")
+            send(p2, "uci")
+            read_until(p1, "uciok")
+            read_until(p2, "uciok")
+
+            for k, v in params_white.items():
+                send(p1, f"setoption name {k} value {v}")
+            for k, v in params_black.items():
+                send(p2, f"setoption name {k} value {v}")
+
+            send(p1, "isready")
+            send(p2, "isready")
+            read_until(p1, "readyok")
+            read_until(p2, "readyok")
+
+            send(p1, "ucinewgame")
+            send(p2, "ucinewgame")
+
+            board = chess.Board()
+            moves_history = []
+            max_moves = 120
+
+            while not board.is_game_over(claim_draw=True) and len(moves_history) < max_moves:
+                active_p = p1 if board.turn == chess.WHITE else p2
+                pos_cmd = "position startpos moves " + " ".join(moves_history) if moves_history else "position startpos"
+                send(active_p, pos_cmd)
+                send(active_p, "go movetime 100")
+
+                bestmove_str = None
+                while True:
+                    line = active_p.stdout.readline()
+                    if not line:
+                        break
+                    line = line.strip()
+                    if line.startswith("bestmove"):
+                        parts = line.split()
+                        if len(parts) >= 2:
+                            bestmove_str = parts[1]
+                        break
+
+                if not bestmove_str or bestmove_str == "(none)":
+                    break
+
+                try:
+                    move = chess.Move.from_uci(bestmove_str)
+                    if move in board.legal_moves:
+                        board.push(move)
+                        moves_history.append(bestmove_str)
+                    else:
+                        break
+                except Exception:
+                    break
+
+            send(p1, "quit")
+            send(p2, "quit")
+            try:
+                p1.wait(timeout=2)
+                p2.wait(timeout=2)
+            except Exception:
+                p1.kill()
+                p2.kill()
+
+            outcome = board.outcome(claim_draw=True)
+            if outcome is not None:
+                if outcome.winner == chess.WHITE:
+                    return 1.0
+                elif outcome.winner == chess.BLACK:
+                    return 0.0
+                return 0.5
+            return 0.5
+        except Exception:
+            return 0.5
 
     def step(self, num_games_per_eval=8, num_threads=4):
         k = self.iteration
@@ -207,14 +298,11 @@ pub const PROBCUT_DEPTH_REDUCTION: u8 = 4;
 
 // Static Exchange Evaluation (SEE) Pruning
 pub const SEE_TACTICAL_MARGIN: i32 = {see_t};
-pub const SEE_QUIET_MARGIN: i32 = {see_q};
+pub const SEE_QUIET_BASE_MARGIN: i32 = {see_q};
 
 // Correction History Scales
 pub const PAWN_CORR_SCALE: i32 = 128;
 pub const CONT_CORR_SCALE: i32 = 128;
-
-// Policy Head Move Ordering Bonus
-pub const POLICY_MOVE_BONUS: i32 = 12_000;
 """
     # Ensure directory exists
     os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)

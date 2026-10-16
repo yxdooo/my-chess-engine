@@ -24,16 +24,19 @@ OPENINGS = [
 ]
 
 
-def play_match(num_games=10, base_time=10.0, inc_time=0.2, sf_elo=3000, aether_threads=4):
-    print(f"=== Aether vs Stockfish {sf_elo} Elo ({num_games} games, TC {base_time}+{inc_time}s) ===")
+def play_match(num_games=10, base_time=5.0, inc_time=0.1, sf_elo=3500, aether_threads=8):
+    print(f"=== Aether vs Stockfish {sf_elo} Elo ({num_games} games, TC {base_time}+{inc_time}s, {aether_threads}T) ===")
     print(f"Aether binary : {AETHER_PATH}")
     print(f"Stockfish bin : {SF_PATH}")
 
     aether = chess.engine.SimpleEngine.popen_uci(AETHER_PATH, cwd=ROOT_DIR)
     sf = chess.engine.SimpleEngine.popen_uci(SF_PATH, cwd=ROOT_DIR)
 
-    aether.configure({"Threads": aether_threads, "Hash": 128, "Move Overhead": 10})
-    sf.configure({"Threads": 1, "Hash": 64, "UCI_LimitStrength": True, "UCI_Elo": sf_elo})
+    aether.configure({"Threads": aether_threads, "Hash": 256, "Move Overhead": 10})
+    if sf_elo >= 3190:
+        sf.configure({"Threads": 1, "Hash": 64, "UCI_LimitStrength": False, "Skill Level": 20})
+    else:
+        sf.configure({"Threads": 1, "Hash": 64, "UCI_LimitStrength": True, "UCI_Elo": sf_elo})
 
     wins = 0
     draws = 0
@@ -133,6 +136,8 @@ def play_match(num_games=10, base_time=10.0, inc_time=0.2, sf_elo=3000, aether_t
 
 if __name__ == "__main__":
     n = int(sys.argv[1]) if len(sys.argv) > 1 else 10
-    tc = float(sys.argv[2]) if len(sys.argv) > 2 else 10.0
-    inc = float(sys.argv[3]) if len(sys.argv) > 3 else 0.2
-    play_match(num_games=n, base_time=tc, inc_time=inc)
+    tc = float(sys.argv[2]) if len(sys.argv) > 2 else 5.0
+    inc = float(sys.argv[3]) if len(sys.argv) > 3 else 0.1
+    elo = int(sys.argv[4]) if len(sys.argv) > 4 else 3500
+    thr = int(sys.argv[5]) if len(sys.argv) > 5 else 8
+    play_match(num_games=n, base_time=tc, inc_time=inc, sf_elo=elo, aether_threads=thr)

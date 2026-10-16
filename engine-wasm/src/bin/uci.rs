@@ -323,7 +323,7 @@ fn main() {
     let mut position_history: Vec<String> = Vec::new();
     let mut move_overhead_ms: f64 = 10.0;
 
-    println!("id name Aether v2.2.0");
+    println!("id name Aether v2.4.0");
     println!("id author Aether Team");
 
     while let Ok(line) = stdin_rx.recv() {
@@ -332,7 +332,7 @@ fn main() {
 
         match tokens[0] {
             "uci" => {
-                println!("id name Aether v2.2.0");
+                println!("id name Aether v2.4.0");
                 println!("id author Aether Team");
                 println!("option name Hash type spin default 64 min 1 max 2048");
                 println!("option name Threads type spin default {} min 1 max 64", default_threads);

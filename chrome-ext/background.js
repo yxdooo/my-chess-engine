@@ -227,7 +227,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                 const normFen      = normalizeFen(message.fen);
                 const pieceCount   = normFen.split(' ')[0].replace(/[\/0-9]/g, '').length;
 
-                log.info('Background', `NEW_POSITION received: turn=${message.isMyTurn} clock=${message.timeLeft}s my_ms=ms pieces=${pieceCount}`);
+                log.info('Background', `NEW_POSITION received: turn=${message.isMyTurn} clock=${message.timeLeft}s my_ms=${my_ms}ms pieces=${pieceCount}`);
                 log.debug('Background', `FEN: ${message.fen}`);
 
                 const fallbackToEngine = () => {
@@ -427,7 +427,7 @@ function runFallbackWorker(fen, my_ms, opp_ms, inc_ms, movesToGo, elo, history, 
                 score: e.data.score,
                 depth: e.data.depth,
                 nodes: e.data.nodes,
-                timeMs: e.data.timeMs || my_ms, opp_ms, inc_ms, movesToGo,
+                timeMs: e.data.timeMs !== undefined ? e.data.timeMs : my_ms,
             };
             handleSearchResponse(response, isMyTurn, sendResponse, my_ms, opp_ms, inc_ms, movesToGo, elo, workerCount, history, hashSize);
             if (pendingFallbackResponse === sendResponse) {

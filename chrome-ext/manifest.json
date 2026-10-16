@@ -1,12 +1,12 @@
 {
     "manifest_version": 3,
     "name": "Aether Chess Engine",
-    "version": "2.2.0",
+    "version": "2.4.0",
     "description": "A highly optimized, multi-threaded WebAssembly (Rust) chess engine. Real-time best-move arrows directly on Chess.com and Lichess.",
     "icons": {
-        "16": "icon.png",
-        "48": "icon.png",
-        "128": "icon.png"
+        "16": "icons/icon-16.png",
+        "48": "icons/icon-48.png",
+        "128": "icons/icon-128.png"
     },
     "permissions": [
         "activeTab",
@@ -62,13 +62,18 @@
     ],
     "action": {
         "default_popup": "popup.html",
-        "default_icon": "icon.png"
+        "default_icon": {
+            "16": "icons/icon-16.png",
+            "48": "icons/icon-48.png",
+            "128": "icons/icon-128.png"
+        }
     },
     "web_accessible_resources": [
         {
             "resources": [
                 "pkg/*",
                 "net.nnue",
+                "icons/*",
                 "icon.png",
                 "logger.js"
             ],
