@@ -298,9 +298,34 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     }
 });
 
+function calculateSearchBudget(my_ms, inc_ms) {
+    if (!my_ms || my_ms <= 0) {
+        // Untimed game (e.g. Chess.com Play vs Bot, puzzles)
+        return { searchTimeMs: 1200, maxTimeMs: 1600 };
+    }
+    const inc = inc_ms || 0;
+    if (my_ms <= 30000) {
+        // Hyper-bullet (<= 30s remaining)
+        const target = Math.min(450, Math.max(120, (my_ms / 30) + inc * 0.7));
+        return { searchTimeMs: Math.round(target), maxTimeMs: Math.round(target * 1.25) };
+    }
+    if (my_ms <= 65000) {
+        // Bullet (1 min)
+        const target = Math.min(850, Math.max(200, (my_ms / 35) + inc * 0.75));
+        return { searchTimeMs: Math.round(target), maxTimeMs: Math.round(target * 1.3) };
+    }
+    if (my_ms <= 300000) {
+        // Blitz (3-5 min)
+        const target = Math.min(2200, Math.max(400, (my_ms / 35) + inc * 0.8));
+        return { searchTimeMs: Math.round(target), maxTimeMs: Math.round(target * 1.35) };
+    }
+    // Rapid / Classical (> 5 min)
+    const target = Math.min(3500, Math.max(600, (my_ms / 45) + inc * 0.8));
+    return { searchTimeMs: Math.round(target), maxTimeMs: Math.round(target * 1.35) };
+}
+
 /**
- * Dispatches a search request to the offscreen SMP engine, then optionally
- * starts a ponder search on the predicted opponent reply.
+ * Dispatches a search request to the offscreen SMP engine with an aligned time budget.
  */
 function callOffscreenEngine(
     fen,
@@ -313,11 +338,15 @@ function callOffscreenEngine(
     sendResponse
 ) {
     resetOffscreenIdleTimeout();
+    const budget = calculateSearchBudget(my_ms, inc_ms);
+
     setupOffscreenDocument("offscreen.html").then(() => {
         chrome.runtime.sendMessage(
             {
                 type: "START_SMP_SEARCH",
                 fen,
+                searchTimeMs: budget.searchTimeMs,
+                maxTimeMs: budget.maxTimeMs,
                 my_ms, opp_ms, inc_ms, movesToGo,
                 elo,
                 activeWorkerCount: workerCount,
@@ -450,6 +479,7 @@ function runFallbackWorker(fen, my_ms, opp_ms, inc_ms, movesToGo, elo, history, 
         }
     };
 
+    const fallbackBudget = calculateSearchBudget(my_ms, inc_ms);
     const searchMessages = [
         {
             type: "SET_HASH_SIZE",
@@ -457,7 +487,10 @@ function runFallbackWorker(fen, my_ms, opp_ms, inc_ms, movesToGo, elo, history, 
         },
         {
             type: "SEARCH",
-            fen, my_ms, opp_ms, inc_ms, movesToGo, elo,
+            fen,
+            searchTimeMs: fallbackBudget.searchTimeMs,
+            maxTimeMs: fallbackBudget.maxTimeMs,
+            my_ms, opp_ms, inc_ms, movesToGo, elo,
             splitId: 0,
             splitCount: 1,
             history: history || "",
@@ -489,37 +522,6 @@ function handleSearchResponse(response, isMyTurn, sendResponse, my_ms, opp_ms, i
     
     // Always respond once so the content script doesn't hang.
     if (sendResponse) sendResponse(response);
-
-    if (response && response.ponderFen && isMyTurn) {
-        // Pondering: only ponder after our move (we know the position after our move)
-        resetOffscreenIdleTimeout();
-        setupOffscreenDocument("offscreen.html").then(() => {
-            chrome.runtime.sendMessage(
-                {
-                    type: "START_SMP_SEARCH",
-                    fen: response.ponderFen,
-                    my_ms, opp_ms, inc_ms, movesToGo, elo, activeWorkerCount: workerCount, isMyTurn: true, history, hashSize,
-                },
-                (ponderResponse) => {
-                    if (!chrome.runtime.lastError && ponderResponse) {
-                        ponderResponse.cachedForFen = response.ponderFen;
-                        log.info('Background', `Ponder search returned best move for next turn: ${ponderResponse.bestMove}`);
-                        chrome.tabs.query({url: ["*://*.chess.com/*", "*://*.lichess.org/*"]}, (tabs) => {
-                            for (let tab of tabs) {
-                                chrome.tabs.sendMessage(tab.id, {
-                                    type: "PONDER_RESULT",
-                                    data: ponderResponse
-                                }).catch(() => {});
-                            }
-                        });
-                    } else if (chrome.runtime.lastError) {
-                        log.error('Background', 'Ponder search error', chrome.runtime.lastError);
-                    }
-                }
-            );
-        }).catch((err) => {
-            log.warn('Background', 'Pondering failed to setup offscreen', err);
-        });
-    }
+    // Background pondering disabled to prevent worker thread lockups and failsafe timeouts.
 }
 

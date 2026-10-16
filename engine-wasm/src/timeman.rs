@@ -18,6 +18,15 @@ const INCREMENT_SHARE: f64 = 0.85;
 const HARD_LIMIT_CLOCK_FRACTION: f64 = 0.30;
 
 pub fn allocate(clock: &ClockInfo) -> TimeBudget {
+    // If no clock time is provided (e.g. Play vs Bot, untimed games, or clock not found),
+    // allocate a safe, high-performance fixed budget of 1000ms (optimum) / 1500ms (maximum).
+    if clock.remaining_ms <= 0.0 {
+        return TimeBudget {
+            optimum_ms: 1000.0,
+            maximum_ms: 1500.0,
+        };
+    }
+
     let usable_time = (clock.remaining_ms - clock.move_overhead_ms).max(0.0);
     
     // Emergency mode: triggered when remaining time is low (<= 600ms or <= 15% of clock)
@@ -90,5 +99,20 @@ mod tests {
         let usable = 500.0 - 50.0;
         assert!((budget.optimum_ms - (usable / 25.0)).abs() < 1.0);
         assert!((budget.maximum_ms - (usable / 8.0)).abs() < 1.0);
+    }
+
+    #[test]
+    fn untimed_games_get_safe_budget() {
+        let clock = ClockInfo {
+            remaining_ms: 0.0,
+            increment_ms: 0.0,
+            opponent_remaining_ms: 0.0,
+            moves_to_go: None,
+            move_overhead_ms: 50.0,
+            piece_count: 32,
+        };
+        let budget = allocate(&clock);
+        assert_eq!(budget.optimum_ms, 1000.0);
+        assert_eq!(budget.maximum_ms, 1500.0);
     }
 }

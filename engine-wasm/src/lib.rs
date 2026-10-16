@@ -445,8 +445,8 @@ impl ChessEngine {
             piece_count,
         };
         let budget = timeman::allocate(&clock);
-        self.optimum_time_ms = budget.optimum_ms;
-        self.maximum_time_ms = budget.maximum_ms;
+        self.optimum_time_ms = budget.optimum_ms.max(100.0);
+        self.maximum_time_ms = budget.maximum_ms.max(150.0);
         self.search_internal(fen, elo, 64, split_id, split_count, history, false).to_json()
     }
 
@@ -455,8 +455,9 @@ impl ChessEngine {
         self.abort_flag = abort_flag;
         self.stop_search = false;
         GLOBAL_STOP.store(false, Ordering::Relaxed);
-        self.optimum_time_ms = optimum_time_ms;
-        self.maximum_time_ms = optimum_time_ms * 1.2;
+        let opt = optimum_time_ms.max(100.0);
+        self.optimum_time_ms = opt;
+        self.maximum_time_ms = (opt * 1.35).max(150.0);
         self.search_internal(fen, elo, 64, split_id, split_count, history, false).to_json()
     }
 }
@@ -812,7 +813,7 @@ impl ChessEngine {
         for base_depth in 1..=64u8 {
             let depth = base_depth + if split_count > 1 { (split_id % 2) as u8 } else { 0 };
             if depth > max_horizon { break; }
-            if self.stop_search || GLOBAL_STOP.load(Ordering::Relaxed) { break; }
+            if base_depth > 1 && (self.stop_search || GLOBAL_STOP.load(Ordering::Relaxed)) { break; }
 
             let num_pv = self.multi_pv.min(my_moves).max(1);
             let mut excluded_root_moves: Vec<ChessMove> = Vec::with_capacity(num_pv);
@@ -1680,7 +1681,7 @@ impl ChessEngine {
                 }
             }
             
-            if self.stop_search { break; }
+            if depth > 1 && self.stop_search { break; }
 
             if score > best_score {
                 second_best = best_score;

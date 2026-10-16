@@ -199,7 +199,7 @@ function renderDebugHUD() {
     if (copyBtn) {
         copyBtn.onclick = () => {
             const report = {
-                version: "2.4.5",
+                version: "2.4.6",
                 currentFEN,
                 myColor,
                 lastDeterminedStm,
@@ -629,6 +629,15 @@ function playMove(uci) {
                 }, 40);
             }
         }, 260);
+
+        // Verification: If piece is still on source square 700ms later, reset currentFEN so observer/poller retries immediately
+        setTimeout(() => {
+            const checkPieceStillThere = findPieceElement(boardElNow, fromFile, fromRank);
+            if (checkPieceStillThere && currentEngineMode === "autoplay") {
+                addDebugLog(`Move ${uci} unconfirmed on board — clearing currentFEN for immediate retry`);
+                currentFEN = "";
+            }
+        }, 700);
 
         if (promotionChar) {
             const promoDelay = 150 + Math.floor(Math.random() * 50);
@@ -1321,7 +1330,16 @@ function processPosition(networkFen = null) {
                     log.error('Background', 'Messaging error', chrome.runtime.lastError);
                     return;
                 }
-                if (!response) return;
+                if (!response || !response.bestMove) {
+                    if (isMyTurn) {
+                        addDebugLog('⚠️ Null move received — auto-retrying in 400ms');
+                        currentFEN = "";
+                        setTimeout(() => {
+                            if (isMyTurn) processPosition();
+                        }, 400);
+                    }
+                    return;
+                }
 
                 lastEngineStats = response;
                 updateDebugHUD();
@@ -1332,9 +1350,7 @@ function processPosition(networkFen = null) {
                     return;
                 }
 
-                if (response.bestMove) {
-                    addDebugLog(`Search done: ${response.bestMove} (${response.score || 0}cp d=${response.depth || 0})`);
-                }
+                addDebugLog(`Search done: ${response.bestMove} (${response.score || 0}cp d=${response.depth || 0})`);
 
                 // Cache ponder result for our next turn.
                 if (response.cachedForFen) {

@@ -61,7 +61,12 @@ let activeSelectedIndices = [];
  * @returns {object} Aggregated result object
  */
 export function aggregateWorkerResults(workerResults) {
-    const validResults = (workerResults || []).filter(r => r && r.bestMove && r.bestMove !== "");
+    // Filter out empty moves and broken depth 0 results with score -INF (aborted before depth 1 completed)
+    const validResults = (workerResults || []).filter(r => {
+        if (!r || !r.bestMove || r.bestMove === "") return false;
+        if ((r.depth || 0) === 0 && (r.score || 0) <= -20000 && (r.nodes || 0) <= 2) return false;
+        return true;
+    });
     if (validResults.length === 0) {
         return {
             bestMove: null,
@@ -75,7 +80,6 @@ export function aggregateWorkerResults(workerResults) {
     }
 
     const maxDepth = Math.max(0, ...validResults.map(r => r.depth || 0));
-    // If maxDepth is 0 (instant move, book hit, or shallow eval), accept depth 0!
     const minAcceptableDepth = maxDepth > 0 ? maxDepth - 1 : 0;
     let qualified = validResults.filter(r => (r.depth || 0) >= minAcceptableDepth);
     if (!qualified || qualified.length === 0) {
@@ -189,6 +193,20 @@ function initWorkers(workerCount) {
 }
 
 /**
+ * Restarts the worker pool to clear busy or stuck workers.
+ */
+function restartWorkerPool() {
+    log.warn('Pool', 'Restarting worker pool to ensure fresh, responsive workers');
+    for (let i = 0; i < workers.length; i++) {
+        try { workers[i].terminate(); } catch (_) {}
+    }
+    workers = [];
+    workerStates = [];
+    workersReady = 0;
+    initWorkers(currentWorkerCount || 2);
+}
+
+/**
  * Permanent message dispatcher for pool workers.
  */
 function handleWorkerMessage(workerIndex, data) {
@@ -294,17 +312,19 @@ function processSearch(message, searchId, abortFlag) {
     activeSelectedIndices = readyIndices.slice(0, workersToUse);
     activeWorkersCount = activeSelectedIndices.length;
 
-    log.info('SMP', `Starting search #${searchId} | workers=${activeWorkersCount} elo=${message.elo} timeMs=${(message.my_ms/20)}`);
-    log.debug('SMP', `FEN: ${(message.fen || '').substring(0, 50)}...`);
+    const targetSearchMs = message.searchTimeMs || (message.my_ms && message.my_ms > 0 ? Math.min(3000, Math.round(message.my_ms / 35)) : 1200);
+    const maxSearchMs = message.maxTimeMs || Math.round(targetSearchMs * 1.35);
+    const failsafeMs = Math.max(3500, Math.round(maxSearchMs + 2500));
 
-    // Hard failsafe timer to protect clock from flagging:
-    // If search takes longer than time budget + safety buffer, finalize immediately.
-    const budgetMs = (message.my_ms / 20) || 3000;
-    const failsafeMs = Math.min(8000, Math.max(1200, budgetMs * 1.5 + 1000));
+    log.info('SMP', `Starting search #${searchId} | workers=${activeWorkersCount} elo=${message.elo} target=${targetSearchMs}ms max=${maxSearchMs}ms failsafe=${failsafeMs}ms`);
+    log.debug('SMP', `FEN: ${(message.fen || '').substring(0, 50)}...`);
 
     activeFailsafeTimer = setTimeout(() => {
         if (activeSearchRunning && !activeSearchCompleted) {
             log.warn('SMP', `⏱️ Failsafe timeout fired (${failsafeMs}ms). Responded: ${activeCompletedWorkers}/${activeWorkersCount}. Finalizing to protect clock.`);
+            if (activeCompletedWorkers === 0) {
+                restartWorkerPool();
+            }
             finalizeActiveSearch();
         }
     }, failsafeMs);
@@ -316,6 +336,7 @@ function processSearch(message, searchId, abortFlag) {
             workers[idx].postMessage({
                 type: "SEARCH",
                 fen: message.fen,
+                searchTimeMs: targetSearchMs,
                 my_ms: message.my_ms,
                 opp_ms: message.opp_ms,
                 inc_ms: message.inc_ms,
@@ -461,7 +482,8 @@ if (typeof chrome !== "undefined" && chrome.runtime?.onMessage) {
  * @param {Function} sendResponse - Chrome messaging response callback.
  */
 function startEngineSearch(message, sendResponse) {
-    log.info('SMP', `New search request received | elo=${message.elo} timeMs=${(message.my_ms/20)} workers=${message.activeWorkerCount}`);
+    const logTime = message.searchTimeMs || (message.my_ms ? Math.round(message.my_ms / 35) : 1200);
+    log.info('SMP', `New search request received | elo=${message.elo} targetTimeMs=${logTime} workers=${message.activeWorkerCount}`);
     
     // Abort previous search via SharedArrayBuffer flag
     if (abortFlag) {
@@ -477,6 +499,10 @@ function startEngineSearch(message, sendResponse) {
         }
         activeSearchRunning = false;
         activeSearchCompleted = true;
+
+        if (!abortFlag) {
+            restartWorkerPool();
+        }
     }
 
     currentSearchId++;

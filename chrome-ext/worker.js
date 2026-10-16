@@ -79,46 +79,77 @@ onmessage = async (e) => {
 
     if (type === "SEARCH") {
         const fenShort = fen ? fen.substring(0, 45) : 'null';
-        log.debug('Search', `Worker[${workerId}] searching elo=${elo} my_ms=${my_ms}ms split=${splitId}/${splitCount}`, { fenShort });
+        const targetMs = e.data.searchTimeMs || (my_ms ? Math.round(my_ms / 30) : 1200);
+        log.debug('Search', `Worker[${workerId}] searching elo=${elo} targetMs=${targetMs}ms split=${splitId}/${splitCount}`, { fenShort });
         log.time(`Search[${workerId}]`);
         
-        
-        const result = engine.get_best_move_timed(
-            fen,
-            my_ms || 0.0,
-            inc_ms || 0.0,
-            opp_ms || 0.0,
-            movesToGo || ((my_ms||180000) < 65000 && (inc_ms||0) < 2000 ? 50 : 35),
-            250.0, // overhead_ms
-            elo,
-            splitId,
-            splitCount,
-            history || "",
-            abortFlag
-        );
-
-
-        const elapsed = log.timeEnd(`Search[${workerId}]`);
-
+        let result = null;
+        let elapsed = 0;
         try {
-            const parsed = JSON.parse(result);
-            if (!parsed.bestMove) {
-                log.warn('Search', `Worker[${workerId}] got empty bestMove`, { parsed, fenShort });
+            if (e.data.searchTimeMs && e.data.searchTimeMs > 0) {
+                result = engine.get_best_move(
+                    fen,
+                    e.data.searchTimeMs,
+                    elo,
+                    splitId,
+                    splitCount,
+                    history || "",
+                    abortFlag
+                );
             } else {
-                log.info('Search', `Worker[${workerId}] → ${parsed.bestMove} score=${parsed.score}cp depth=${parsed.depth} nodes=${(parsed.nodes||0).toLocaleString()} time=${elapsed}ms`);
+                result = engine.get_best_move_timed(
+                    fen,
+                    my_ms || 0.0,
+                    inc_ms || 0.0,
+                    opp_ms || 0.0,
+                    movesToGo || ((my_ms || 180000) < 65000 && (inc_ms || 0) < 2000 ? 50 : 35),
+                    100.0, // overhead_ms
+                    elo,
+                    splitId,
+                    splitCount,
+                    history || "",
+                    abortFlag
+                );
             }
-            postMessage({ type: "RESULT", searchId, workerId, splitId, ...parsed });
-        } catch (err) {
-            log.error('Search', `Worker[${workerId}] JSON parse FAILED — raw result below`, { err, result });
-            postMessage({
-                type: "RESULT",
-                searchId,
-                bestMove: "",
-                score: 0,
-                pv: [],
-                ponderFen: "",
-            });
+            elapsed = log.timeEnd(`Search[${workerId}]`);
+        } catch (engineErr) {
+            log.error('Search', `Worker[${workerId}] engine search failed:`, engineErr);
+            try {
+                // Emergency fast search (60ms) to ensure we always produce a legal move
+                result = engine.get_best_move(fen, 60.0, elo, 0, 1, "", null);
+            } catch (_) {
+                result = null;
+            }
         }
+
+        if (result) {
+            try {
+                const parsed = JSON.parse(result);
+                if (!parsed.bestMove) {
+                    log.warn('Search', `Worker[${workerId}] got empty bestMove`, { parsed, fenShort });
+                } else {
+                    log.info('Search', `Worker[${workerId}] → ${parsed.bestMove} score=${parsed.score}cp depth=${parsed.depth} nodes=${(parsed.nodes||0).toLocaleString()} time=${elapsed}ms`);
+                }
+                postMessage({ type: "RESULT", searchId, workerId, splitId, ...parsed });
+                return;
+            } catch (err) {
+                log.error('Search', `Worker[${workerId}] JSON parse FAILED`, { err, result });
+            }
+        }
+
+        // Failsafe empty result so offscreen coordinator is never left waiting
+        postMessage({
+            type: "RESULT",
+            searchId,
+            workerId,
+            splitId,
+            bestMove: "",
+            score: 0,
+            depth: 0,
+            nodes: 0,
+            pv: [],
+            ponderFen: "",
+        });
     }
 };
 
