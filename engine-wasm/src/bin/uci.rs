@@ -1,7 +1,7 @@
 use std::io::{self, BufRead};
 use std::path::PathBuf;
 use std::str::FromStr;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Sender};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
@@ -30,12 +30,14 @@ fn load_nnue_data() -> Vec<u8> {
 
 #[derive(Clone)]
 struct SearchParams {
+    search_id: u64,
     fen: String,
     optimum_time_ms: f64,
     maximum_time_ms: f64,
     max_depth: u8,
     split_count: u8,
     history_str: String,
+    max_nodes: Option<u64>,
 }
 
 enum WorkerMessage {
@@ -51,6 +53,8 @@ enum WorkerMessage {
 }
 
 static SEARCH_RUNNING: AtomicBool = AtomicBool::new(false);
+static SEARCH_ID: AtomicU64 = AtomicU64::new(1);
+static ACTIVE_WORKERS: AtomicUsize = AtomicUsize::new(0);
 
 struct WorkerPool {
     threads: Vec<(Sender<WorkerMessage>, JoinHandle<()>)>,
@@ -59,7 +63,7 @@ struct WorkerPool {
     hash_mb: usize,
     multipv: usize,
     show_wdl: bool,
-    thread_results: Arc<std::sync::Mutex<Vec<(u8, Option<ChessMove>, Option<ChessMove>, i32, u8)>>>,
+    thread_results: Arc<std::sync::Mutex<Vec<(u64, u8, Option<ChessMove>, Option<ChessMove>, i32, u8)>>>,
 }
 
 impl WorkerPool {
@@ -121,9 +125,11 @@ impl WorkerPool {
                                 params.split_count,
                                 &params.history_str,
                                 print_info,
+                                params.max_nodes,
                             );
 
-                            results_arc.lock().unwrap().push((id, res.best_move, res.ponder_move, res.score, res.depth));
+                            results_arc.lock().unwrap().push((params.search_id, id, res.best_move, res.ponder_move, res.score, res.depth));
+                            ACTIVE_WORKERS.fetch_sub(1, Ordering::SeqCst);
 
                             if id == 0 {
                                 // While pondering, wait for ponderhit or stop before releasing bestmove
@@ -131,17 +137,29 @@ impl WorkerPool {
                                     thread::sleep(std::time::Duration::from_millis(5));
                                 }
 
-                                // Best-Thread Voting across the Lazy SMP pool
-                                let results = results_arc.lock().unwrap().clone();
+                                // Signal all helpers that search is concluding
+                                GLOBAL_STOP.store(true, Ordering::Relaxed);
+
+                                // Wait up to 50ms for helper threads to observe GLOBAL_STOP and push their results
+                                let wait_start = std::time::Instant::now();
+                                while ACTIVE_WORKERS.load(Ordering::SeqCst) > 0 && wait_start.elapsed().as_millis() < 50 {
+                                    thread::sleep(std::time::Duration::from_millis(1));
+                                }
+
+                                // Best-Thread Voting across the Lazy SMP pool for this search_id
+                                let results: Vec<_> = {
+                                    let lock = results_arc.lock().unwrap();
+                                    lock.iter().filter(|r| r.0 == params.search_id).cloned().collect()
+                                };
                                 let mut chosen_move = res.best_move;
                                 let mut chosen_ponder = res.ponder_move;
 
                                 if results.len() > 1 && res.best_move.is_some() {
-                                    let max_depth = results.iter().map(|r| r.4).max().unwrap_or(0);
-                                    let min_score = results.iter().map(|r| r.3).min().unwrap_or(0);
+                                    let max_depth = results.iter().map(|r| r.5).max().unwrap_or(0);
+                                    let min_score = results.iter().map(|r| r.4).min().unwrap_or(0);
 
                                     let mut votes: std::collections::HashMap<ChessMove, i64> = std::collections::HashMap::new();
-                                    for (_tid, bm, _pm, score, depth) in &results {
+                                    for (_sid, _tid, bm, _pm, score, depth) in &results {
                                         if let Some(m) = bm {
                                             if *depth + 1 >= max_depth {
                                                 let weight = ((*score - min_score + 14).max(1) as i64) * (*depth as i64);
@@ -151,8 +169,8 @@ impl WorkerPool {
                                     }
                                     if let Some((&voted_m, _)) = votes.iter().max_by_key(|(_, &v)| v) {
                                         chosen_move = Some(voted_m);
-                                        if let Some(matching) = results.iter().filter(|r| r.1 == Some(voted_m)).max_by_key(|r| r.4) {
-                                            chosen_ponder = matching.2;
+                                        if let Some(matching) = results.iter().filter(|r| r.2 == Some(voted_m)).max_by_key(|r| r.5) {
+                                            chosen_ponder = matching.3;
                                         }
                                     }
                                 }
@@ -174,7 +192,6 @@ impl WorkerPool {
                                         println!("bestmove 0000");
                                     }
                                 }
-                                GLOBAL_STOP.store(true, Ordering::Relaxed);
                                 SEARCH_RUNNING.store(false, Ordering::Relaxed);
                             }
                         }
@@ -201,6 +218,7 @@ impl WorkerPool {
 
     fn dispatch_search(&self, params: SearchParams) {
         self.thread_results.lock().unwrap().clear();
+        ACTIVE_WORKERS.store(self.threads.len(), Ordering::SeqCst);
         for (idx, (tx, _)) in self.threads.iter().enumerate() {
             let _ = tx.send(WorkerMessage::Search {
                 params: params.clone(),
@@ -267,7 +285,7 @@ fn run_bench(nnue_bytes: &[u8], depth: u8) {
     for (i, &fen) in BENCH_FENS.iter().enumerate() {
         println!("\nPosition [{}/{}]: {}", i + 1, BENCH_FENS.len(), fen);
         GLOBAL_STOP.store(false, Ordering::Relaxed);
-        let res = engine.search_native(fen, 1e9, 1e9, depth, 0, 1, "", true);
+        let res = engine.search_native(fen, 1e9, 1e9, depth, 0, 1, "", true, None);
         total_nodes += res.nodes;
     }
 
@@ -396,8 +414,9 @@ fn main() {
             "ucinewgame" => {
                 GLOBAL_PONDER.store(false, Ordering::Relaxed);
                 GLOBAL_STOP.store(true, Ordering::Relaxed);
-                while SEARCH_RUNNING.load(Ordering::Relaxed) {
-                    thread::sleep(std::time::Duration::from_millis(2));
+                let wait_start = std::time::Instant::now();
+                while SEARCH_RUNNING.load(Ordering::Relaxed) && wait_start.elapsed().as_millis() < 250 {
+                    thread::sleep(std::time::Duration::from_millis(1));
                 }
                 position_history.clear();
                 position_fen = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1".to_string();
@@ -433,8 +452,9 @@ fn main() {
                 if SEARCH_RUNNING.load(Ordering::Relaxed) {
                     GLOBAL_PONDER.store(false, Ordering::Relaxed);
                     GLOBAL_STOP.store(true, Ordering::Relaxed);
-                    while SEARCH_RUNNING.load(Ordering::Relaxed) {
-                        thread::sleep(std::time::Duration::from_millis(2));
+                    let wait_start = std::time::Instant::now();
+                    while SEARCH_RUNNING.load(Ordering::Relaxed) && wait_start.elapsed().as_millis() < 250 {
+                        thread::sleep(std::time::Duration::from_millis(1));
                     }
                 }
 
@@ -453,6 +473,7 @@ fn main() {
                 let mut depth_limit: u32 = 0;
                 let mut movestogo: u32 = 30;
                 let mut infinite = false;
+                let mut max_nodes = None;
 
                 let mut i = 1;
                 while i < tokens.len() {
@@ -463,6 +484,7 @@ fn main() {
                         "binc"      => { i += 1; binc      = tokens.get(i).and_then(|v| v.parse().ok()).unwrap_or(0.0); }
                         "movetime"  => { i += 1; movetime  = tokens.get(i).and_then(|v| v.parse().ok()).unwrap_or(0.0); }
                         "depth"     => { i += 1; depth_limit = tokens.get(i).and_then(|v| v.parse().ok()).unwrap_or(0); }
+                        "nodes"     => { i += 1; max_nodes = tokens.get(i).and_then(|v| v.parse().ok()); }
                         "movestogo" => { i += 1; movestogo = tokens.get(i).and_then(|v| v.parse().ok()).unwrap_or(30); }
                         "infinite"  => { infinite = true; }
                         _ => {}
@@ -500,13 +522,16 @@ fn main() {
                 GLOBAL_NODES.store(0, Ordering::Relaxed);
                 SEARCH_RUNNING.store(true, Ordering::Relaxed);
 
+                let search_id = SEARCH_ID.fetch_add(1, Ordering::SeqCst);
                 let params = SearchParams {
+                    search_id,
                     fen: position_fen.clone(),
                     optimum_time_ms,
                     maximum_time_ms,
                     max_depth,
                     split_count: pool.len() as u8,
                     history_str: position_history.join("|"),
+                    max_nodes,
                 };
 
                 pool.dispatch_search(params);

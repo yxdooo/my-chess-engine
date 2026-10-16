@@ -24,8 +24,6 @@ pub struct Network {
     pub fc1_biases: Vec<i32>,
     pub fc2_weights: Vec<i8>,
     pub fc2_biases: Vec<i32>,
-    pub policy_weights: Vec<i8>,
-    pub policy_biases: Vec<i32>,
 }
 
 impl Network {
@@ -42,8 +40,6 @@ impl Network {
             fc1_biases: vec![0; 32],
             fc2_weights: vec![0; 32 * 1],
             fc2_biases: vec![0; 1],
-            policy_weights: vec![0; 64 * 32],
-            policy_biases: vec![0; 64],
         }
     }
 
@@ -60,44 +56,11 @@ impl Network {
             fc1_biases: vec![0; 32],
             fc2_weights: vec![0; 32 * 1],
             fc2_biases: vec![0; 1],
-            policy_weights: vec![0; 64 * 32],
-            policy_biases: vec![0; 64],
         }
-    }
-
-    pub fn evaluate_policy(&self, acc: &Accumulator, stm: Color) -> [i16; 64] {
-        let mut policy_scores = [0i16; 64];
-        let hs = self.hidden_size;
-        let us = if stm == Color::White { &acc.white } else { &acc.black };
-
-        if !self.policy_weights.is_empty() && self.policy_weights.len() >= 64 * 32 {
-            for sq in 0..64 {
-                let mut sum = if sq < self.policy_biases.len() { self.policy_biases[sq] } else { 0 };
-                let w_row = sq * 32;
-                for j in 0..32 {
-                    let act = us[j].clamp(0, 127) as i32;
-                    sum += act * (self.policy_weights[w_row + j] as i32);
-                }
-                policy_scores[sq] = (sum / 64).clamp(-30000, 30000) as i16;
-            }
-        } else {
-            for sq in 0..64 {
-                let act = (us[sq % hs].max(0) as i32).min(255);
-                policy_scores[sq] = (act / 8) as i16;
-            }
-        }
-        policy_scores
     }
 
     pub fn new() -> Self {
         Self::new_halfkp()
-    }
-
-    pub fn fold_virtual_features(&mut self) {
-        // Virtual Feature Factorization:
-        // W_actual[bucket][piece][sq] = W_bucket[bucket][piece][sq] + W_virtual[piece][sq]
-        // Fold virtual piece-square biases into king-bucket matrices at load time
-        // for zero runtime inference cost.
     }
 }
 
@@ -660,6 +623,42 @@ fn add_sub_sub_feature(acc: &mut [i16; MAX_HIDDEN_SIZE], prev: &[i16; MAX_HIDDEN
     unsafe { (get_kernels().add_sub_sub_feature)(acc, prev, weights, add_feat, sub_feat1, sub_feat2, hidden_size) }
 }
 
+pub fn refresh_perspective(network: &Network, acc: &mut Accumulator, board: &Board, color: Color) {
+    acc.hidden_size = network.hidden_size;
+    let hs = network.hidden_size;
+
+    match color {
+        Color::White => {
+            acc.white[..hs].copy_from_slice(&network.feature_biases[..hs]);
+            let wk = board.king_square(Color::White).to_index();
+            for sq in *board.color_combined(Color::White) | *board.color_combined(Color::Black) {
+                if let Some(piece) = board.piece_on(sq) {
+                    if piece == Piece::King { continue; }
+                    let piece_color = board.color_on(sq).unwrap();
+                    let sq_idx = sq.to_index();
+                    let pc = make_piece_code(piece, piece_color);
+                    let feature_w = wk * 641 + 1 + pc * 64 + sq_idx;
+                    add_feature(&mut acc.white, &network.feature_weights, feature_w, hs);
+                }
+            }
+        }
+        Color::Black => {
+            acc.black[..hs].copy_from_slice(&network.feature_biases[..hs]);
+            let bk_flipped = board.king_square(Color::Black).to_index() ^ 63;
+            for sq in *board.color_combined(Color::White) | *board.color_combined(Color::Black) {
+                if let Some(piece) = board.piece_on(sq) {
+                    if piece == Piece::King { continue; }
+                    let piece_color = board.color_on(sq).unwrap();
+                    let sq_idx = sq.to_index();
+                    let pc = make_piece_code(piece, piece_color);
+                    let feature_b = bk_flipped * 641 + 1 + flip_piece_code(pc) * 64 + (sq_idx ^ 63);
+                    add_feature(&mut acc.black, &network.feature_weights, feature_b, hs);
+                }
+            }
+        }
+    }
+}
+
 pub fn refresh_accumulator(network: &Network, acc: &mut Accumulator, board: &Board) {
     acc.hidden_size = network.hidden_size;
     let hs = network.hidden_size;
@@ -715,12 +714,74 @@ pub fn update_accumulator(network: &Network, next_acc: &mut Accumulator, prev_ac
 
     match network.arch {
         ArchType::HalfKP => {
-            if wk_old != wk_new || bk_old != bk_new {
+            let hs = network.hidden_size;
+            next_acc.hidden_size = hs;
+
+            if wk_old != wk_new && bk_old != bk_new {
                 refresh_accumulator(network, next_acc, new_board);
                 return;
             }
+
+            if wk_old != wk_new {
+                // Asymmetric update: White King moved, refresh White; incrementally update Black
+                refresh_perspective(network, next_acc, new_board, Color::White);
+                next_acc.black = prev_acc.black;
+                let bk_flipped = bk_new ^ 63;
+                for color in [Color::White, Color::Black] {
+                    for piece in [Piece::Pawn, Piece::Knight, Piece::Bishop, Piece::Rook, Piece::Queen] {
+                        let old_bb = old_board.pieces(piece) & old_board.color_combined(color);
+                        let new_bb = new_board.pieces(piece) & new_board.color_combined(color);
+                        let diff = old_bb.0 ^ new_bb.0;
+                        if diff != 0 {
+                            let mut d = diff;
+                            while d != 0 {
+                                let sq_idx = d.trailing_zeros() as usize;
+                                d &= d - 1;
+                                let pc = make_piece_code(piece, color);
+                                let feature_b = bk_flipped * 641 + 1 + flip_piece_code(pc) * 64 + (sq_idx ^ 63);
+                                if new_bb.0 & (1u64 << sq_idx) != 0 {
+                                    add_feature(&mut next_acc.black, &network.feature_weights, feature_b, hs);
+                                } else {
+                                    sub_feature(&mut next_acc.black, &network.feature_weights, feature_b, hs);
+                                }
+                            }
+                        }
+                    }
+                }
+                return;
+            }
+
+            if bk_old != bk_new {
+                // Asymmetric update: Black King moved, refresh Black; incrementally update White
+                refresh_perspective(network, next_acc, new_board, Color::Black);
+                next_acc.white = prev_acc.white;
+                let wk = wk_new;
+                for color in [Color::White, Color::Black] {
+                    for piece in [Piece::Pawn, Piece::Knight, Piece::Bishop, Piece::Rook, Piece::Queen] {
+                        let old_bb = old_board.pieces(piece) & old_board.color_combined(color);
+                        let new_bb = new_board.pieces(piece) & new_board.color_combined(color);
+                        let diff = old_bb.0 ^ new_bb.0;
+                        if diff != 0 {
+                            let mut d = diff;
+                            while d != 0 {
+                                let sq_idx = d.trailing_zeros() as usize;
+                                d &= d - 1;
+                                let pc = make_piece_code(piece, color);
+                                let feature_w = wk * 641 + 1 + pc * 64 + sq_idx;
+                                if new_bb.0 & (1u64 << sq_idx) != 0 {
+                                    add_feature(&mut next_acc.white, &network.feature_weights, feature_w, hs);
+                                } else {
+                                    sub_feature(&mut next_acc.white, &network.feature_weights, feature_w, hs);
+                                }
+                            }
+                        }
+                    }
+                }
+                return;
+            }
+
+            // Neither king moved: normal full incremental update for both perspectives
             *next_acc = *prev_acc;
-            let hs = network.hidden_size;
             let wk = wk_new;
             let bk_flipped = bk_new ^ 63;
 
@@ -815,7 +876,7 @@ pub fn update_accumulator_move(
     let bk_new = new_board.king_square(Color::Black).to_index();
 
     if wk_old != wk_new || bk_old != bk_new {
-        refresh_accumulator(network, next_acc, new_board);
+        update_accumulator(network, next_acc, prev_acc, old_board, new_board);
         return;
     }
 
@@ -1013,7 +1074,36 @@ pub fn evaluate(network: &Network, acc: &Accumulator, stm: Color) -> i32 {
             fc1[i] = total / 64;
         }
     }
-    #[cfg(not(target_arch = "x86_64"))]
+    #[cfg(target_arch = "wasm32")]
+    unsafe {
+        use core::arch::wasm32::*;
+        let ones = i16x8_splat(1);
+        let inp_ptr = fc0_act.as_ptr() as *const v128;
+        let inp0 = v128_load(inp_ptr);
+        let inp1 = v128_load(inp_ptr.add(1));
+        for i in 0..32 {
+            let w_ptr = network.fc1_weights.as_ptr().add(i * 32) as *const v128;
+            let w0 = v128_load(w_ptr);
+            let w1 = v128_load(w_ptr.add(1));
+
+            let dot0 = i32x4_add(
+                i32x4_dot_i16x8(i16x8_extmul_low_i8x16(inp0, w0), ones),
+                i32x4_dot_i16x8(i16x8_extmul_high_i8x16(inp0, w0), ones),
+            );
+            let dot1 = i32x4_add(
+                i32x4_dot_i16x8(i16x8_extmul_low_i8x16(inp1, w1), ones),
+                i32x4_dot_i16x8(i16x8_extmul_high_i8x16(inp1, w1), ones),
+            );
+            let sum_vec = i32x4_add(dot0, dot1);
+            let total = network.fc1_biases[i]
+                + i32x4_extract_lane::<0>(sum_vec)
+                + i32x4_extract_lane::<1>(sum_vec)
+                + i32x4_extract_lane::<2>(sum_vec)
+                + i32x4_extract_lane::<3>(sum_vec);
+            fc1[i] = total / 64;
+        }
+    }
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "wasm32")))]
     {
         for i in 0..32 {
             let mut sum = network.fc1_biases[i];
@@ -1048,7 +1138,32 @@ pub fn evaluate(network: &Network, acc: &Accumulator, stm: Color) -> i32 {
         let sum32 = _mm_add_epi32(sum64, hi32);
         output += _mm_cvtsi128_si32(sum32);
     }
-    #[cfg(not(target_arch = "x86_64"))]
+    #[cfg(target_arch = "wasm32")]
+    unsafe {
+        use core::arch::wasm32::*;
+        let ones = i16x8_splat(1);
+        let inp_ptr = fc1_act.as_ptr() as *const v128;
+        let w_ptr = network.fc2_weights.as_ptr() as *const v128;
+        let inp0 = v128_load(inp_ptr);
+        let inp1 = v128_load(inp_ptr.add(1));
+        let w0 = v128_load(w_ptr);
+        let w1 = v128_load(w_ptr.add(1));
+
+        let dot0 = i32x4_add(
+            i32x4_dot_i16x8(i16x8_extmul_low_i8x16(inp0, w0), ones),
+            i32x4_dot_i16x8(i16x8_extmul_high_i8x16(inp0, w0), ones),
+        );
+        let dot1 = i32x4_add(
+            i32x4_dot_i16x8(i16x8_extmul_low_i8x16(inp1, w1), ones),
+            i32x4_dot_i16x8(i16x8_extmul_high_i8x16(inp1, w1), ones),
+        );
+        let sum_vec = i32x4_add(dot0, dot1);
+        output += i32x4_extract_lane::<0>(sum_vec)
+            + i32x4_extract_lane::<1>(sum_vec)
+            + i32x4_extract_lane::<2>(sum_vec)
+            + i32x4_extract_lane::<3>(sum_vec);
+    }
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "wasm32")))]
     {
         for j in 0..32 {
             output += (fc1_act[j] as i32) * (network.fc2_weights[j] as i32);

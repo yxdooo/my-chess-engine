@@ -1,7 +1,5 @@
 use chess::{Board, ChessMove, Color, Piece, MoveGen};
 use std::collections::HashMap;
-use std::fs::File;
-use std::io::Read;
 use std::path::PathBuf;
 use std::sync::{Arc, OnceLock, RwLock};
 
@@ -144,37 +142,20 @@ pub fn probe_wdl(board: &Board) -> Option<WdlResult> {
         return None;
     }
 
-    // Two bare kings is an immediate known draw
+    // Two bare kings or basic insufficient material is an immediate known draw
     if total_pieces == 2 {
         return Some(WdlResult::Draw);
     }
-
-    let key = format!("{}.rtbw", get_material_key(board));
-    let table_path = config.available_tables.get(&key)?;
-
-    // Read header or memory-mapped table representation if file exists
-    if let Ok(mut file) = File::open(table_path) {
-        let mut header = [0u8; 16];
-        if file.read_exact(&mut header).is_ok() {
-            // Check Syzygy RTBW magic number: 0x5d, 0x23, 0xa8, 0x71
-            if header[0] == 0x71 && header[1] == 0xa8 && header[2] == 0x23 && header[3] == 0x5d {
-                // Tablebase file is valid and present
-                // Simple heuristic fallback for known minimal endgames:
-                let stm = board.side_to_move();
-                let my_mat = (board.color_combined(stm)).popcnt();
-                let opp_mat = (board.color_combined(!stm)).popcnt();
-                
-                if my_mat > opp_mat + 1 {
-                    return Some(WdlResult::Win);
-                } else if opp_mat > my_mat + 1 {
-                    return Some(WdlResult::Loss);
-                } else {
-                    return Some(WdlResult::Draw);
-                }
-            }
+    if total_pieces == 3 {
+        let bishops = board.pieces(Piece::Bishop).popcnt();
+        let knights = board.pieces(Piece::Knight).popcnt();
+        if bishops == 1 || knights == 1 {
+            return Some(WdlResult::Draw);
         }
     }
 
+    // Until full block decompression for Syzygy .rtbw files is linked,
+    // do not return fake material-count heuristics that corrupt endgame play.
     None
 }
 
@@ -200,18 +181,19 @@ pub fn probe_root(board: &Board) -> Option<(ChessMove, i32)> {
 
     for m in &legal_moves {
         let next_board = board.make_move_new(*m);
-        let wdl = match probe_wdl(&next_board) {
-            Some(WdlResult::Win) => -2, // Opponent wins -> we lose
-            Some(WdlResult::CursedWin) => -1,
-            Some(WdlResult::Draw) => 0,
-            Some(WdlResult::BlessedLoss) => 1,
-            Some(WdlResult::Loss) => 2, // Opponent loses -> we win
-            None => 0,
-        };
+        if let Some(res) = probe_wdl(&next_board) {
+            let wdl = match res {
+                WdlResult::Win => -2, // Opponent wins -> we lose
+                WdlResult::CursedWin => -1,
+                WdlResult::Draw => 0,
+                WdlResult::BlessedLoss => 1,
+                WdlResult::Loss => 2, // Opponent loses -> we win
+            };
 
-        if wdl > best_wdl {
-            best_wdl = wdl;
-            best_move = Some(*m);
+            if wdl > best_wdl {
+                best_wdl = wdl;
+                best_move = Some(*m);
+            }
         }
     }
 

@@ -54,6 +54,18 @@ const MAX_FEN_HISTORY = 50;
 /** @type {string[]} Normalized FEN history for repetition detection. */
 let fenHistory = [];
 
+/** Persistent board tracking for exact en-passant, 50-move clock and castling memory */
+let prevBoardArray = null;
+let halfmoveClock = 0;
+let persistentCastling = {
+    wKingMoved: false,
+    bKingMoved: false,
+    wRookAMoved: false,
+    wRookHMoved: false,
+    bRookAMoved: false,
+    bRookHMoved: false,
+};
+
 /**
  * Cache of ponder search results: normalized FEN -> { bestMove, pv }.
  * Populated by the background script's ponder response.
@@ -558,36 +570,137 @@ function parseBoard() {
         }
     }
 
-    // Determine castling rights by checking if kings or rooks have moved
-    let wKingMoved = false;
-    let bKingMoved = false;
+    // Reset persistent tracking if a new game started
+    if (maxPly === 0 || (board[4] === "K" && board[60] === "k" && maxPly <= 1 && (!moveNodes || moveNodes.length <= 1))) {
+        persistentCastling = {
+            wKingMoved: false,
+            bKingMoved: false,
+            wRookAMoved: false,
+            wRookHMoved: false,
+            bRookAMoved: false,
+            bRookHMoved: false,
+        };
+        halfmoveClock = 0;
+        prevBoardArray = null;
+    }
+
+    // Update persistent castling loss: if king or rook is no longer on initial square, right is lost forever
+    if (board[4] !== "K") persistentCastling.wKingMoved = true;
+    if (board[60] !== "k") persistentCastling.bKingMoved = true;
+    if (board[0] !== "R") persistentCastling.wRookAMoved = true;
+    if (board[7] !== "R") persistentCastling.wRookHMoved = true;
+    if (board[56] !== "r") persistentCastling.bRookAMoved = true;
+    if (board[63] !== "r") persistentCastling.bRookHMoved = true;
+
+    // Check move nodes for explicit king / rook moves or castles
+    let wKingMoved = persistentCastling.wKingMoved;
+    let bKingMoved = persistentCastling.bKingMoved;
     if (moveNodes && moveNodes.length > 0) {
         moveNodes.forEach((node, index) => {
             const text = node.innerText.trim();
             const isWhite = index % 2 === 0;
-            if (isWhite && (text.startsWith("K") || text.startsWith("O-O"))) {
-                wKingMoved = true;
-            } else if (
-                !isWhite &&
-                (text.startsWith("K") || text.startsWith("O-O"))
-            ) {
-                bKingMoved = true;
+            if (isWhite) {
+                if (text.startsWith("K") || text.startsWith("O-O")) wKingMoved = true;
+                if (text.startsWith("Ra") || text.startsWith("R1") || text === "O-O-O") persistentCastling.wRookAMoved = true;
+                if (text.startsWith("Rh") || text === "O-O") persistentCastling.wRookHMoved = true;
+            } else {
+                if (text.startsWith("K") || text.startsWith("O-O")) bKingMoved = true;
+                if (text.startsWith("Ra") || text.startsWith("R8") || text === "O-O-O") persistentCastling.bRookAMoved = true;
+                if (text.startsWith("Rh") || text === "O-O") persistentCastling.bRookHMoved = true;
             }
         });
     }
 
     let castling = "";
     if (!wKingMoved && board[4] === "K") {
-        if (board[7] === "R") castling += "K";
-        if (board[0] === "R") castling += "Q";
+        if (!persistentCastling.wRookHMoved && board[7] === "R") castling += "K";
+        if (!persistentCastling.wRookAMoved && board[0] === "R") castling += "Q";
     }
     if (!bKingMoved && board[60] === "k") {
-        if (board[63] === "r") castling += "k";
-        if (board[56] === "r") castling += "q";
+        if (!persistentCastling.bRookHMoved && board[63] === "r") castling += "k";
+        if (!persistentCastling.bRookAMoved && board[56] === "r") castling += "q";
     }
     if (castling === "") castling = "-";
 
-    return `${fenPlacement} ${stm} ${castling} - 0 1`;
+    // En-passant detection from previous board or DOM highlights
+    let epSquare = "-";
+    if (prevBoardArray) {
+        if (stm === "b") {
+            // White moved. Check if White pawn jumped from rank 2 (8..15) to rank 4 (24..31)
+            for (let f = 0; f < 8; f++) {
+                if (prevBoardArray[8 + f] === "P" && board[8 + f] === null && board[24 + f] === "P") {
+                    epSquare = String.fromCharCode(97 + f) + "3";
+                    break;
+                }
+            }
+        } else {
+            // Black moved. Check if Black pawn jumped from rank 7 (48..55) to rank 5 (32..39)
+            for (let f = 0; f < 8; f++) {
+                if (prevBoardArray[48 + f] === "p" && board[48 + f] === null && board[32 + f] === "p") {
+                    epSquare = String.fromCharCode(97 + f) + "6";
+                    break;
+                }
+            }
+        }
+    }
+
+    if (epSquare === "-") {
+        const highlights = document.querySelectorAll(
+            "wc-chess-board .highlight, chess-board .highlight, cg-board square.last-move"
+        );
+        let hlSquares = [];
+        highlights.forEach((el) => {
+            el.classList.forEach((cls) => {
+                const m = cls.match(/^square-([a-h][1-8])$/);
+                if (m) hlSquares.push(m[1]);
+            });
+        });
+        if (hlSquares.length >= 2) {
+            for (let i = 0; i < hlSquares.length; i++) {
+                for (let j = 0; j < hlSquares.length; j++) {
+                    if (i === j) continue;
+                    const from = hlSquares[i];
+                    const to = hlSquares[j];
+                    if (stm === "b" && from[0] === to[0] && from[1] === "2" && to[1] === "4") {
+                        const sqIdx = (4 - 1) * 8 + (to.charCodeAt(0) - 97);
+                        if (board[sqIdx] === "P") epSquare = to[0] + "3";
+                    } else if (stm === "w" && from[0] === to[0] && from[1] === "7" && to[1] === "5") {
+                        const sqIdx = (5 - 1) * 8 + (to.charCodeAt(0) - 97);
+                        if (board[sqIdx] === "p") epSquare = to[0] + "6";
+                    }
+                }
+            }
+        }
+    }
+
+    // Halfmove clock tracking (pawn move or capture resets to 0)
+    if (prevBoardArray) {
+        let isCaptureOrPawn = false;
+        let prevCount = 0;
+        let currCount = 0;
+        for (let i = 0; i < 64; i++) {
+            if (prevBoardArray[i]) prevCount++;
+            if (board[i]) currCount++;
+        }
+        if (currCount < prevCount) {
+            isCaptureOrPawn = true;
+        } else {
+            for (let i = 0; i < 64; i++) {
+                if (board[i] === "P" && prevBoardArray[i] !== "P") isCaptureOrPawn = true;
+                if (board[i] === "p" && prevBoardArray[i] !== "p") isCaptureOrPawn = true;
+            }
+        }
+        if (isCaptureOrPawn) {
+            halfmoveClock = 0;
+        } else {
+            halfmoveClock++;
+        }
+    }
+
+    prevBoardArray = [...board];
+    const fullmove = Math.max(1, Math.floor(maxPly / 2) + 1);
+
+    return `${fenPlacement} ${stm} ${castling} ${epSquare} ${halfmoveClock} ${fullmove}`;
     } catch (e) {
         log.error('Board', 'Error parsing board DOM', e);
         return null;

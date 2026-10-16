@@ -103,4 +103,5 @@ https://github.com/yxdooo/my-chess-engine
 | Version | Date | Changes | Status |
 |---------|------|---------|--------|
 | 2.2.0 | 2026-10-15 | Modernized WebAssembly engine pipeline, enhanced offscreen worker stability, and updated manifest. | Draft |
-| 2.3.0 | 2026-10-15 | Stage 4 & 5 TCEC Superfinal enhancements: Cuckoo repetition cycle detection, pawn/threat/cap history heuristics, lockless shared correction tables, and SIMD forward pass optimizations. | Ready |
+| 2.3.0 | 2026-10-15 | Stage 4 & 5 TCEC Superfinal enhancements: Cuckoo repetition cycle detection, pawn/threat/cap history heuristics, lockless shared correction tables, and SIMD forward pass optimizations. | Released |
+| 2.3.1 | 2026-10-16 | Engine & Extension Reliability: Exact DOM en-passant tracking, persistent castling rights preservation, 50-move clock reset, TT-first staged move generation, and datagen node limiting. | Ready |

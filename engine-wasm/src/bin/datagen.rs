@@ -227,7 +227,7 @@ fn main() {
                     }
 
                     let fen = board.to_string();
-                    let res = engine.search_native(&fen, 1e9, 1e9, 64, 0, 1, "", false);
+                    let res = engine.search_native(&fen, 1e9, 1e9, 64, 0, 1, "", false, Some(node_limit));
                     let score = res.score.clamp(-30000, 30000) as i16;
 
                     game_positions.push((board, score, halfmove));

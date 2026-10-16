@@ -166,7 +166,7 @@ fn run_server_mode(port: u16, target_positions: u64, output_pattern: String) {
         final_pos, elapsed, final_pos as f64 / elapsed.max(0.1));
 }
 
-fn run_client_mode(server_addr: &str, num_threads: usize, _node_limit: u64, opening_plies: usize) {
+fn run_client_mode(server_addr: &str, num_threads: usize, node_limit: u64, opening_plies: usize) {
     println!("[Client Mode] Connecting to self-play server at {}...", server_addr);
     let stream = TcpStream::connect(server_addr).expect("Failed to connect to selfplay server");
     let shared_stream = Arc::new(std::sync::Mutex::new(stream));
@@ -214,7 +214,7 @@ fn run_client_mode(server_addr: &str, num_threads: usize, _node_limit: u64, open
                     if halfmove >= 100 { break; }
 
                     let fen = board.to_string();
-                    let res = engine.search_native(&fen, 1e9, 1e9, 64, 0, 1, "", false);
+                    let res = engine.search_native(&fen, 1e9, 1e9, 64, 0, 1, "", false, Some(node_limit));
                     let score = res.score.clamp(-30000, 30000) as i16;
 
                     if score.abs() <= 1500 {
@@ -386,7 +386,7 @@ fn main() {
                         if halfmove >= 100 { break; }
 
                         let fen = board.to_string();
-                        let res = engine.search_native(&fen, 1e9, 1e9, 64, 0, 1, "", false);
+                        let res = engine.search_native(&fen, 1e9, 1e9, 64, 0, 1, "", false, Some(node_limit));
                         let score = res.score.clamp(-30000, 30000) as i16;
 
                         if score.abs() <= 1500 {
