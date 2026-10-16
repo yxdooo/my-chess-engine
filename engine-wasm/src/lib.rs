@@ -980,7 +980,9 @@ impl ChessEngine {
                 reduction_factor *= 0.80;
             }
 
-            self.optimum_time_ms = ((base_opt * time_scale) * reduction_factor).clamp(10.0, self.maximum_time_ms);
+            let min_t = 10.0f64.min(self.maximum_time_ms);
+            self.optimum_time_ms = ((base_opt * time_scale) * reduction_factor).clamp(min_t, self.maximum_time_ms);
+
 
             previous_best_move = best_move;
             previous_best_score = best_score;

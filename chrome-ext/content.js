@@ -792,11 +792,22 @@ function parseBoard() {
 
         if (file < 0 || file > 7 || rank < 0 || rank > 7) return;
 
-        board[rank * 8 + file] = char;
+        const sq = rank * 8 + file;
+        // Collision protection: If two DOM elements claim the same square (common during Chess.com capture animations),
+        // keep the piece with higher opacity and reject captured/fading ghost elements.
+        if (board[sq] !== null) {
+            const currentOpacity = parseFloat(computedStyle.opacity || "1");
+            if (p.classList.contains("captured") || p.classList.contains("fade-out") || currentOpacity < 0.9) {
+                return;
+            }
+        }
+
+        board[sq] = char;
 
         if (char === "K") whiteKing = true;
         if (char === "k") blackKing = true;
     });
+
 
     if (!whiteKing || !blackKing) return null;
 
