@@ -3,14 +3,17 @@
  *
  * Runs inside the hidden offscreen document. Maintains a pool of Web Workers,
  * each loading the WASM chess engine. Distributes search tasks across workers
- * (Lazy SMP) and aggregates results.
+ * (Lazy SMP) and aggregates results with a Master-First Early Resolution model.
  */
 import { log } from "./logger.js";
 
-const MAX_WORKERS = 16;
+const MAX_WORKERS = 4;
 
 /** @type {Worker[]} The active worker pool. */
 let workers = [];
+
+/** @type {Array<{ready: boolean, failed: boolean}>} Per-worker state tracking. */
+let workerStates = [];
 
 /** @type {number} Count of workers that have reported READY. */
 let workersReady = 0;
@@ -30,6 +33,18 @@ let activeHashSize = 128;
 let abortFlag = null;
 let currentSearchId = 0;
 
+// Active search tracking
+let activeSearchRunning = false;
+let activeSearchCompleted = false;
+let activeSearchId = 0;
+let activeWorkerResults = [];
+let activeWorkersCount = 0;
+let activeCompletedWorkers = 0;
+let activeGraceTimer = null;
+let activeFailsafeTimer = null;
+let activeStartTime = 0;
+let activeSelectedIndices = [];
+
 /**
  * Robust Multi-Worker Aggregation:
  * 1. Filter out empty or broken moves.
@@ -38,9 +53,9 @@ let currentSearchId = 0;
  *    horizon-effect blunders from shallow searches overriding deep analyses.
  * 4. For qualified candidates, sort by:
  *    a) Depth descending (deepest search wins)
- *    b) Score descending (for side to move)
+ *    b) Worker 0 priority in ties (canonical unperturbed move ordering)
  *    c) Nodes descending (more thorough exploration wins)
- *    d) Prefer Worker 0 in exact ties (canonical unperturbed move ordering)
+ *    d) Score descending
  *
  * @param {Array<object>} workerResults
  * @returns {object} Aggregated result object
@@ -106,70 +121,111 @@ export function aggregateWorkerResults(workerResults) {
 // ---------------------------------------------------------------------------
 
 /**
- * Spawns workerCount fresh worker threads and waits for all to report READY.
- * After all workers are ready, processes any queued search message.
+ * Spawns worker threads up to workerCount with permanent message handlers.
+ * Never overwrites worker.onmessage so READY and INIT_FAILED are never lost.
  */
 function initWorkers(workerCount) {
-    currentWorkerCount = workerCount;
-    log.info('Pool', `Spawning ${workerCount} workers (${workers.length} already exist)`);
+    const target = Math.min(MAX_WORKERS, Math.max(1, workerCount));
+    currentWorkerCount = target;
+    log.info('Pool', `Spawning workers up to target=${target} (${workers.length} exist)`);
 
     const initialLength = workers.length;
-    for (let i = initialLength; i < workerCount; i++) {
+    for (let i = initialLength; i < target; i++) {
         try {
-            const worker = new Worker("worker.js", { type: "module" });
-            worker.postMessage({ type: "INIT" });
+            const workerIndex = i;
+            workerStates[workerIndex] = { ready: false, failed: false };
 
+            const worker = new Worker("worker.js", { type: "module" });
+
+            // PERMANENT message handler - NEVER overwritten!
             worker.onmessage = (e) => {
-                if (e.data.type === "READY") {
-                    worker.postMessage({
-                        type: "SET_HASH_SIZE",
-                        size: Math.max(1, Math.floor(activeHashSize / currentWorkerCount)),
-                    });
-                    workersReady++;
-                    log.info('Pool', `Worker #${workersReady}/${currentWorkerCount} ready`);
-                    if (messageQueue && workersReady >= Math.min(MAX_WORKERS, Math.max(1, messageQueue.activeWorkerCount || 1), workers.length)) {
-                        log.info('Pool', 'All workers ready — starting queued search');
-                        processSearch(messageQueue, currentSearchId, abortFlag);
-                    }
-                } else if (e.data.type === "INIT_FAILED") {
-                    log.error('Pool', `Worker #${i} initialization failed:`, e.data.error);
-                    currentWorkerCount--;
-                    if (workersReady >= currentWorkerCount && messageQueue && currentWorkerCount > 0) {
-                        processSearch(messageQueue, currentSearchId, abortFlag);
-                    } else if (currentWorkerCount === 0 && currentSendResponse) {
-                        currentSendResponse({ bestMove: null });
-                        currentSendResponse = null;
-                    }
-                }
+                handleWorkerMessage(workerIndex, e.data);
             };
 
             worker.onerror = (err) => {
-                log.error('Pool', `Worker crashed!`, err);
-                currentWorkerCount--;
-                if (workersReady >= currentWorkerCount && messageQueue && currentWorkerCount > 0) {
-                    processSearch(messageQueue, currentSearchId, abortFlag);
-                } else if (currentWorkerCount === 0 && currentSendResponse) {
-                    currentSendResponse({ bestMove: null });
-                    currentSendResponse = null;
+                log.error('Pool', `Worker #${workerIndex} crashed!`, err);
+                if (workerStates[workerIndex]) {
+                    workerStates[workerIndex].failed = true;
+                    workerStates[workerIndex].ready = false;
+                }
+                if (activeSearchRunning && !activeSearchCompleted) {
+                    handleWorkerResult(workerIndex, {
+                        type: "RESULT",
+                        searchId: activeSearchId,
+                        splitId: workerIndex,
+                        bestMove: "",
+                        score: 0,
+                        depth: 0,
+                        nodes: 0,
+                        pv: [],
+                        ponderFen: ""
+                    });
                 }
             };
 
             workers.push(worker);
+            worker.postMessage({ type: "INIT" });
         } catch (e) {
-            log.error('Pool', `Worker spawn failed`, e);
-            // If spawning fails, adjust the expected count to prevent hanging
-            currentWorkerCount--;
-            if (workersReady === currentWorkerCount && messageQueue && currentWorkerCount > 0) {
-                processSearch(messageQueue, currentSearchId, abortFlag);
-            }
+            log.error('Pool', `Worker #${i} spawn failed`, e);
+            workerStates[i] = { ready: false, failed: true };
         }
     }
-    
-    // If NO workers spawned successfully (e.g. Chrome block), send a fallback
-    if (currentWorkerCount === 0 && currentSendResponse) {
-        log.error('Pool', 'CRITICAL: No workers spawned! Sending null response.');
-        currentSendResponse({ bestMove: null });
-        currentSendResponse = null;
+}
+
+/**
+ * Permanent message dispatcher for pool workers.
+ */
+function handleWorkerMessage(workerIndex, data) {
+    if (!data || !data.type) return;
+
+    if (data.type === "READY") {
+        if (!workerStates[workerIndex]?.ready) {
+            workerStates[workerIndex] = { ready: true, failed: false };
+            workersReady = workerStates.filter(s => s && s.ready).length;
+            
+            // Distribute hash size across ready workers
+            const perWorkerHash = Math.max(1, Math.floor(activeHashSize / Math.max(1, workersReady)));
+            try {
+                workers[workerIndex].postMessage({
+                    type: "SET_HASH_SIZE",
+                    size: perWorkerHash,
+                });
+            } catch (_) {}
+
+            log.info('Pool', `Worker #${workerIndex} ready (${workersReady}/${workers.length} ready)`);
+
+            // If a search was queued and at least one worker is ready, start it
+            if (messageQueue && !activeSearchRunning && workersReady >= 1) {
+                log.info('Pool', 'Queued search can now proceed with ready worker(s)');
+                const queued = messageQueue;
+                messageQueue = null;
+                processSearch(queued, currentSearchId, abortFlag);
+            }
+        }
+        return;
+    }
+
+    if (data.type === "INIT_FAILED") {
+        log.error('Pool', `Worker #${workerIndex} initialization failed:`, data.error);
+        if (workerStates[workerIndex]) {
+            workerStates[workerIndex].failed = true;
+            workerStates[workerIndex].ready = false;
+        }
+        workersReady = workerStates.filter(s => s && s.ready).length;
+        if (messageQueue && !activeSearchRunning && workersReady >= 1) {
+            const queued = messageQueue;
+            messageQueue = null;
+            processSearch(queued, currentSearchId, abortFlag);
+        } else if (workersReady === 0 && currentSendResponse) {
+            currentSendResponse({ bestMove: null });
+            currentSendResponse = null;
+        }
+        return;
+    }
+
+    if (data.type === "RESULT") {
+        handleWorkerResult(workerIndex, data);
+        return;
     }
 }
 
@@ -178,9 +234,8 @@ function initWorkers(workerCount) {
 // ---------------------------------------------------------------------------
 
 /**
- * Distributes a search request across the worker pool (Lazy SMP).
- * Each worker searches a disjoint subset of root moves (by index modulo).
- * The result with the highest score is selected as the overall best.
+ * Distributes a search request across available ready workers (Lazy SMP).
+ * Uses a Master-First Early Resolution model to eliminate all UI / bot freezes.
  *
  * @param {object} message - The START_SMP_SEARCH message payload.
  * @param {number} searchId - The unique search ID.
@@ -188,101 +243,167 @@ function initWorkers(workerCount) {
  */
 function processSearch(message, searchId, abortFlag) {
     messageQueue = null;
-    const startTime = performance.now();
-    let completed = 0;
-    let bestOverallScore = -999999;
-    let bestOverallMove = null;
-    let bestPv = [];
-    let bestPonderFen = "";
-    let bestDepth = 0;
-    let totalNodes = 0;
+    activeStartTime = performance.now();
+    activeSearchId = searchId;
+    activeSearchRunning = true;
+    activeSearchCompleted = false;
+    activeWorkerResults = [];
+    activeCompletedWorkers = 0;
 
-    const workersToUse = Math.max(
-        1,
-        Math.min(MAX_WORKERS, message.activeWorkerCount || 1, workersReady, workers.length)
-    );
-    const activeWorkers = workers.slice(0, workersToUse);
+    if (activeGraceTimer) {
+        clearTimeout(activeGraceTimer);
+        activeGraceTimer = null;
+    }
+    if (activeFailsafeTimer) {
+        clearTimeout(activeFailsafeTimer);
+        activeFailsafeTimer = null;
+    }
 
-    log.info('SMP', `Starting search — workers=${workersToUse} elo=${message.elo} timeMs=${(message.my_ms/20)}`);
+    // Select only workers that are actually READY
+    const readyIndices = [];
+    for (let i = 0; i < workers.length; i++) {
+        if (workerStates[i]?.ready) {
+            readyIndices.push(i);
+        }
+    }
+
+    if (readyIndices.length === 0) {
+        log.warn('SMP', 'No workers ready yet — queuing search');
+        messageQueue = message;
+        return;
+    }
+
+    const requestedCount = Math.max(1, message.activeWorkerCount || 1);
+    const workersToUse = Math.min(MAX_WORKERS, requestedCount, readyIndices.length);
+    activeSelectedIndices = readyIndices.slice(0, workersToUse);
+    activeWorkersCount = activeSelectedIndices.length;
+
+    log.info('SMP', `Starting search #${searchId} | workers=${activeWorkersCount} elo=${message.elo} timeMs=${(message.my_ms/20)}`);
     log.debug('SMP', `FEN: ${(message.fen || '').substring(0, 50)}...`);
 
-    // Freeze detector: if we don’t get results within timeMs*2+5s, log a freeze warning
-    const freezeTimeout = setTimeout(() => {
-        if (completed < workersToUse) {
-            log.error('SMP', `🥶 FREEZE DETECTED! Only ${completed}/${workersToUse} workers responded after ${(message.my_ms/20) * 2 + 5000}ms`, { message });
+    // Hard failsafe timer to protect clock from flagging:
+    // If search takes longer than time budget + safety buffer, finalize immediately.
+    const budgetMs = (message.my_ms / 20) || 3000;
+    const failsafeMs = Math.min(8000, Math.max(1200, budgetMs * 1.5 + 1000));
+
+    activeFailsafeTimer = setTimeout(() => {
+        if (activeSearchRunning && !activeSearchCompleted) {
+            log.warn('SMP', `⏱️ Failsafe timeout fired (${failsafeMs}ms). Responded: ${activeCompletedWorkers}/${activeWorkersCount}. Finalizing to protect clock.`);
+            finalizeActiveSearch();
         }
-    }, ((message.my_ms/20) || 3000) * 2 + 5000);
+    }, failsafeMs);
 
-    /** @type {Array<{bestMove: string, pv: string[], ponderFen: string, score: number}>} */
-    let workerResults = [];
-
-    const onWorkerResult = (e) => {
-        if (e.data.type !== "RESULT" || e.data.searchId !== searchId) return;
-
-        completed++;
-        log.debug('SMP', `Worker result ${completed}/${workersToUse}: move=${e.data.bestMove} score=${e.data.score}cp depth=${e.data.depth}`);
-
-        if (e.data.bestMove && e.data.bestMove !== "") {
-            workerResults.push(e.data);
-            totalNodes += (e.data.nodes || 0);
-            const isBetter = e.data.depth > bestDepth || 
-                             (e.data.depth === bestDepth && e.data.splitId === 0) ||
-                             (bestDepth === 0);
-            if (isBetter) {
-                bestOverallScore = e.data.score;
-                bestOverallMove  = e.data.bestMove;
-                bestPv           = e.data.pv;
-                bestPonderFen    = e.data.ponderFen;
-                bestDepth        = e.data.depth || 0;
-            }
+    // Dispatch search to selected ready workers
+    for (let s = 0; s < activeSelectedIndices.length; s++) {
+        const idx = activeSelectedIndices[s];
+        try {
+            workers[idx].postMessage({
+                type: "SEARCH",
+                fen: message.fen,
+                my_ms: message.my_ms,
+                opp_ms: message.opp_ms,
+                inc_ms: message.inc_ms,
+                movesToGo: message.movesToGo,
+                elo: message.elo,
+                splitId: s,
+                splitCount: activeWorkersCount,
+                history: message.history || "",
+                searchId: searchId,
+                abortFlag: abortFlag,
+            });
+        } catch (err) {
+            log.error('SMP', `Failed to post SEARCH to worker #${idx}`, err);
+            handleWorkerResult(idx, {
+                type: "RESULT",
+                searchId: searchId,
+                splitId: s,
+                bestMove: "",
+                score: 0,
+                depth: 0,
+                nodes: 0,
+                pv: [],
+                ponderFen: ""
+            });
         }
+    }
+}
 
-        if (completed === workersToUse) {
-            clearTimeout(freezeTimeout);
+/**
+ * Handles incoming RESULT message from a worker.
+ */
+function handleWorkerResult(workerIndex, data) {
+    if (!activeSearchRunning || activeSearchCompleted) return;
+    if (data.searchId !== activeSearchId) return;
 
-            const aggregated = aggregateWorkerResults(workerResults);
-            bestOverallScore = aggregated.score;
-            bestOverallMove  = aggregated.bestMove;
-            bestPv           = aggregated.pv;
-            bestPonderFen    = aggregated.ponderFen;
-            bestDepth        = aggregated.depth;
-            const multiPv    = aggregated.multiPv;
+    activeCompletedWorkers++;
+    log.debug('SMP', `Worker result ${activeCompletedWorkers}/${activeWorkersCount} [split=${data.splitId}]: move=${data.bestMove} score=${data.score}cp depth=${data.depth}`);
 
-            const elapsed = (performance.now() - startTime).toFixed(0);
-            const nps = elapsed > 0 ? Math.round(totalNodes / (elapsed / 1000)).toLocaleString() : '?';
-            log.info('SMP', `Done in ${elapsed}ms | best=${bestOverallMove} score=${bestOverallScore}cp depth=${bestDepth} nodes=${totalNodes.toLocaleString()} nps=${nps}`);
+    if (data.bestMove && data.bestMove !== "") {
+        activeWorkerResults.push(data);
+    }
 
-            if (currentSendResponse) {
-                currentSendResponse({
-                    bestMove: bestOverallMove,
-                    pv:       bestPv,
-                    ponderFen: bestPonderFen,
-                    multiPv,
-                    score:   bestOverallScore,
-                    depth:   bestDepth,
-                    nodes:   totalNodes,
-                    timeMs:  Math.round(elapsed),
-                });
-                currentSendResponse = null;
-            } else {
-                log.warn('SMP', 'Search done but sendResponse is already null (request was cancelled?)');
-            }
+    // Master-First Resolution:
+    // Worker with splitId === 0 is the master thread exploring the canonical root.
+    // If it found a move, give helper threads a 40ms grace period to report, then finalize.
+    if (data.splitId === 0 && data.bestMove && !activeGraceTimer) {
+        if (activeCompletedWorkers >= activeWorkersCount) {
+            finalizeActiveSearch();
+            return;
+        } else {
+            log.debug('SMP', 'Worker 0 (Master) finished — starting 40ms grace timer for helpers');
+            activeGraceTimer = setTimeout(() => {
+                log.debug('SMP', 'Grace timer finished — resolving search with best result');
+                finalizeActiveSearch();
+            }, 40);
         }
-    };
+    }
 
-    for (let i = 0; i < workersToUse; i++) {
-        activeWorkers[i].onmessage = onWorkerResult;
-        activeWorkers[i].postMessage({
-            type: "SEARCH",
-            fen: message.fen,
-            my_ms: message.my_ms, opp_ms: message.opp_ms, inc_ms: message.inc_ms, movesToGo: message.movesToGo,
-            elo: message.elo,
-            splitId: i,
-            splitCount: workersToUse,
-            history: message.history || "",
-            searchId: searchId,
-            abortFlag: abortFlag,
+    // If all assigned workers have responded, finalize immediately!
+    if (activeCompletedWorkers >= activeWorkersCount) {
+        if (activeGraceTimer) {
+            clearTimeout(activeGraceTimer);
+            activeGraceTimer = null;
+        }
+        finalizeActiveSearch();
+    }
+}
+
+/**
+ * Aggregates all received worker results and sends response to caller.
+ */
+function finalizeActiveSearch() {
+    if (!activeSearchRunning || activeSearchCompleted) return;
+    activeSearchCompleted = true;
+    activeSearchRunning = false;
+
+    if (activeGraceTimer) {
+        clearTimeout(activeGraceTimer);
+        activeGraceTimer = null;
+    }
+    if (activeFailsafeTimer) {
+        clearTimeout(activeFailsafeTimer);
+        activeFailsafeTimer = null;
+    }
+
+    const elapsed = Math.round(performance.now() - activeStartTime);
+    const aggregated = aggregateWorkerResults(activeWorkerResults);
+    const totalNodes = activeWorkerResults.reduce((acc, r) => acc + (r.nodes || 0), 0);
+    const nps = elapsed > 0 ? Math.round(totalNodes / (elapsed / 1000)).toLocaleString() : '?';
+
+    log.info('SMP', `Search #${activeSearchId} finalized in ${elapsed}ms | best=${aggregated.bestMove} score=${aggregated.score}cp depth=${aggregated.depth} nodes=${totalNodes.toLocaleString()} nps=${nps}`);
+
+    if (currentSendResponse) {
+        currentSendResponse({
+            bestMove:  aggregated.bestMove,
+            pv:        aggregated.pv,
+            ponderFen: aggregated.ponderFen,
+            multiPv:   aggregated.multiPv,
+            score:     aggregated.score,
+            depth:     aggregated.depth,
+            nodes:     totalNodes,
+            timeMs:    elapsed,
         });
+        currentSendResponse = null;
     }
 }
 
@@ -294,15 +415,13 @@ if (typeof chrome !== "undefined" && chrome.runtime?.onMessage) {
     chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         if (message.type !== "START_SMP_SEARCH") return false;
 
-        // Abort any in-flight search and start fresh.
         startEngineSearch(message, sendResponse);
         return true; // Keep message channel open for async response.
     });
 }
 
 /**
- * Aborts running workers and queues a new search request.
- * Workers are re-spawned fresh to abort their WASM execution.
+ * Aborts any previous search and dispatches or queues the new search.
  *
  * @param {object}   message      - The search request payload.
  * @param {Function} sendResponse - Chrome messaging response callback.
@@ -310,40 +429,49 @@ if (typeof chrome !== "undefined" && chrome.runtime?.onMessage) {
 function startEngineSearch(message, sendResponse) {
     log.info('SMP', `New search request received | elo=${message.elo} timeMs=${(message.my_ms/20)} workers=${message.activeWorkerCount}`);
     
-    // Gracefully abort any running search.
+    // Abort previous search via SharedArrayBuffer flag
     if (abortFlag) {
-        log.debug('SMP', 'Aborting previous search via abortFlag');
-        abortFlag[0] = 1;
+        try { abortFlag[0] = 1; } catch (_) {}
+    }
+
+    // Cancel previously running search
+    if (activeSearchRunning && !activeSearchCompleted) {
+        log.info('SMP', 'Aborting previous running search for new position');
+        if (currentSendResponse) {
+            currentSendResponse({ bestMove: null });
+            currentSendResponse = null;
+        }
+        activeSearchRunning = false;
+        activeSearchCompleted = true;
     }
 
     currentSearchId++;
 
     if (currentSendResponse) {
-        log.info('SMP', 'Previous search was not resolved — sending null to prevent hang');
+        log.info('SMP', 'Previous search response uncalled — sending null fallback');
         currentSendResponse({ bestMove: null });
         currentSendResponse = null;
     }
 
-    messageQueue = message;
     currentSendResponse = sendResponse;
+
     if (message.hashSize && message.hashSize !== activeHashSize) {
         activeHashSize = message.hashSize;
         if (workers.length > 0) {
-            const perWorkerSize = Math.max(1, Math.floor(activeHashSize / workers.length));
+            const perWorkerSize = Math.max(1, Math.floor(activeHashSize / Math.max(1, workersReady)));
             for (const w of workers) {
-                w.postMessage({ type: "SET_HASH_SIZE", size: perWorkerSize });
+                try { w.postMessage({ type: "SET_HASH_SIZE", size: perWorkerSize }); } catch (_) {}
             }
         }
     }
 
-    const targetWorkers = Math.min(MAX_WORKERS, Math.max(1, message.activeWorkerCount || 4));
-    
+    const targetWorkers = Math.min(MAX_WORKERS, Math.max(1, message.activeWorkerCount || 2));
+
     // Allocate new abort flag if SharedArrayBuffer is supported
     if (typeof SharedArrayBuffer !== "undefined") {
         try {
             const sab = new SharedArrayBuffer(1);
             abortFlag = new Uint8Array(sab);
-            log.debug('SAB', 'SharedArrayBuffer abort flag allocated');
         } catch (_) {
             abortFlag = null;
         }
@@ -352,12 +480,14 @@ function startEngineSearch(message, sendResponse) {
     }
 
     if (targetWorkers > workers.length) {
-        log.info('Pool', `Need ${targetWorkers} workers, have ${workers.length} — spawning more`);
         initWorkers(targetWorkers);
-    } else if (workersReady >= targetWorkers) {
+    }
+
+    if (workersReady >= 1) {
         processSearch(message, currentSearchId, abortFlag);
     } else {
-        log.debug('Pool', `Waiting for ${targetWorkers - workersReady} worker(s) before starting search`);
+        log.info('Pool', `No workers ready yet — queuing search #${currentSearchId}`);
+        messageQueue = message;
     }
 }
 
@@ -365,5 +495,5 @@ function startEngineSearch(message, sendResponse) {
 // Initial Worker Pool
 // ---------------------------------------------------------------------------
 if (typeof Worker !== "undefined") {
-    initWorkers(4);
+    initWorkers(2);
 }

@@ -49,7 +49,7 @@ chrome.runtime.onInstalled.addListener(() => {
                 isActive: true,
                 elo: 3000,
                 cpuMode: "max",
-                targetWorkers: Math.max(1, (navigator.hardwareConcurrency || 4) - 1),
+                targetWorkers: Math.min(4, Math.max(1, (navigator.hardwareConcurrency || 4) - 1)),
                 hashSize: 128,
                 increment: 0,
                 engineMode: "autoplay"

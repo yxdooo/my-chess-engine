@@ -52,7 +52,24 @@ onmessage = async (e) => {
         return;
     }
 
-    if (!engine) return;
+    if (!engine) {
+        log.warn('Search', `Worker[${workerId}] received ${type} while engine uninitialized — sending graceful fallback`);
+        if (type === "SEARCH") {
+            postMessage({
+                type: "RESULT",
+                searchId,
+                workerId,
+                splitId,
+                bestMove: "",
+                score: 0,
+                depth: 0,
+                nodes: 0,
+                pv: [],
+                ponderFen: "",
+            });
+        }
+        return;
+    }
 
     if (type === "SET_HASH_SIZE") {
         engine.set_hash_size(size);
