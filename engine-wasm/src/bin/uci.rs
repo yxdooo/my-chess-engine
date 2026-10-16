@@ -49,6 +49,7 @@ enum WorkerMessage {
     SetMultiPV(usize),
     SetShowWDL(bool),
     LoadBook(Arc<Vec<u8>>),
+    NewGame,
     Terminate,
 }
 
@@ -146,34 +147,10 @@ impl WorkerPool {
                                     thread::sleep(std::time::Duration::from_millis(1));
                                 }
 
-                                // Best-Thread Voting across the Lazy SMP pool for this search_id
-                                let results: Vec<_> = {
-                                    let lock = results_arc.lock().unwrap();
-                                    lock.iter().filter(|r| r.0 == params.search_id).cloned().collect()
-                                };
-                                let mut chosen_move = res.best_move;
-                                let mut chosen_ponder = res.ponder_move;
-
-                                if results.len() > 1 && res.best_move.is_some() {
-                                    let max_depth = results.iter().map(|r| r.5).max().unwrap_or(0);
-                                    let min_score = results.iter().map(|r| r.4).min().unwrap_or(0);
-
-                                    let mut votes: std::collections::HashMap<ChessMove, i64> = std::collections::HashMap::new();
-                                    for (_sid, _tid, bm, _pm, score, depth) in &results {
-                                        if let Some(m) = bm {
-                                            if *depth + 1 >= max_depth {
-                                                let weight = ((*score - min_score + 14).max(1) as i64) * (*depth as i64);
-                                                *votes.entry(*m).or_insert(0) += weight;
-                                            }
-                                        }
-                                    }
-                                    if let Some((&voted_m, _)) = votes.iter().max_by_key(|(_, &v)| v) {
-                                        chosen_move = Some(voted_m);
-                                        if let Some(matching) = results.iter().filter(|r| r.2 == Some(voted_m)).max_by_key(|r| r.5) {
-                                            chosen_ponder = matching.3;
-                                        }
-                                    }
-                                }
+                                // In standard Lazy SMP, Thread 0 (main thread) is the authoritative controller.
+                                // Helper threads solely assist by populating the shared Transposition Table.
+                                let chosen_move = res.best_move;
+                                let chosen_ponder = res.ponder_move;
 
                                 if let Some(bm) = chosen_move {
                                     if let Some(pm) = chosen_ponder {
@@ -207,6 +184,9 @@ impl WorkerPool {
                         WorkerMessage::LoadBook(bytes) => {
                             engine.load_polyglot_book_native(&bytes);
                         }
+                        WorkerMessage::NewGame => {
+                            engine.reset_for_new_game();
+                        }
                         WorkerMessage::Terminate => break,
                     }
                 }
@@ -224,6 +204,13 @@ impl WorkerPool {
                 params: params.clone(),
                 split_id: idx as u8,
             });
+        }
+    }
+
+    fn new_game(&self) {
+        engine_wasm::clear_global_tables();
+        for (tx, _) in &self.threads {
+            let _ = tx.send(WorkerMessage::NewGame);
         }
     }
 
@@ -418,6 +405,7 @@ fn main() {
                 while SEARCH_RUNNING.load(Ordering::Relaxed) && wait_start.elapsed().as_millis() < 250 {
                     thread::sleep(std::time::Duration::from_millis(1));
                 }
+                pool.new_game();
                 position_history.clear();
                 position_fen = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1".to_string();
             }
@@ -429,6 +417,8 @@ fn main() {
                         base_fen = tokens[2..fen_end].join(" ");
                     }
                 }
+                let mut halfmove_clock: u32 = base_fen.split_whitespace().nth(4).and_then(|s| s.parse().ok()).unwrap_or(0);
+                let mut fullmove_number: u32 = base_fen.split_whitespace().nth(5).and_then(|s| s.parse().ok()).unwrap_or(1);
                 let mut board = chess::Board::from_str(&base_fen).unwrap_or_default();
 
                 position_history.clear();
@@ -437,6 +427,18 @@ fn main() {
                 if let Some(moves_idx) = tokens.iter().position(|&x| x == "moves") {
                     for move_str in &tokens[moves_idx + 1..] {
                         if let Ok(m) = chess::ChessMove::from_str(move_str) {
+                            let is_pawn = board.piece_on(m.get_source()) == Some(chess::Piece::Pawn);
+                            let is_capture = board.piece_on(m.get_dest()).is_some()
+                                || (is_pawn && m.get_source().get_file() != m.get_dest().get_file());
+                            if is_pawn || is_capture {
+                                halfmove_clock = 0;
+                                position_history.clear();
+                            } else {
+                                halfmove_clock += 1;
+                            }
+                            if board.side_to_move() == chess::Color::Black {
+                                fullmove_number += 1;
+                            }
                             board = board.make_move_new(m);
                             position_history.push(normalize_fen(&board.to_string()));
                         }
@@ -445,7 +447,7 @@ fn main() {
                 if !position_history.is_empty() {
                     position_history.pop();
                 }
-                position_fen = board.to_string();
+                position_fen = format!("{} {} {}", normalize_fen(&board.to_string()), halfmove_clock.min(255), fullmove_number);
             }
             "go" => {
                 // If previous search is running, stop it first:
@@ -471,7 +473,7 @@ fn main() {
                 let mut binc: f64 = 0.0;
                 let mut movetime: f64 = 0.0;
                 let mut depth_limit: u32 = 0;
-                let mut movestogo: u32 = 30;
+                let mut movestogo: u32 = 0;
                 let mut infinite = false;
                 let mut max_nodes = None;
 
@@ -485,7 +487,7 @@ fn main() {
                         "movetime"  => { i += 1; movetime  = tokens.get(i).and_then(|v| v.parse().ok()).unwrap_or(0.0); }
                         "depth"     => { i += 1; depth_limit = tokens.get(i).and_then(|v| v.parse().ok()).unwrap_or(0); }
                         "nodes"     => { i += 1; max_nodes = tokens.get(i).and_then(|v| v.parse().ok()); }
-                        "movestogo" => { i += 1; movestogo = tokens.get(i).and_then(|v| v.parse().ok()).unwrap_or(30); }
+                        "movestogo" => { i += 1; movestogo = tokens.get(i).and_then(|v| v.parse().ok()).unwrap_or(0); }
                         "infinite"  => { infinite = true; }
                         _ => {}
                     }

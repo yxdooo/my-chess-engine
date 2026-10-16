@@ -104,6 +104,24 @@ fn get_pawn_hash() -> Arc<PawnHashTable> {
     GLOBAL_PAWN_HASH.get_or_init(|| RwLock::new(Arc::new(PawnHashTable::new(131_072)))).read().unwrap().clone()
 }
 
+pub fn clear_global_tables() {
+    let tt = get_tt();
+    for entry in tt.entries.iter() {
+        entry.hash.store(0, Ordering::Relaxed);
+        entry.data.store(0, Ordering::Relaxed);
+    }
+    let pawn_corr = get_global_pawn_corr();
+    for side in pawn_corr.iter() {
+        for cell in side.iter() {
+            cell.store(0, Ordering::Relaxed);
+        }
+    }
+    let cont_corr = get_global_cont_corr();
+    for cell in cont_corr.iter() {
+        cell.store(0, Ordering::Relaxed);
+    }
+}
+
 fn get_lmr(depth: u8, moves_evaluated: usize) -> u8 {
     let table = LMR_TABLE.get_or_init(|| {
         let mut t = [[0; 256]; 64];
@@ -221,8 +239,8 @@ fn current_time_ms() -> f64 {
 #[wasm_bindgen]
 pub struct ChessEngine {
     killers: [[Option<ChessMove>; 2]; 128],
-    /// Butterfly history table for move ordering heuristics.
-    history: [[i32; 64]; 64],
+    /// Butterfly history table indexed by [side_to_move][from_sq][to_sq].
+    history: [[[i32; 64]; 64]; 2],
     stop_search: bool,
     optimum_time_ms: f64,
     maximum_time_ms: f64,
@@ -267,7 +285,7 @@ impl ChessEngine {
         
         Self {
             killers: [[None; 2]; 128],
-            history: [[0; 64]; 64],
+            history: [[[0; 64]; 64]; 2],
             stop_search: false,
             optimum_time_ms: 0.0,
             maximum_time_ms: 0.0,
@@ -296,6 +314,21 @@ impl ChessEngine {
             cutoff_cnt: [0; 128],
             max_nodes: None,
         }
+    }
+
+    pub fn reset_for_new_game(&mut self) {
+        self.killers = [[None; 2]; 128];
+        self.history = [[[0; 64]; 64]; 2];
+        self.counter_moves = [[[None; 64]; 6]; 2];
+        self.followup_history.fill(0);
+        for a in self.capture_history.iter_mut() {
+            for b in a.iter_mut() {
+                b.fill(0);
+            }
+        }
+        self.pawn_history.fill(0);
+        self.threat_history.fill(0);
+        self.cap_cont_history.fill(0);
     }
 
     #[wasm_bindgen]
@@ -685,6 +718,13 @@ impl ChessEngine {
         // Bump generation every search so old TT entries are more aggressively replaced.
         self.search_generation = self.search_generation.wrapping_add(1);
         self.killers = [[None; 2]; 128];
+        for side in 0..2 {
+            for from in 0..64 {
+                for to in 0..64 {
+                    self.history[side][from][to] = (self.history[side][from][to] * 3) / 4;
+                }
+            }
+        }
 
         let halfmove_clock: u8 = fen.split_whitespace().nth(4).unwrap_or("0").parse().unwrap_or(0);
         
@@ -1413,9 +1453,7 @@ impl ChessEngine {
         tt_best_move: Option<ChessMove>,
         opp_attacks: chess::BitBoard,
         p_key: u64,
-        prev_was_capture: bool,
-        prev_cap_piece: Piece,
-        prev_dest: Square,
+        prev_move_info: Option<(Piece, Square)>,
     ) -> i32 {
         if Some(*m) == tt_best_move { return 10_000_000; }
 
@@ -1457,7 +1495,7 @@ impl ChessEngine {
                 }
             }
             
-            let mut hist = self.history[m.get_source().to_index()][m.get_dest().to_index()];
+            let mut hist = self.history[board.side_to_move() as usize][m.get_source().to_index()][m.get_dest().to_index()];
             if ply > 1 {
                 if let Some(prev2) = self.search_path_moves[(ply - 2) as usize] {
                     let idx = (prev2.get_dest().to_index() * 4096) + (m.get_source().to_index() * 64) + m.get_dest().to_index();
@@ -1473,8 +1511,8 @@ impl ChessEngine {
             let to_att = (opp_attacks & chess::BitBoard::from_square(m.get_dest())).popcnt() > 0;
             hist += self.get_threat_history(board.side_to_move(), from_att, to_att, m.get_source().to_index(), m.get_dest().to_index());
 
-            if prev_was_capture {
-                hist += self.get_cap_cont_history(prev_cap_piece.to_index(), prev_dest.to_index(), moved_idx, m.get_dest().to_index());
+            if let Some((prev_piece, prev_dest)) = prev_move_info {
+                hist += self.get_cap_cont_history(prev_piece.to_index(), prev_dest.to_index(), moved_idx, m.get_dest().to_index());
             }
 
             // Strict clamping to [-40_000, 40_000] ensures quiet moves never surpass Counter (70k),
@@ -1490,15 +1528,11 @@ impl ChessEngine {
         }
         let opp_attacks = get_all_attacks(board, !board.side_to_move());
         let p_key = get_pawn_key(board);
-        let mut prev_was_capture = false;
-        let mut prev_cap_piece = Piece::Pawn;
-        let mut prev_dest = Square::default();
+        let mut prev_move_info: Option<(Piece, Square)> = None;
         if ply > 0 {
             if let Some(prev) = self.search_path_moves[(ply - 1) as usize] {
-                prev_dest = prev.get_dest();
-                if let Some(p) = board.piece_on(prev_dest) {
-                    prev_cap_piece = p;
-                    prev_was_capture = true;
+                if let Some(p) = board.piece_on(prev.get_dest()) {
+                    prev_move_info = Some((p, prev.get_dest()));
                 }
             }
         }
@@ -1512,9 +1546,7 @@ impl ChessEngine {
                     tt_best_move,
                     opp_attacks,
                     p_key,
-                    prev_was_capture,
-                    prev_cap_piece,
-                    prev_dest,
+                    prev_move_info,
                 )
             })
             .collect()
@@ -1575,9 +1607,9 @@ impl ChessEngine {
         // and populate the shared Transposition Table without duplicated effort.
         if split_count > 1 && split_id > 0 {
             for (idx, m) in moves.iter().enumerate() {
-                if Some(*m) != tt_best_move {
+                if Some(*m) != tt_best_move && scores[idx] >= -10_000 && scores[idx] < 70_000 {
                     if (idx % split_count as usize) == (split_id as usize % split_count as usize) {
-                        scores[idx] += 500_000;
+                        scores[idx] += 300;
                     }
                 }
             }
@@ -1607,7 +1639,22 @@ impl ChessEngine {
                 score = -self.negamax(&next_board, depth - 1, -beta, -alpha, 1, next_halfmove, tt, pawn_hash, None);
                 b_search_pv = false;
             } else {
-                score = -self.negamax(&next_board, depth - 1, -alpha - 1, -alpha, 1, next_halfmove, tt, pawn_hash, None);
+                let gives_check = next_board.checkers().popcnt() > 0;
+                let mut did_lmr = false;
+                if i >= 3 && depth >= 3 && !is_capture && !gives_check && m.get_promotion().is_none() {
+                    let r = (get_lmr(depth, i) / 2).max(1).min(depth.saturating_sub(2));
+                    if r > 0 {
+                        did_lmr = true;
+                        score = -self.negamax(&next_board, depth - 1 - r, -alpha - 1, -alpha, 1, next_halfmove, tt, pawn_hash, None);
+                    } else {
+                        score = -self.negamax(&next_board, depth - 1, -alpha - 1, -alpha, 1, next_halfmove, tt, pawn_hash, None);
+                    }
+                } else {
+                    score = -self.negamax(&next_board, depth - 1, -alpha - 1, -alpha, 1, next_halfmove, tt, pawn_hash, None);
+                }
+                if score > alpha && did_lmr {
+                    score = -self.negamax(&next_board, depth - 1, -alpha - 1, -alpha, 1, next_halfmove, tt, pawn_hash, None);
+                }
                 if score > alpha {
                     score = -self.negamax(&next_board, depth - 1, -beta, -alpha, 1, next_halfmove, tt, pawn_hash, None);
                 }
@@ -1692,8 +1739,8 @@ impl ChessEngine {
             gen.set_iterator_mask(chess::BitBoard(enemies | promos | ep));
             let mut legals: ArrayVec<ChessMove, 256> = (&mut gen).collect();
 
-            if ply == 0 {
-                // Fast bitboard direct-check filter for quiet moves at ply 0 (no board cloning!)
+            if ply <= 1 {
+                // Fast bitboard direct-check filter for quiet moves at depth 0 (ply <= 1)
                 let ek_sq = board.king_square(!board.side_to_move());
                 let occ = *board.combined();
                 let knight_chk = chess::get_knight_moves(ek_sq);
@@ -1853,6 +1900,9 @@ impl ChessEngine {
         }
         
         let is_check = board.checkers().popcnt() > 0;
+        if is_check && ply < 96 {
+            depth = depth.saturating_add(1);
+        }
         
         if depth == 0 { 
             return self.quiescence_search(board, alpha, beta, ply, halfmove_clock, tt, pawn_hash);
@@ -1930,7 +1980,7 @@ impl ChessEngine {
         };
 
         // Reverse Futility Pruning (RFP) — only on non-PV nodes without excluded_move
-        if !is_pv_node && !is_check && depth <= 6 && excluded_move.is_none() {
+        if !is_pv_node && !is_check && depth <= 6 && beta.abs() < MATE - 128 && excluded_move.is_none() {
             let margin = (depth as i32 * 75) - (if improving { 30 } else { 0 }) - (if eval_diff > 100 { 20 } else { 0 });
             if static_eval - margin >= beta {
                 return static_eval;
@@ -1941,7 +1991,7 @@ impl ChessEngine {
         let has_pieces = stm_pieces.popcnt() > 0;
 
         let prev_was_null = ply > 0 && self.search_path_moves[(ply - 1) as usize].is_none();
-        if !is_pv_node && !is_check && !prev_was_null && ply >= self.nmp_min_ply && depth >= 3 && static_eval >= beta && has_pieces && (ply as usize) < 128 && excluded_move.is_none() {
+        if !is_pv_node && !is_check && !prev_was_null && ply >= self.nmp_min_ply && depth >= 3 && static_eval >= beta && beta.abs() < MATE - 128 && has_pieces && (ply as usize) < 128 && excluded_move.is_none() {
             if let Some(null_board) = board.null_move() {
                 if self.network.is_some() && ((ply + 1) as usize) < self.accumulators.len() {
                     self.accumulators[(ply + 1) as usize] = self.accumulators[ply as usize];
@@ -1958,14 +2008,15 @@ impl ChessEngine {
                 self.search_path_moves[ply as usize] = old_move;
                 if self.stop_search { return 0; }
                 if null_score >= beta {
-                    if depth >= 12 || null_score >= MATE - 128 {
+                    let clamped_null = if null_score >= MATE - 128 { beta } else { null_score };
+                    if depth >= 12 {
                         let old_nmp_min = self.nmp_min_ply;
                         self.nmp_min_ply = ply + 1;
-                        let verify_score = self.negamax(board, depth - r - 1, beta - 1, beta, ply, halfmove_clock, tt, pawn_hash, None);
+                        let verify_score = self.negamax(board, reduced_depth, beta - 1, beta, ply, halfmove_clock, tt, pawn_hash, None);
                         self.nmp_min_ply = old_nmp_min;
                         if verify_score >= beta { return verify_score; }
                     } else {
-                        return null_score;
+                        return clamped_null;
                     }
                 }
             }
@@ -2121,15 +2172,38 @@ impl ChessEngine {
 
             let is_capture = board.piece_on(m.get_dest()).is_some() || (board.piece_on(m.get_source()) == Some(Piece::Pawn) && m.get_source().get_file() != m.get_dest().get_file());
             let is_promotion = m.get_promotion().is_some();
-            
-            if !is_capture && !is_promotion {
-                if quiet_moves.len() < 32 { quiet_moves.push(m); }
-            } else if is_capture {
-                if captured_moves.len() < 32 { captured_moves.push(m); }
+            let next_board = board.make_move_new(m);
+            let gives_check = next_board.checkers().popcnt() > 0;
+            let stm_idx = board.side_to_move() as usize;
+
+            // SEE Pruning for losing captures on non-PV nodes at shallow depth
+            if moves_evaluated > 0
+                && !is_pv_node
+                && !is_check
+                && !gives_check
+                && is_capture
+                && !is_promotion
+                && scores[i] < 0
+                && best_score > -MATE + 128
+                && depth <= 3
+            {
+                if see_value(board, m) < -95 * depth as i32 {
+                    i += 1;
+                    continue;
+                }
             }
 
             // Pruning rules for quiet moves — only apply AFTER at least one move has been evaluated (moves_evaluated > 0)
-            if moves_evaluated > 0 && !is_pv_node && !is_check && !is_capture && !is_promotion {
+            // Never prune moves that give check, killers/countermoves (scores[i] >= 70_000), or when currently mated.
+            if moves_evaluated > 0
+                && !is_pv_node
+                && !is_check
+                && !gives_check
+                && !is_capture
+                && !is_promotion
+                && scores[i] < 70_000
+                && best_score > -MATE + 128
+            {
                 // Futility Pruning — only on non-PV nodes at low depth
                 if depth <= 4 {
                     let fp_margin = 80 + 100 * depth as i32;
@@ -2140,18 +2214,18 @@ impl ChessEngine {
                 }
 
                 // Quiet History Pruning: at depth <= 4, prune moves with heavily negative history
+                let hist = self.history[stm_idx][m.get_source().to_index()][m.get_dest().to_index()];
                 if depth <= 4 {
-                    let hist = self.history[m.get_source().to_index()][m.get_dest().to_index()];
                     if hist < -3500 * depth as i32 {
                         i += 1;
                         continue;
                     }
                 }
 
-                // History-Scaled SEE Pruning: scale quiet SEE threshold by -history_score / 128
+                // History-Scaled SEE Pruning: scale quiet SEE threshold by -history_score / 128 (clamped <= 0)
                 if depth <= 4 {
-                    let hist = self.history[m.get_source().to_index()][m.get_dest().to_index()];
-                    let see_thresh = -30 * depth as i32 + (hist / 128).clamp(-100, 100);
+                    let hist_adj = (hist / 128).clamp(-40, 40);
+                    let see_thresh = (-28 * depth as i32 - hist_adj).min(0);
                     if see_value(board, m) < see_thresh {
                         i += 1;
                         continue;
@@ -2167,6 +2241,12 @@ impl ChessEngine {
                         continue;
                     }
                 }
+            }
+
+            if !is_capture && !is_promotion {
+                if quiet_moves.len() < 32 { quiet_moves.push(m); }
+            } else if is_capture {
+                if captured_moves.len() < 32 { captured_moves.push(m); }
             }
 
             // Modern Singular Extension with True Excluded Search:
@@ -2196,27 +2276,20 @@ impl ChessEngine {
                                 }
                             } else if s_score >= beta {
                                 return s_score; // Multi-cut!
-                            } else if tt_s >= beta {
-                                extension = -1; // Negative extension!
+                            } else if !is_pv_node && tt_s >= beta {
+                                extension = -1; // Negative extension ONLY on non-PV nodes!
                             }
                         }
                     }
                 }
             }
 
-            let next_board = board.make_move_new(m);
             self.update_nnue(ply, board, &next_board, m);
             
             let is_pawn_move = board.piece_on(m.get_source()) == Some(Piece::Pawn);
             let next_halfmove = if is_capture || is_pawn_move { 0 } else { halfmove_clock + 1 };
             
             let mut score;
-            let gives_check = next_board.checkers().popcnt() > 0;
-            
-            // Check Extension
-            if gives_check && is_pv_node && extension < 1 {
-                extension = 1;
-            }
 
             if (ply as usize) < 128 {
                 self.search_path_moves[ply as usize] = Some(m);
@@ -2227,14 +2300,10 @@ impl ChessEngine {
                 score = -self.negamax(&next_board, search_depth, -beta, -alpha, ply.saturating_add(1), next_halfmove, tt, pawn_hash, None);
                 b_search_pv = false;
             } else {
+                let mut did_lmr = false;
                 if moves_evaluated >= 3 && depth >= 3 && !is_capture && !gives_check && !is_promotion {
                     // Logarithmic LMR based on Stockfish formula
                     let mut r = get_lmr(depth, moves_evaluated);
-
-                    // PV node protection: do not reduce as aggressively on PV nodes
-                    if is_pv_node {
-                        r = r.saturating_sub(1);
-                    }
 
                     // Killer move protection
                     if (ply as usize) < 128 && (Some(m) == self.killers[ply as usize][0] || Some(m) == self.killers[ply as usize][1]) {
@@ -2290,7 +2359,7 @@ impl ChessEngine {
                     }
 
                     // History heuristic bonus/malus for LMR
-                    let history_score = self.history[m.get_source().to_index()][m.get_dest().to_index()];
+                    let history_score = self.history[stm_idx][m.get_source().to_index()][m.get_dest().to_index()];
                     if history_score > 4000 {
                         r = r.saturating_sub(1);
                     } else if history_score < -4000 {
@@ -2299,12 +2368,24 @@ impl ChessEngine {
                     
                     if r > depth - 2 { r = depth - 2; }
                     let red_depth = ((depth as i32 - 1 - r as i32 + extension as i32).max(0)) as u8;
+                    did_lmr = red_depth < search_depth;
+                    score = -self.negamax(&next_board, red_depth, -alpha - 1, -alpha, ply.saturating_add(1), next_halfmove, tt, pawn_hash, None);
+                } else if moves_evaluated >= 3 && depth >= 3 && is_capture && scores[i] < 0 && !gives_check && !is_promotion {
+                    // LMR for losing captures (SEE < 0)
+                    let r = (get_lmr(depth, moves_evaluated) / 2).max(1).min(depth - 2);
+                    let red_depth = ((depth as i32 - 1 - r as i32 + extension as i32).max(0)) as u8;
+                    did_lmr = red_depth < search_depth;
                     score = -self.negamax(&next_board, red_depth, -alpha - 1, -alpha, ply.saturating_add(1), next_halfmove, tt, pawn_hash, None);
                 } else {
                     score = -self.negamax(&next_board, search_depth, -alpha - 1, -alpha, ply.saturating_add(1), next_halfmove, tt, pawn_hash, None);
                 }
                 
-                if score > alpha && score < beta {
+                // If an LMR-reduced search failed high, re-search at full depth with zero window on ALL nodes
+                if score > alpha && did_lmr {
+                    score = -self.negamax(&next_board, search_depth, -alpha - 1, -alpha, ply.saturating_add(1), next_halfmove, tt, pawn_hash, None);
+                }
+                // On PV nodes, if the full-depth zero-window search exceeded alpha, re-search with full window
+                if score > alpha && is_pv_node {
                     score = -self.negamax(&next_board, search_depth, -beta, -alpha, ply.saturating_add(1), next_halfmove, tt, pawn_hash, None);
                 }
             }
@@ -2325,12 +2406,12 @@ impl ChessEngine {
                 if (ply as usize) < 128 {
                     self.cutoff_cnt[ply as usize] = self.cutoff_cnt[ply as usize].saturating_add(1);
                     let stat_bonus = (16 * depth as i32 * depth as i32).min(1200);
-                    if !is_capture {
+                    if !is_capture && !is_promotion {
                         if Some(m) != self.killers[ply as usize][0] {
                             self.killers[ply as usize][1] = self.killers[ply as usize][0];
                             self.killers[ply as usize][0] = Some(m);
                         }
-                        let h = &mut self.history[m.get_source().to_index()][m.get_dest().to_index()];
+                        let h = &mut self.history[stm_idx][m.get_source().to_index()][m.get_dest().to_index()];
                         *h += stat_bonus - (*h * stat_bonus) / 16384;
 
                         let p_key = get_pawn_key(board);
@@ -2347,10 +2428,6 @@ impl ChessEngine {
                             if let Some(prev) = self.search_path_moves[(ply - 1) as usize] {
                                 let prev_piece = board.piece_on(prev.get_dest()).unwrap_or(Piece::Pawn);
                                 self.counter_moves[(!board.side_to_move()) as usize][prev_piece as usize][prev.get_dest().to_index()] = Some(m);
-
-                                let corr_bonus = (best_score - static_eval).clamp(-1024, 1024);
-                                self.update_cont_corr(prev_piece.to_index(), prev.get_dest().to_index(), curr_piece.to_index(), m.get_dest().to_index(), corr_bonus);
-
                                 self.update_cap_cont_history(prev_piece.to_index(), prev.get_dest().to_index(), curr_piece.to_index(), m.get_dest().to_index(), stat_bonus);
                             }
                         }
@@ -2359,6 +2436,37 @@ impl ChessEngine {
                                 let idx = (prev2.get_dest().to_index() * 4096) + (m.get_source().to_index() * 64) + m.get_dest().to_index();
                                 let fh = &mut self.followup_history[idx];
                                 *fh += stat_bonus - (*fh * stat_bonus) / 16384;
+                            }
+                        }
+
+                        // Penalize preceding quiet moves that were searched and failed to cause a cutoff
+                        for &qm in &quiet_moves {
+                            if qm != m {
+                                let h2 = &mut self.history[stm_idx][qm.get_source().to_index()][qm.get_dest().to_index()];
+                                *h2 -= stat_bonus + (*h2 * stat_bonus) / 16384;
+
+                                let qm_piece = board.piece_on(qm.get_source()).unwrap_or(Piece::Pawn);
+                                let qm_p_idx = if board.side_to_move() == Color::White { qm_piece.to_index() } else { qm_piece.to_index() + 6 };
+                                self.update_pawn_history(p_key, qm_p_idx, qm.get_dest().to_index(), -stat_bonus / 2);
+
+                                let q_from_att = (opp_attacks & chess::BitBoard::from_square(qm.get_source())).popcnt() > 0;
+                                let q_to_att = (opp_attacks & chess::BitBoard::from_square(qm.get_dest())).popcnt() > 0;
+                                self.update_threat_history(board.side_to_move(), q_from_att, q_to_att, qm.get_source().to_index(), qm.get_dest().to_index(), -stat_bonus / 2);
+                                
+                                if ply > 0 {
+                                    if let Some(prev) = self.search_path_moves[(ply - 1) as usize] {
+                                        let prev_piece = board.piece_on(prev.get_dest()).unwrap_or(Piece::Pawn).to_index();
+                                        let malus = (stat_bonus / 2).clamp(0, 512);
+                                        self.update_cap_cont_history(prev_piece, prev.get_dest().to_index(), qm_piece.to_index(), qm.get_dest().to_index(), -malus);
+                                    }
+                                }
+                                if ply > 1 {
+                                    if let Some(prev2) = self.search_path_moves[(ply - 2) as usize] {
+                                        let idx = (prev2.get_dest().to_index() * 4096) + (qm.get_source().to_index() * 64) + qm.get_dest().to_index();
+                                        let fh2 = &mut self.followup_history[idx];
+                                        *fh2 -= stat_bonus + (*fh2 * stat_bonus) / 16384;
+                                    }
+                                }
                             }
                         }
                     } else {
@@ -2385,39 +2493,6 @@ impl ChessEngine {
                             }
                         }
                     }
-                    
-                    let p_key = get_pawn_key(board);
-                    let opp_attacks = get_all_attacks(board, !board.side_to_move());
-                    for &qm in &quiet_moves {
-                        if qm != m {
-                            let h2 = &mut self.history[qm.get_source().to_index()][qm.get_dest().to_index()];
-                            *h2 -= stat_bonus + (*h2 * stat_bonus) / 16384;
-
-                            let qm_piece = board.piece_on(qm.get_source()).unwrap_or(Piece::Pawn);
-                            let qm_p_idx = if board.side_to_move() == Color::White { qm_piece.to_index() } else { qm_piece.to_index() + 6 };
-                            self.update_pawn_history(p_key, qm_p_idx, qm.get_dest().to_index(), -stat_bonus / 2);
-
-                            let q_from_att = (opp_attacks & chess::BitBoard::from_square(qm.get_source())).popcnt() > 0;
-                            let q_to_att = (opp_attacks & chess::BitBoard::from_square(qm.get_dest())).popcnt() > 0;
-                            self.update_threat_history(board.side_to_move(), q_from_att, q_to_att, qm.get_source().to_index(), qm.get_dest().to_index(), -stat_bonus / 2);
-                            
-                            if ply > 0 {
-                                if let Some(prev) = self.search_path_moves[(ply - 1) as usize] {
-                                    let prev_piece = board.piece_on(prev.get_dest()).unwrap_or(Piece::Pawn).to_index();
-                                    let malus = (stat_bonus / 2).clamp(0, 512);
-                                    self.update_cont_corr(prev_piece, prev.get_dest().to_index(), qm_piece.to_index(), qm.get_dest().to_index(), -malus);
-                                    self.update_cap_cont_history(prev_piece, prev.get_dest().to_index(), qm_piece.to_index(), qm.get_dest().to_index(), -malus);
-                                }
-                            }
-                            if ply > 1 {
-                                if let Some(prev2) = self.search_path_moves[(ply - 2) as usize] {
-                                    let idx = (prev2.get_dest().to_index() * 4096) + (qm.get_source().to_index() * 64) + qm.get_dest().to_index();
-                                    let fh2 = &mut self.followup_history[idx];
-                                    *fh2 -= stat_bonus + (*fh2 * stat_bonus) / 16384;
-                                }
-                            }
-                        }
-                    }
                 }
                 break; 
             }
@@ -2429,9 +2504,19 @@ impl ChessEngine {
         if !self.stop_search && excluded_move.is_none() {
             tt.store(hash, best_move, depth, best_score, flag, ply, self.search_generation);
 
-            // Pawn Correction History update at quiet search nodes
-            if !is_check && moves_evaluated > 0 && best_score.abs() < MATE - 128 {
-                let stm_idx = if board.side_to_move() == Color::White { 0 } else { 1 };
+            // Pawn & Continuation Correction History update ONLY at quiet search nodes
+            // where the best move is quiet and the bound direction agrees with the static eval error
+            let best_is_tactical = best_move.map(|bm| {
+                board.piece_on(bm.get_dest()).is_some()
+                    || bm.get_promotion().is_some()
+                    || (board.piece_on(bm.get_source()) == Some(Piece::Pawn) && bm.get_source().get_file() != bm.get_dest().get_file())
+            }).unwrap_or(false);
+            let valid_corr_bound = (flag == EXACT)
+                || (flag == LOWERBOUND && best_score > static_eval)
+                || (flag == UPPERBOUND && best_score < static_eval);
+
+            if !is_check && !best_is_tactical && valid_corr_bound && moves_evaluated > 0 && best_score.abs() < MATE - 128 {
+                let stm_idx = board.side_to_move() as usize;
                 let p_key = get_pawn_key(board);
                 let corr_idx = (p_key as usize) & 16383;
                 let bonus = (best_score - static_eval).clamp(-1024, 1024);
@@ -2439,6 +2524,14 @@ impl ChessEngine {
                 let curr = table[stm_idx][corr_idx].load(Ordering::Relaxed);
                 let new_val = curr + (bonus * 16 - curr) / 128;
                 table[stm_idx][corr_idx].store(new_val, Ordering::Relaxed);
+
+                if ply >= 2 && (ply as usize) < 128 {
+                    if let (Some(prev2), Some(prev1)) = (self.search_path_moves[(ply - 2) as usize], self.search_path_moves[(ply - 1) as usize]) {
+                        let p2_piece = board.piece_on(prev2.get_dest()).unwrap_or(Piece::Pawn).to_index();
+                        let p1_piece = board.piece_on(prev1.get_dest()).unwrap_or(Piece::Pawn).to_index();
+                        self.update_cont_corr(p2_piece, prev2.get_dest().to_index(), p1_piece, prev1.get_dest().to_index(), bonus);
+                    }
+                }
             }
         }
         best_score
@@ -2638,7 +2731,8 @@ impl ChessEngine {
                 + (board.pieces(Piece::Bishop).popcnt() as i32 * 330)
                 + (board.pieces(Piece::Rook).popcnt() as i32 * 500)
                 + (board.pieces(Piece::Queen).popcnt() as i32 * 1000);
-            let mut eval = (val * (720 + non_pawn_mat / 32)) / 1024;
+            // Convert Stockfish internal Value units (PawnValueEg = 208) into centipawns (1024 * 2.08 = 2130)
+            let mut eval = (val * (720 + non_pawn_mat / 32)) / 2130;
             eval += pawn_corr + cont_corr;
 
             if halfmove_clock >= 20 {
@@ -3315,6 +3409,31 @@ mod tests {
             let blocked = is_fortress_or_blocked_center(&board, 17);
             assert!(blocked >= 0);
         }
+    }
+
+    #[test]
+    fn test_staged_movegen_completeness() {
+        let board = Board::from_str("r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1").unwrap();
+        let all_legal: Vec<_> = MoveGen::new_legal(&board).collect();
+        
+        let mut staged = Vec::new();
+        let mut gen = MoveGen::new_legal(&board);
+        let enemies = board.color_combined(!board.side_to_move()).0;
+        let promos = 0xFF00000000000000u64;
+        let ep = board.en_passant().map_or(0, |sq| 1u64 << sq.to_index());
+        gen.set_iterator_mask(chess::BitBoard(enemies | promos | ep));
+        for m in &mut gen {
+            staged.push(m);
+        }
+        gen.set_iterator_mask(!chess::EMPTY);
+        for m in gen {
+            staged.push(m);
+        }
+        let mut set = std::collections::HashSet::new();
+        for m in &staged {
+            assert!(set.insert(*m), "Duplicate move yielded: {}", m);
+        }
+        assert_eq!(all_legal.len(), staged.len(), "all_legal: {}, staged: {}", all_legal.len(), staged.len());
     }
 }
 

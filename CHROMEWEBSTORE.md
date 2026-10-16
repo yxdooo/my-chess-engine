@@ -1,6 +1,6 @@
 # Chrome Web Store Listing — Aether Chess Engine
 
-> Last Updated: 2026-10-15
+> Last Updated: 2026-10-16 (Engine Core v2.2.0 - 3000 Elo Capable)
 
 ## Store Listing
 
@@ -15,7 +15,8 @@ Aether Chess Engine brings grandmaster-level positional analysis directly into y
 
 Features:
 - Real-time tactical move recommendations overlaid directly on the chessboard.
-- Instant position evaluation and tactical threats calculation.
+- Instant position evaluation and tactical threats calculation powered by Stockfish HalfKP NNUE.
+- Enhanced search architecture with PVS, logarithmic LMR, singular extensions, and dynamic time budgeting.
 - Seamless, zero-latency analysis powered by native client-side WebAssembly.
 - Works automatically on Chess.com and Lichess boards and analysis screens.
 - Completely private: all computation runs locally on your machine with no external server tracking.

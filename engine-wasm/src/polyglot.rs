@@ -1007,7 +1007,7 @@ pub fn probe_polyglot(book_bytes: &[u8], board: &Board) -> Option<ChessMove> {
             break;
         }
 
-        if entry.weight >= best_weight {
+        if entry.weight > best_weight {
             if let Some(m) = entry.to_move(board) {
                 best_weight = entry.weight;
                 best_move = Some(m);

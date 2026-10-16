@@ -2,6 +2,8 @@
 /* eslint-disable */
 export const memory: WebAssembly.Memory;
 export const __wbg_chessengine_free: (a: number, b: number) => void;
+export const __wbg_get_chessengine_max_nodes: (a: number) => [number, bigint];
+export const __wbg_set_chessengine_max_nodes: (a: number, b: number, c: bigint) => void;
 export const chessengine_get_best_move: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number) => [number, number];
 export const chessengine_get_best_move_timed: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number, n: number) => [number, number];
 export const chessengine_load_network: (a: number, b: any) => number;
@@ -9,6 +11,7 @@ export const chessengine_load_network_native: (a: number, b: number, c: number) 
 export const chessengine_load_polyglot_book: (a: number, b: any) => number;
 export const chessengine_load_polyglot_book_native: (a: number, b: number, c: number) => number;
 export const chessengine_new: () => number;
+export const chessengine_reset_for_new_game: (a: number) => void;
 export const chessengine_set_hash_size: (a: number, b: number) => void;
 export const __wbindgen_free: (a: number, b: number, c: number) => void;
 export const __wbindgen_malloc: (a: number, b: number) => number;

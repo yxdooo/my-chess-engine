@@ -11,7 +11,10 @@ export class ChessEngine {
     load_polyglot_book(data: Uint8Array): boolean;
     load_polyglot_book_native(bytes: Uint8Array): boolean;
     constructor();
+    reset_for_new_game(): void;
     set_hash_size(mb: number): void;
+    get max_nodes(): bigint | undefined;
+    set max_nodes(value: bigint | null | undefined);
 }
 
 export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembly.Module;
@@ -19,6 +22,8 @@ export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembl
 export interface InitOutput {
     readonly memory: WebAssembly.Memory;
     readonly __wbg_chessengine_free: (a: number, b: number) => void;
+    readonly __wbg_get_chessengine_max_nodes: (a: number) => [number, bigint];
+    readonly __wbg_set_chessengine_max_nodes: (a: number, b: number, c: bigint) => void;
     readonly chessengine_get_best_move: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number) => [number, number];
     readonly chessengine_get_best_move_timed: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number, n: number) => [number, number];
     readonly chessengine_load_network: (a: number, b: any) => number;
@@ -26,6 +31,7 @@ export interface InitOutput {
     readonly chessengine_load_polyglot_book: (a: number, b: any) => number;
     readonly chessengine_load_polyglot_book_native: (a: number, b: number, c: number) => number;
     readonly chessengine_new: () => number;
+    readonly chessengine_reset_for_new_game: (a: number) => void;
     readonly chessengine_set_hash_size: (a: number, b: number) => void;
     readonly __wbindgen_free: (a: number, b: number, c: number) => void;
     readonly __wbindgen_malloc: (a: number, b: number) => number;

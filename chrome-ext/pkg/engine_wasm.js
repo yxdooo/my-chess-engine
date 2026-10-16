@@ -109,11 +109,27 @@ export class ChessEngine {
         ChessEngineFinalization.register(this, this.__wbg_ptr, this);
         return this;
     }
+    reset_for_new_game() {
+        wasm.chessengine_reset_for_new_game(this.__wbg_ptr);
+    }
     /**
      * @param {number} mb
      */
     set_hash_size(mb) {
         wasm.chessengine_set_hash_size(this.__wbg_ptr, mb);
+    }
+    /**
+     * @returns {bigint | undefined}
+     */
+    get max_nodes() {
+        const ret = wasm.__wbg_get_chessengine_max_nodes(this.__wbg_ptr);
+        return ret[0] === 0 ? undefined : BigInt.asUintN(64, ret[1]);
+    }
+    /**
+     * @param {bigint | null} [arg0]
+     */
+    set max_nodes(arg0) {
+        wasm.__wbg_set_chessengine_max_nodes(this.__wbg_ptr, !isLikeNone(arg0), isLikeNone(arg0) ? BigInt(0) : arg0);
     }
 }
 if (Symbol.dispose) ChessEngine.prototype[Symbol.dispose] = ChessEngine.prototype.free;

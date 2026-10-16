@@ -13,18 +13,19 @@ pub struct TimeBudget {
 }
 
 const MIN_MOVES_TO_GO: f64 = 25.0;
-const MAX_MOVES_TO_GO: f64 = 40.0;
-const INCREMENT_SHARE: f64 = 0.75;
+const MAX_MOVES_TO_GO: f64 = 30.0;
+const INCREMENT_SHARE: f64 = 0.85;
 const HARD_LIMIT_CLOCK_FRACTION: f64 = 0.30;
-const EMERGENCY_CLOCK_MS: f64 = 2000.0;
 
 pub fn allocate(clock: &ClockInfo) -> TimeBudget {
     let usable_time = (clock.remaining_ms - clock.move_overhead_ms).max(0.0);
     
-    // Emergency mode: less than 2 seconds remaining
-    if usable_time < EMERGENCY_CLOCK_MS {
-        let optimum = (usable_time / MIN_MOVES_TO_GO).max(10.0);
-        let maximum = (usable_time / 8.0).max(optimum);
+    // Emergency mode: triggered when remaining time is low (<= 600ms or <= 15% of clock)
+    let emergency_threshold = (clock.remaining_ms * 0.15).max(600.0);
+    if usable_time < emergency_threshold {
+        let inc_bonus = clock.increment_ms * INCREMENT_SHARE;
+        let optimum = (usable_time / MIN_MOVES_TO_GO + inc_bonus).max(10.0);
+        let maximum = (usable_time / 8.0 + inc_bonus * 1.5).min(usable_time * 0.5).max(optimum);
         return TimeBudget {
             optimum_ms: optimum,
             maximum_ms: maximum,
@@ -35,7 +36,7 @@ pub fn allocate(clock: &ClockInfo) -> TimeBudget {
         Some(m) => (m as f64).clamp(12.0, MAX_MOVES_TO_GO),
         None => {
             let p = clock.piece_count.clamp(2, 32) as f64;
-            let expected = 12.0 + (28.0 * (p - 2.0) / 30.0);
+            let expected = 12.0 + (18.0 * (p - 2.0) / 30.0);
             expected.clamp(12.0, MAX_MOVES_TO_GO)
         }
     };
@@ -78,7 +79,7 @@ mod tests {
     #[test]
     fn emergency_mode_below_two_seconds() {
         let clock = ClockInfo {
-            remaining_ms: 1500.0,
+            remaining_ms: 500.0,
             increment_ms: 0.0,
             opponent_remaining_ms: 5000.0,
             moves_to_go: None,
@@ -86,7 +87,7 @@ mod tests {
             piece_count: 32,
         };
         let budget = allocate(&clock);
-        let usable = 1500.0 - 50.0;
+        let usable = 500.0 - 50.0;
         assert!((budget.optimum_ms - (usable / 25.0)).abs() < 1.0);
         assert!((budget.maximum_ms - (usable / 8.0)).abs() < 1.0);
     }
