@@ -40,7 +40,10 @@ const MASTER_BOOK = {
     "r1bqkbnr/pppp1ppp/2n5/4p3/4P3/5N2/PPPP1PPP/RNBQKB1R w KQkq -": "f1b5",
     "rnbqkbnr/pp1ppppp/8/2p5/4P3/8/PPPP1PPP/RNBQKBNR w KQkq -": "g1f3",
     "rnbqkbnr/ppp1pppp/8/3p4/3P4/8/PPP1PPPP/RNBQKBNR w KQkq -": "c2c4",
+    // English Opening response to 1... e5 -> 2. Nc3
+    "rnbqkbnr/pppp1ppp/8/4p3/2P5/8/PP1PPPPP/RNBQKBNR w KQkq -": "b1c3",
 };
+
 
 chrome.runtime.onInstalled.addListener(() => {
     chrome.storage.local.get(["isActive"], (result) => {
@@ -254,15 +257,16 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                         return;
                     }
 
-                    // Strict Clock Guard: Only make network tablebase requests if we have at least 3 seconds (my_ms >= 3000).
+                    // Strict Clock Guard: Only make network tablebase requests if we have at least 3 seconds (my_ms >= 3000) or untimed/bot games (my_ms === 0).
                     // In Bullet or time scrambles, network latency risks flagging on time.
-                    if (my_ms >= 3000) {
-                        const tbTimeout = Math.min(600, Math.floor(my_ms / 6));
+                    if (my_ms >= 3000 || my_ms === 0) {
+                        const tbTimeout = my_ms === 0 ? 1200 : Math.min(600, Math.floor(my_ms / 6));
                         fetchWithTimeout(
                             "https://tablebase.lichess.ovh/standard?fen=" + encodeURIComponent(message.fen),
                             {},
                             tbTimeout
                         )
+
                             .then((r) => r.json())
                             .then((data) => {
                                 if (data && data.moves && data.moves.length > 0) {
