@@ -284,21 +284,6 @@ function handleWorkerMessage(workerIndex, data) {
  */
 function processSearch(message, searchId, abortFlag) {
     messageQueue = null;
-    activeStartTime = performance.now();
-    activeSearchId = searchId;
-    activeSearchRunning = true;
-    activeSearchCompleted = false;
-    activeWorkerResults = [];
-    activeCompletedWorkers = 0;
-
-    if (activeGraceTimer) {
-        clearTimeout(activeGraceTimer);
-        activeGraceTimer = null;
-    }
-    if (activeFailsafeTimer) {
-        clearTimeout(activeFailsafeTimer);
-        activeFailsafeTimer = null;
-    }
 
     // Select only workers that are actually READY
     const readyIndices = [];
@@ -322,11 +307,25 @@ function processSearch(message, searchId, abortFlag) {
         message._bootWaited = true;
         log.info('SMP', `Waiting 180ms for ${requestedCount - readyIndices.length} booting worker(s) to finish init...`);
         setTimeout(() => {
-            if (!activeSearchRunning) {
-                processSearch(message, searchId, abortFlag);
-            }
+            processSearch(message, searchId, abortFlag);
         }, 180);
         return;
+    }
+
+    activeStartTime = performance.now();
+    activeSearchId = searchId;
+    activeSearchRunning = true;
+    activeSearchCompleted = false;
+    activeWorkerResults = [];
+    activeCompletedWorkers = 0;
+
+    if (activeGraceTimer) {
+        clearTimeout(activeGraceTimer);
+        activeGraceTimer = null;
+    }
+    if (activeFailsafeTimer) {
+        clearTimeout(activeFailsafeTimer);
+        activeFailsafeTimer = null;
     }
 
     const workersToUse = Math.min(MAX_WORKERS, requestedCount, readyIndices.length);

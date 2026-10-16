@@ -45,7 +45,7 @@ const log = {
 
 log.info('Content', 'Logger initialized');
 
-const AETHER_VERSION = "2.4.14";
+const AETHER_VERSION = "2.4.15";
 
 /** @type {string} The last FEN position that was sent for analysis. */
 let currentFEN = "";
@@ -1327,6 +1327,31 @@ function getClocks() {
             oppClock = allClocks[0];
         } else if (allClocks && allClocks.length === 1) {
             myClock = allClocks[0];
+        }
+    }
+
+    if (!myClock || !oppClock) {
+        // Universal coordinate-based clock search for Chess.com Play-vs-Computer and variants:
+        // Find all elements displaying a valid MM:SS time string
+        const candidates = document.querySelectorAll(
+            "[class*='clock'], [class*='time'], span, div"
+        );
+        const clockMatches = [];
+        for (const el of candidates) {
+            if (el.children.length <= 2) {
+                const text = (el.innerText || el.textContent || "").trim();
+                if (/^\d{1,2}:\d{2}(\.\d+)?$/.test(text) && parseClockText(text) !== null) {
+                    const rect = el.getBoundingClientRect();
+                    if (rect.width > 20 && rect.height > 10 && rect.top > 0) {
+                        clockMatches.push({ el, top: rect.top });
+                    }
+                }
+            }
+        }
+        if (clockMatches.length >= 2) {
+            clockMatches.sort((a, b) => a.top - b.top);
+            if (!oppClock) oppClock = clockMatches[0].el;
+            if (!myClock) myClock = clockMatches[clockMatches.length - 1].el;
         }
     }
     

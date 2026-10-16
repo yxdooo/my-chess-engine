@@ -170,11 +170,12 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
     }
 });
 
-/**
- * Returns true if an offscreen document with offscreen.html is already open.
- * @returns {Promise<boolean>}
- */
 async function hasDocument() {
+    if (chrome.offscreen && typeof chrome.offscreen.hasDocument === "function") {
+        try {
+            return await chrome.offscreen.hasDocument();
+        } catch (_) {}
+    }
     if (chrome.runtime && 'getContexts' in chrome.runtime) {
         try {
             const contexts = await chrome.runtime.getContexts({
@@ -184,12 +185,7 @@ async function hasDocument() {
             return Boolean(contexts && contexts.length > 0);
         } catch (_) {}
     }
-    try {
-        const matchedClients = await clients.matchAll();
-        return matchedClients.some((c) => c.url.includes("offscreen.html"));
-    } catch (_) {
-        return false;
-    }
+    return false;
 }
 
 /**
@@ -427,8 +423,13 @@ function callOffscreenEngine(
         const failsafeTimeout = setTimeout(() => {
             if (!responded) {
                 responded = true;
-                log.warn('Background', 'Offscreen document timed out — falling back to single worker');
-                runFallbackWorker(fen, my_ms, opp_ms, inc_ms, movesToGo, elo, history, hashSize, isMyTurn, sendResponse, workerCount);
+                log.warn('Background', 'Offscreen document timed out — resetting offscreen document');
+                if (chrome.offscreen && typeof chrome.offscreen.closeDocument === "function") {
+                    chrome.offscreen.closeDocument().catch(() => {}).finally(() => {
+                        setupOffscreenDocument("offscreen.html").catch(() => {});
+                    });
+                }
+                if (sendResponse) sendResponse({ bestMove: null });
             }
         }, Math.max(5000, (budget.maxTimeMs || 2500) + 3000));
 
@@ -451,154 +452,22 @@ function callOffscreenEngine(
                 clearTimeout(failsafeTimeout);
 
                 if (chrome.runtime.lastError) {
-                    log.warn('Background', `Offscreen error (sending to fallback): ${chrome.runtime.lastError.message}`);
-                    runFallbackWorker(fen, my_ms, opp_ms, inc_ms, movesToGo, elo, history, hashSize, isMyTurn, sendResponse, workerCount);
+                    log.warn('Background', `Offscreen error: ${chrome.runtime.lastError.message}`);
+                    if (chrome.offscreen && typeof chrome.offscreen.closeDocument === "function") {
+                        chrome.offscreen.closeDocument().catch(() => {}).finally(() => {
+                            setupOffscreenDocument("offscreen.html").catch(() => {});
+                        });
+                    }
+                    if (sendResponse) sendResponse({ bestMove: null });
                     return;
                 }
                 handleSearchResponse(response, isMyTurn, sendResponse, my_ms, opp_ms, inc_ms, movesToGo, elo, workerCount, history, hashSize);
             }
         );
     }).catch((e) => {
-        log.error('Background', 'Offscreen setup failed, routing to fallback', e);
-        runFallbackWorker(fen, my_ms, opp_ms, inc_ms, movesToGo, elo, history, hashSize, isMyTurn, sendResponse, workerCount);
+        log.error('Background', 'Offscreen setup failed', e);
+        if (sendResponse) sendResponse({ bestMove: null });
     });
-}
-
-let fallbackWorker = null;
-let fallbackWorkerReady = false;
-let fallbackAbortFlag = null;
-let currentFallbackSearchId = 0;
-let fallbackMessageQueue = [];
-let fallbackIdleTimeoutId = null;
-let pendingFallbackResponse = null;
-
-function startFallbackIdleTimeout() {
-    if (fallbackIdleTimeoutId) clearTimeout(fallbackIdleTimeoutId);
-    fallbackIdleTimeoutId = setTimeout(() => {
-        if (fallbackWorker) {
-            log.info('Background', 'Fallback worker idle for 2 minutes, terminating.');
-            fallbackWorker.terminate();
-            fallbackWorker = null;
-            fallbackWorkerReady = false;
-            fallbackMessageQueue = [];
-        }
-    }, 120000);
-}
-
-function clearFallbackIdleTimeout() {
-    if (fallbackIdleTimeoutId) {
-        clearTimeout(fallbackIdleTimeoutId);
-        fallbackIdleTimeoutId = null;
-    }
-}
-
-function runFallbackWorker(fen, my_ms, opp_ms, inc_ms, movesToGo, elo, history, hashSize, isMyTurn, sendResponse, workerCount) {
-    clearFallbackIdleTimeout();
-    let sabSupported = false;
-    try {
-        new SharedArrayBuffer(1);
-        sabSupported = true;
-    } catch (e) {
-        sabSupported = false;
-    }
-
-    if (pendingFallbackResponse && pendingFallbackResponse !== sendResponse) {
-        try { pendingFallbackResponse({ bestMove: null }); } catch(e) {}
-    }
-    pendingFallbackResponse = sendResponse;
-
-    if (fallbackWorker) {
-        if (!sabSupported) {
-            fallbackWorker.terminate();
-            fallbackWorker = null;
-            fallbackWorkerReady = false;
-            fallbackMessageQueue = [];
-        } else if (fallbackAbortFlag) {
-            fallbackAbortFlag[0] = 1;
-        }
-    }
-
-    if (sabSupported) {
-        fallbackAbortFlag = new Uint8Array(new SharedArrayBuffer(1));
-    } else {
-        fallbackAbortFlag = null;
-    }
-
-    currentFallbackSearchId++;
-    const searchId = currentFallbackSearchId;
-
-    if (!fallbackWorker) {
-        fallbackWorker = new Worker("worker.js", { type: "module" });
-        fallbackWorker.postMessage({ type: "INIT" });
-        fallbackWorkerReady = false;
-    }
-
-    fallbackWorker.onmessage = (e) => {
-        if (e.data.type === "READY") {
-            fallbackWorkerReady = true;
-            for (const msg of fallbackMessageQueue) {
-                fallbackWorker.postMessage(msg);
-            }
-            fallbackMessageQueue = [];
-        } else if (e.data.type === "RESULT") {
-            startFallbackIdleTimeout();
-            if (e.data.searchId !== undefined && e.data.searchId !== searchId) return;
-            const response = {
-                bestMove: e.data.bestMove,
-                pv: e.data.pv,
-                ponderFen: e.data.ponderFen,
-                multiPv: [{ bestMove: e.data.bestMove, pv: e.data.pv, ponderFen: e.data.ponderFen }],
-                score: e.data.score,
-                depth: e.data.depth,
-                nodes: e.data.nodes,
-                timeMs: e.data.timeMs !== undefined ? e.data.timeMs : my_ms,
-            };
-            handleSearchResponse(response, isMyTurn, sendResponse, my_ms, opp_ms, inc_ms, movesToGo, elo, workerCount, history, hashSize);
-            if (pendingFallbackResponse === sendResponse) {
-                pendingFallbackResponse = null;
-            }
-        }
-    };
-    
-    fallbackWorker.onerror = (err) => {
-        log.error('Background', 'Fallback worker crashed:', err);
-        if (pendingFallbackResponse) {
-            try { pendingFallbackResponse({ bestMove: null }); } catch(e) {}
-            pendingFallbackResponse = null;
-        }
-        if (fallbackWorker) {
-            fallbackWorker.terminate();
-            fallbackWorker = null;
-            fallbackWorkerReady = false;
-            fallbackMessageQueue = [];
-        }
-    };
-
-    const fallbackBudget = calculateSearchBudget(my_ms, inc_ms);
-    const searchMessages = [
-        {
-            type: "SET_HASH_SIZE",
-            size: hashSize
-        },
-        {
-            type: "SEARCH",
-            fen,
-            searchTimeMs: fallbackBudget.searchTimeMs,
-            maxTimeMs: fallbackBudget.maxTimeMs,
-            my_ms, opp_ms, inc_ms, movesToGo, elo,
-            splitId: 0,
-            splitCount: 1,
-            history: history || "",
-            abortFlag: fallbackAbortFlag,
-            searchId: searchId
-        }
-    ];
-
-    if (fallbackWorkerReady) {
-        searchMessages.forEach(msg => fallbackWorker.postMessage(msg));
-    } else {
-        fallbackMessageQueue.push(...searchMessages);
-    }
 }
 
 function handleSearchResponse(response, isMyTurn, sendResponse, my_ms, opp_ms, inc_ms, movesToGo, elo, workerCount, history, hashSize) {
