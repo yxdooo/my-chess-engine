@@ -791,8 +791,19 @@ impl ChessEngine {
 
         let mut best_move: Option<ChessMove> = tt.probe(board.get_hash(), 0)
             .and_then(|e| e.best_move)
-            .filter(|&m| moves.iter().any(|&lm| lm == m))
-            .or_else(|| moves.first().copied());
+            .filter(|&m| moves.iter().any(|&lm| lm == m));
+        if best_move.is_none() {
+            let scores = self.score_moves(&board, &moves, 0, None);
+            let mut best_idx = 0;
+            let mut best_s = i32::MIN;
+            for (idx, &s) in scores.iter().enumerate() {
+                if s > best_s {
+                    best_s = s;
+                    best_idx = idx;
+                }
+            }
+            best_move = Some(moves[best_idx]);
+        }
         let mut best_score = -INF;
         let mut best_move_stable_iterations = 0;
         let mut previous_best_move: Option<ChessMove> = None;
@@ -823,7 +834,7 @@ impl ChessEngine {
             let mut iter_second_best = -INF;
 
             for pv_idx in 0..num_pv {
-                if self.stop_search || GLOBAL_STOP.load(Ordering::Relaxed) { break; }
+                if base_depth > 1 && (self.stop_search || GLOBAL_STOP.load(Ordering::Relaxed)) { break; }
 
                 let (mut alpha, mut beta, mut delta) = if depth <= 4 || best_score == -INF || pv_idx > 0 {
                     (-INF, INF, INF)
@@ -839,16 +850,18 @@ impl ChessEngine {
 
                 loop {
                     let result = self.search_root(&board, depth, alpha, beta, split_id as u32, split_count as u32, halfmove_clock, &tt, &pawn_hash, &excluded_root_moves);
-                    if self.stop_search || GLOBAL_STOP.load(Ordering::Relaxed) { break; }
+                    if base_depth > 1 && (self.stop_search || GLOBAL_STOP.load(Ordering::Relaxed)) { break; }
                     
                     let elapsed_check = current_time_ms() - self.start_time;
-                    if !GLOBAL_PONDER.load(Ordering::Relaxed) && elapsed_check >= self.maximum_time_ms {
+                    if base_depth > 1 && !GLOBAL_PONDER.load(Ordering::Relaxed) && elapsed_check >= self.maximum_time_ms {
                         self.stop_search = true;
                         GLOBAL_STOP.store(true, Ordering::Relaxed);
                     }
-                    if let Some(limit) = self.max_nodes {
-                        if self.nodes >= limit {
-                            self.stop_search = true;
+                    if base_depth > 1 {
+                        if let Some(limit) = self.max_nodes {
+                            if self.nodes >= limit {
+                                self.stop_search = true;
+                            }
                         }
                     }
 
@@ -876,10 +889,10 @@ impl ChessEngine {
                         break;
                     }
 
-                    if self.stop_search || GLOBAL_STOP.load(Ordering::Relaxed) { break; }
+                    if base_depth > 1 && (self.stop_search || GLOBAL_STOP.load(Ordering::Relaxed)) { break; }
                 }
 
-                if (self.stop_search || GLOBAL_STOP.load(Ordering::Relaxed)) && !completed_search {
+                if base_depth > 1 && (self.stop_search || GLOBAL_STOP.load(Ordering::Relaxed)) && !completed_search {
                     break;
                 }
 
@@ -934,7 +947,7 @@ impl ChessEngine {
                 }
             }
 
-            if (self.stop_search || GLOBAL_STOP.load(Ordering::Relaxed)) && iter_best_move.is_none() {
+            if base_depth > 1 && (self.stop_search || GLOBAL_STOP.load(Ordering::Relaxed)) && iter_best_move.is_none() {
                 break;
             }
 
@@ -995,23 +1008,20 @@ impl ChessEngine {
         }
 
         let mut final_pv = Vec::new();
-        let mut current_board = board.clone();
-        for _ in 0..16 {
-            if let Some(entry) = tt.probe(current_board.get_hash(), 0) {
-                if let Some(pv_move) = entry.best_move {
-                    if MoveGen::new_legal(&current_board).any(|m| m == pv_move) {
-                        final_pv.push(pv_move);
-                        current_board = current_board.make_move_new(pv_move);
-                        continue;
+        if let Some(m) = best_move {
+            final_pv.push(m);
+            let mut pv_board = board.make_move_new(m);
+            for _ in 1..16 {
+                if let Some(entry) = tt.probe(pv_board.get_hash(), 0) {
+                    if let Some(pv_move) = entry.best_move {
+                        if MoveGen::new_legal(&pv_board).any(|lm| lm == pv_move) {
+                            final_pv.push(pv_move);
+                            pv_board = pv_board.make_move_new(pv_move);
+                            continue;
+                        }
                     }
                 }
-            }
-            break;
-        }
-        
-        if final_pv.is_empty() {
-            if let Some(m) = best_move {
-                final_pv.push(m);
+                break;
             }
         }
 
@@ -1035,12 +1045,19 @@ impl ChessEngine {
         }
 
         let elapsed_final = (current_time_ms() - self.start_time).max(0.0);
+        let safe_depth = if depth_reached == 0 && best_move.is_some() { 1 } else { depth_reached };
+        let safe_score = if best_score <= -INF + 1000 && best_move.is_some() {
+            self.evaluate_full(&board, &pawn_hash, 0, halfmove_clock)
+        } else {
+            best_score
+        };
+
         SearchResult {
             best_move,
             ponder_move,
             ponder_fen,
-            score: best_score,
-            depth: depth_reached,
+            score: safe_score,
+            depth: safe_depth,
             nodes: self.nodes,
             time_ms: elapsed_final,
             pv: final_pv,
@@ -1402,6 +1419,9 @@ pub fn is_fortress_or_blocked_center(board: &Board, halfmove_clock: u8) -> i32 {
 
 impl ChessEngine {
     fn check_time(&mut self) {
+        if self.nodes < 100 {
+            return;
+        }
         if GLOBAL_STOP.load(Ordering::Relaxed) {
             self.stop_search = true;
             return;
@@ -3471,6 +3491,22 @@ mod tests {
         assert!(res2.depth >= 1, "Second search must reach at least depth 1, got {}", res2.depth);
         assert!(res2.nodes > 0, "Second search must explore nodes, got {}", res2.nodes);
         assert!(res2.best_move.is_some(), "Second search must return a best move");
+    }
+
+    #[test]
+    fn test_user_game_moves() {
+        let mut engine = ChessEngine::new();
+        let nnue_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/net.nnue");
+        if let Ok(bytes) = std::fs::read(nnue_path) {
+            engine.load_network_native(&bytes);
+        }
+        let fen1 = "rnbqk2r/pppp1ppp/4pn2/8/1bPP4/2N5/PP2PPPP/R1BQKBNR w KQkq - 0 4";
+        let res1 = engine.search_native(fen1, 1000.0, 1500.0, 16, 0, 1, "", true, None);
+        println!("MOVE 4 (after 3... Bb4): best_move={:?} score={} depth={}", res1.best_move, res1.score, res1.depth);
+
+        let fen2 = "rnbqk2r/pppp1ppp/4p3/8/2PP4/2nB4/PP2PPPP/R1BQK1NR w KQkq - 0 6";
+        let res2 = engine.search_native(fen2, 1000.0, 1500.0, 16, 0, 1, "", true, None);
+        println!("MOVE 6 (after 5... Nxc3): best_move={:?} score={} depth={}", res2.best_move, res2.score, res2.depth);
     }
 }
 

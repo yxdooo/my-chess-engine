@@ -318,9 +318,9 @@ function processSearch(message, searchId, abortFlag) {
     activeSelectedIndices = readyIndices.slice(0, workersToUse);
     activeWorkersCount = activeSelectedIndices.length;
 
-    const targetSearchMs = message.searchTimeMs || (message.my_ms && message.my_ms > 0 ? Math.min(3000, Math.round(message.my_ms / 35)) : 1200);
+    const targetSearchMs = message.searchTimeMs || (message.my_ms && message.my_ms > 0 ? Math.min(3000, Math.round(message.my_ms / 35)) : 450);
     const maxSearchMs = message.maxTimeMs || Math.round(targetSearchMs * 1.35);
-    const failsafeMs = Math.max(3500, Math.round(maxSearchMs + 2500));
+    const failsafeMs = Math.round(maxSearchMs + 800);
 
     log.info('SMP', `Starting search #${searchId} | workers=${activeWorkersCount} elo=${message.elo} target=${targetSearchMs}ms max=${maxSearchMs}ms failsafe=${failsafeMs}ms`);
     log.debug('SMP', `FEN: ${(message.fen || '').substring(0, 50)}...`);

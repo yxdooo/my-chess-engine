@@ -301,26 +301,28 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 function calculateSearchBudget(my_ms, inc_ms) {
     if (!my_ms || my_ms <= 0) {
         // Untimed game (e.g. Chess.com Play vs Bot, puzzles)
-        return { searchTimeMs: 1200, maxTimeMs: 1600 };
+        // 450ms is optimal: reaches depth 12-14 in WASM SIMD NNUE (~1.2M nodes)
+        // and responds in under 500ms without UI freezing or clock pressure.
+        return { searchTimeMs: 450, maxTimeMs: 650 };
     }
     const inc = inc_ms || 0;
     if (my_ms <= 30000) {
         // Hyper-bullet (<= 30s remaining)
-        const target = Math.min(450, Math.max(120, (my_ms / 30) + inc * 0.7));
+        const target = Math.min(300, Math.max(100, (my_ms / 35) + inc * 0.7));
         return { searchTimeMs: Math.round(target), maxTimeMs: Math.round(target * 1.25) };
     }
     if (my_ms <= 65000) {
         // Bullet (1 min)
-        const target = Math.min(850, Math.max(200, (my_ms / 35) + inc * 0.75));
+        const target = Math.min(600, Math.max(180, (my_ms / 35) + inc * 0.75));
         return { searchTimeMs: Math.round(target), maxTimeMs: Math.round(target * 1.3) };
     }
     if (my_ms <= 300000) {
         // Blitz (3-5 min)
-        const target = Math.min(2200, Math.max(400, (my_ms / 35) + inc * 0.8));
+        const target = Math.min(1200, Math.max(350, (my_ms / 35) + inc * 0.8));
         return { searchTimeMs: Math.round(target), maxTimeMs: Math.round(target * 1.35) };
     }
     // Rapid / Classical (> 5 min)
-    const target = Math.min(3500, Math.max(600, (my_ms / 45) + inc * 0.8));
+    const target = Math.min(2200, Math.max(500, (my_ms / 45) + inc * 0.8));
     return { searchTimeMs: Math.round(target), maxTimeMs: Math.round(target * 1.35) };
 }
 
@@ -348,7 +350,7 @@ function callOffscreenEngine(
                 log.warn('Background', 'Offscreen document timed out — falling back to single worker');
                 runFallbackWorker(fen, my_ms, opp_ms, inc_ms, movesToGo, elo, history, hashSize, isMyTurn, sendResponse, workerCount);
             }
-        }, (budget.maxTimeMs || 1600) + 3500);
+        }, (budget.maxTimeMs || 650) + 1200);
 
         chrome.runtime.sendMessage(
             {

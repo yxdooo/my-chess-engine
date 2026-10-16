@@ -61,6 +61,8 @@ function findChessComGame(board) {
     if (board._game && typeof board._game.move === "function") return board._game;
     if (board.controller && board.controller.game && typeof board.controller.game.move === "function") return board.controller.game;
     if (board.controller && typeof board.controller.move === "function") return board.controller;
+    if (window.chesscom?.game && typeof window.chesscom.game.move === "function") return window.chesscom.game;
+    if (window.game && typeof window.game.move === "function") return window.game;
     return null;
 }
 
@@ -70,44 +72,33 @@ function tryExecuteChessComMove(board, from, to, promotion, uci) {
     // 1. Native game controller on Chess.com
     const g = findChessComGame(board);
     if (g) {
-        try {
-            g.move({
-                from: from,
-                to: to,
-                promotion: promotion || undefined,
-                animate: false,
-                userGenerated: true
-            });
-            return true;
-        } catch (e1) {
+        const moveOptions = [
+            { from, to, promotion: promotion || undefined, animate: false, userGenerated: true },
+            { from, to, promotion: promotion || undefined },
+            { from, to, promotion },
+            uci
+        ];
+        for (const opt of moveOptions) {
             try {
-                g.move({ from, to, promotion: promotion || undefined });
-                return true;
-            } catch (e2) {
-                try {
-                    g.move(from, to, promotion);
+                const res = g.move(opt);
+                if (res !== false && res !== null && res !== undefined) {
                     return true;
-                } catch (e3) {
-                    try {
-                        g.move(uci);
-                        return true;
-                    } catch (e4) {}
                 }
-            }
+            } catch (_) {}
         }
     }
 
     // 2. Direct board methods
     if (typeof board.movePiece === "function") {
         try {
-            board.movePiece(from, to);
-            return true;
+            const res = board.movePiece(from, to);
+            if (res !== false && res !== null) return true;
         } catch (_) {}
     }
     if (typeof board.makeMove === "function") {
         try {
-            board.makeMove(from, to);
-            return true;
+            const res = board.makeMove(from, to);
+            if (res !== false && res !== null) return true;
         } catch (_) {}
     }
 

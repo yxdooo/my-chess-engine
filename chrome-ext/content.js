@@ -45,7 +45,7 @@ const log = {
 
 log.info('Content', 'Logger initialized');
 
-const AETHER_VERSION = "2.4.8";
+const AETHER_VERSION = "2.4.9";
 
 /** @type {string} The last FEN position that was sent for analysis. */
 let currentFEN = "";
@@ -500,42 +500,39 @@ function dispatchPointEvent(el, type, x, y, buttons = 0) {
     el.dispatchEvent(new MouseEvent(mType, init));
 }
 
-function executeDOMMove(boardEl, fromX, fromY, toX, toY, fromPieceEl, toSquareEl) {
+function executeDOMClickMove(boardEl, fromX, fromY, toX, toY, fromPieceEl, toSquareEl, destPieceEl) {
     const fromTarget = fromPieceEl || boardEl;
-    const toTarget = toSquareEl || document.elementFromPoint(toX, toY) || boardEl;
+    const toTarget = destPieceEl || toSquareEl || boardEl;
 
-    // 1. Pointer Down at source square
+    // 1. Click source square / piece
     dispatchPointEvent(fromTarget, "pointerdown", fromX, fromY, 1);
-    if (fromTarget !== boardEl) {
-        dispatchPointEvent(boardEl, "pointerdown", fromX, fromY, 1);
-    }
+    dispatchPointEvent(fromTarget, "pointerup", fromX, fromY, 0);
+    fromTarget.dispatchEvent(new MouseEvent("click", {
+        bubbles: true,
+        cancelable: true,
+        composed: true,
+        view: window,
+        clientX: fromX,
+        clientY: fromY,
+        button: 0,
+        buttons: 0
+    }));
 
-    // 2. Drag motion
+    // 2. Click destination square / piece after short natural interval (40ms)
     setTimeout(() => {
-        dispatchPointEvent(window, "pointermove", toX, toY, 1);
-        dispatchPointEvent(boardEl, "pointermove", toX, toY, 1);
-
-        // 3. Pointer Up & Drop at destination
-        setTimeout(() => {
-            dispatchPointEvent(toTarget, "pointerup", toX, toY, 0);
-            if (toTarget !== boardEl) {
-                dispatchPointEvent(boardEl, "pointerup", toX, toY, 0);
-            }
-            dispatchPointEvent(window, "pointerup", toX, toY, 0);
-
-            // 4. Click confirmation on destination
-            toTarget.dispatchEvent(new MouseEvent("click", {
-                bubbles: true,
-                cancelable: true,
-                composed: true,
-                view: window,
-                clientX: toX,
-                clientY: toY,
-                button: 0,
-                buttons: 0
-            }));
-        }, 20);
-    }, 20);
+        dispatchPointEvent(toTarget, "pointerdown", toX, toY, 1);
+        dispatchPointEvent(toTarget, "pointerup", toX, toY, 0);
+        toTarget.dispatchEvent(new MouseEvent("click", {
+            bubbles: true,
+            cancelable: true,
+            composed: true,
+            view: window,
+            clientX: toX,
+            clientY: toY,
+            button: 0,
+            buttons: 0
+        }));
+    }, 40);
 }
 
 /**
@@ -624,13 +621,13 @@ function playMove(uci) {
         promotion: promotionChar || undefined
     }, "*");
 
-    // Path 2: DOM-based Pointer and Click execution (immediate for Lichess or fallback)
-    const reactionDelay = currentEngineMode === "autoplay" ? 10 : 50 + Math.floor(Math.random() * 40);
+    // Path 2: Verified Click-to-Move fallback
+    // Give native controller 70ms to execute without injecting conflicting mouse events.
     setTimeout(() => {
         const boardElNow = document.querySelector("wc-chess-board, chess-board, cg-board, .board");
         if (!boardElNow) return;
 
-        // If native controller already moved the piece (piece no longer on source square), skip DOM events!
+        // If native controller already moved the piece, skip DOM clicks!
         const initialPiece = findPieceElement(boardElNow, fromFile, fromRank);
         if (!initialPiece) {
             addDebugLog(`Piece moved natively: ${uci}`);
@@ -653,54 +650,38 @@ function playMove(uci) {
         }
 
         const destSquareEl = findSquareElement(boardElNow, toFile, toRank);
-        if (destSquareEl) {
+        const destPieceEl = findPieceElement(boardElNow, toFile, toRank);
+        if (destPieceEl) {
+            const dpRect = destPieceEl.getBoundingClientRect();
+            toX = dpRect.left + dpRect.width / 2;
+            toY = dpRect.top + dpRect.height / 2;
+        } else if (destSquareEl) {
             const dRect = destSquareEl.getBoundingClientRect();
             toX = dRect.left + dRect.width / 2;
             toY = dRect.top + dRect.height / 2;
         }
 
-        executeDOMMove(boardElNow, fromX, fromY, toX, toY, pieceEl, destSquareEl);
+        addDebugLog(`DOM click-to-move executing: ${uci}`);
+        executeDOMClickMove(boardElNow, fromX, fromY, toX, toY, pieceEl, destSquareEl, destPieceEl);
 
-        // Verification & Click-to-Move fallback at 350ms
-        setTimeout(() => {
-            const checkPiece = findPieceElement(boardElNow, fromFile, fromRank);
-            if (checkPiece) {
-                addDebugLog(`Fallback: Direct click sequence for ${uci}`);
-                dispatchPointEvent(checkPiece, "pointerdown", fromX, fromY, 1);
-                dispatchPointEvent(checkPiece, "pointerup", fromX, fromY, 0);
-                checkPiece.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, composed: true, view: window, clientX: fromX, clientY: fromY }));
-
-                setTimeout(() => {
-                    const destEl = destSquareEl || document.elementFromPoint(toX, toY) || boardElNow;
-                    dispatchPointEvent(destEl, "pointerdown", toX, toY, 1);
-                    dispatchPointEvent(destEl, "pointerup", toX, toY, 0);
-                    destEl.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, composed: true, view: window, clientX: toX, clientY: toY }));
-                }, 50);
-            }
-        }, 350);
-
-        // Safety watchdog: at 1400ms, only if still stuck and still our turn, do a clean re-sync
+        // Safety watchdog: at 700ms, only if still stuck and still our turn, do a clean re-sync
         setTimeout(() => {
             const checkPieceStillThere = findPieceElement(boardElNow, fromFile, fromRank);
             if (checkPieceStillThere && currentEngineMode === "autoplay" && !isSearchInFlight) {
                 const currentStm = lastDeterminedStm;
                 const myColor = flipBoard ? "b" : "w";
                 if (currentStm === myColor) {
-                    addDebugLog(`Move ${uci} unconfirmed after 1400ms — resyncing board`);
+                    addDebugLog(`Move ${uci} unconfirmed after 700ms — resyncing board`);
                     currentFEN = "";
                     processPosition();
                 }
             }
-        }, 1400);
+        }, 700);
 
         if (promotionChar) {
-            const promoDelay = 120 + Math.floor(Math.random() * 40);
-            setTimeout(async () => {
-                const chosenChar = await showPromotionPicker(promotionChar);
-                setTimeout(() => selectPromotion(chosenChar), 60);
-            }, promoDelay);
+            setTimeout(() => selectPromotion(promotionChar), 60);
         }
-    }, reactionDelay);
+    }, 70);
 
     return true;
 }
@@ -1363,6 +1344,11 @@ function processPosition(networkFen = null) {
     }
 
     if (!isContextValid()) return;
+
+    if (!isMyTurn) {
+        log.debug('Board', 'Opponent turn - skipping engine search to keep workers free');
+        return;
+    }
 
     try {
         isSearchInFlight = true;
