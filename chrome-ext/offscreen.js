@@ -74,9 +74,13 @@ export function aggregateWorkerResults(workerResults) {
         };
     }
 
-    const maxDepth = Math.max(...validResults.map(r => r.depth || 0));
-    const minAcceptableDepth = Math.max(1, maxDepth - 1);
-    const qualified = validResults.filter(r => (r.depth || 0) >= minAcceptableDepth);
+    const maxDepth = Math.max(0, ...validResults.map(r => r.depth || 0));
+    // If maxDepth is 0 (instant move, book hit, or shallow eval), accept depth 0!
+    const minAcceptableDepth = maxDepth > 0 ? maxDepth - 1 : 0;
+    let qualified = validResults.filter(r => (r.depth || 0) >= minAcceptableDepth);
+    if (!qualified || qualified.length === 0) {
+        qualified = validResults;
+    }
 
     qualified.sort((a, b) => {
         const depthDiff = (b.depth || 0) - (a.depth || 0);
@@ -88,18 +92,30 @@ export function aggregateWorkerResults(workerResults) {
         return (b.score || 0) - (a.score || 0);
     });
 
-    const best = qualified[0];
+    const best = qualified[0] || validResults[0];
+    if (!best || !best.bestMove) {
+        return {
+            bestMove: null,
+            score: -999999,
+            depth: 0,
+            nodes: 0,
+            pv: [],
+            ponderFen: "",
+            multiPv: []
+        };
+    }
+
     const seenMoves = new Set();
     const multiPv = [];
     for (const r of qualified) {
-        if (!seenMoves.has(r.bestMove)) {
+        if (r && r.bestMove && !seenMoves.has(r.bestMove)) {
             seenMoves.add(r.bestMove);
             multiPv.push({
                 bestMove: r.bestMove,
                 pv: r.pv || [],
                 ponderFen: r.ponderFen || "",
-                score: r.score,
-                depth: r.depth,
+                score: r.score ?? 0,
+                depth: r.depth ?? 0,
             });
             if (multiPv.length >= 3) break;
         }
@@ -107,9 +123,9 @@ export function aggregateWorkerResults(workerResults) {
 
     return {
         bestMove: best.bestMove,
-        score: best.score,
-        depth: best.depth || 0,
-        nodes: best.nodes || 0,
+        score: best.score ?? 0,
+        depth: best.depth ?? 0,
+        nodes: best.nodes ?? 0,
         pv: best.pv || [],
         ponderFen: best.ponderFen || "",
         multiPv
@@ -385,25 +401,43 @@ function finalizeActiveSearch() {
         activeFailsafeTimer = null;
     }
 
-    const elapsed = Math.round(performance.now() - activeStartTime);
-    const aggregated = aggregateWorkerResults(activeWorkerResults);
-    const totalNodes = activeWorkerResults.reduce((acc, r) => acc + (r.nodes || 0), 0);
-    const nps = elapsed > 0 ? Math.round(totalNodes / (elapsed / 1000)).toLocaleString() : '?';
+    try {
+        const elapsed = Math.round(performance.now() - activeStartTime);
+        const aggregated = aggregateWorkerResults(activeWorkerResults);
+        const totalNodes = activeWorkerResults.reduce((acc, r) => acc + (r.nodes || 0), 0);
+        const nps = elapsed > 0 ? Math.round(totalNodes / (elapsed / 1000)).toLocaleString() : '?';
 
-    log.info('SMP', `Search #${activeSearchId} finalized in ${elapsed}ms | best=${aggregated.bestMove} score=${aggregated.score}cp depth=${aggregated.depth} nodes=${totalNodes.toLocaleString()} nps=${nps}`);
+        log.info('SMP', `Search #${activeSearchId} finalized in ${elapsed}ms | best=${aggregated.bestMove} score=${aggregated.score}cp depth=${aggregated.depth} nodes=${totalNodes.toLocaleString()} nps=${nps}`);
 
-    if (currentSendResponse) {
-        currentSendResponse({
-            bestMove:  aggregated.bestMove,
-            pv:        aggregated.pv,
-            ponderFen: aggregated.ponderFen,
-            multiPv:   aggregated.multiPv,
-            score:     aggregated.score,
-            depth:     aggregated.depth,
-            nodes:     totalNodes,
-            timeMs:    elapsed,
-        });
-        currentSendResponse = null;
+        if (currentSendResponse) {
+            currentSendResponse({
+                bestMove:  aggregated.bestMove,
+                pv:        aggregated.pv,
+                ponderFen: aggregated.ponderFen,
+                multiPv:   aggregated.multiPv,
+                score:     aggregated.score,
+                depth:     aggregated.depth,
+                nodes:     totalNodes,
+                timeMs:    elapsed,
+            });
+            currentSendResponse = null;
+        }
+    } catch (err) {
+        log.error('SMP', 'Error during finalizeActiveSearch', err);
+        if (currentSendResponse) {
+            const fallbackMove = activeWorkerResults.find(r => r && r.bestMove)?.bestMove || null;
+            currentSendResponse({
+                bestMove: fallbackMove,
+                pv: fallbackMove ? [fallbackMove] : [],
+                ponderFen: "",
+                multiPv: [],
+                score: 0,
+                depth: 0,
+                nodes: 0,
+                timeMs: 0,
+            });
+            currentSendResponse = null;
+        }
     }
 }
 
