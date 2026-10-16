@@ -15,6 +15,7 @@ document.addEventListener("DOMContentLoaded", () => {
     const cpuSelect       = document.getElementById("cpu-select");
     const hashSelect      = document.getElementById("hashSize");
     const incrementInput  = document.getElementById("increment");
+    const searchSpeedSelect = document.getElementById("searchSpeed");
     const statusBox       = document.getElementById("status-box");
     const statusText      = document.getElementById("status-text");
     const hwInfo          = document.getElementById("hw-info");
@@ -24,8 +25,6 @@ document.addEventListener("DOMContentLoaded", () => {
     const statDepth = document.getElementById("stat-depth");
     const statNodes = document.getElementById("stat-nodes");
     const statTime  = document.getElementById("stat-time");
-
-
 
     const cores = navigator.hardwareConcurrency || 4;
     hwInfo.innerText = `Hardware Detected: ${cores} Logical Cores`;
@@ -45,11 +44,12 @@ document.addEventListener("DOMContentLoaded", () => {
     // -----------------------------------------------------------------------
 
     chrome.storage.local.get(
-        ["elo", "cpuMode", "hashSize", "increment", "engineMode", "isActive", "engineStats"],
+        ["elo", "cpuMode", "hashSize", "increment", "searchSpeed", "engineMode", "isActive", "engineStats"],
         (result) => {
             if (result.elo)        eloSelect.value    = result.elo;
             if (result.cpuMode)    cpuSelect.value    = result.cpuMode;
             if (result.hashSize)   hashSelect.value   = result.hashSize;
+            if (result.searchSpeed && searchSpeedSelect) searchSpeedSelect.value = result.searchSpeed;
             if (result.increment !== undefined) incrementInput.value = result.increment;
 
             setMode(result.engineMode || "analysis");
@@ -183,14 +183,15 @@ document.addEventListener("DOMContentLoaded", () => {
     // -----------------------------------------------------------------------
 
     function saveAndApplySettings() {
-        const elo       = parseInt(eloSelect.value, 10);
-        const cpuMode   = cpuSelect.value;
-        const hashSize  = parseInt(hashSelect.value, 10);
-        const increment = parseInt(incrementInput.value, 10) || 0;
+        const elo         = parseInt(eloSelect.value, 10);
+        const cpuMode     = cpuSelect.value;
+        const hashSize    = parseInt(hashSelect.value, 10);
+        const increment   = parseInt(incrementInput.value, 10) || 0;
+        const searchSpeed = searchSpeedSelect ? searchSpeedSelect.value : "auto";
         const targetWorkers = resolveWorkerCount(cpuMode);
 
         chrome.storage.local.set({
-            elo, cpuMode, hashSize, increment, targetWorkers,
+            elo, cpuMode, hashSize, increment, searchSpeed, targetWorkers,
         });
 
         chrome.storage.local.get(["isActive"], (res) => {
@@ -210,6 +211,7 @@ document.addEventListener("DOMContentLoaded", () => {
     cpuSelect.addEventListener("change", saveAndApplySettings);
     hashSelect.addEventListener("change", saveAndApplySettings);
     incrementInput.addEventListener("change", saveAndApplySettings);
+    if (searchSpeedSelect) searchSpeedSelect.addEventListener("change", saveAndApplySettings);
 
     // -----------------------------------------------------------------------
     // Start / Stop

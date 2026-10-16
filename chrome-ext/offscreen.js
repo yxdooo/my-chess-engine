@@ -319,7 +319,7 @@ function processSearch(message, searchId, abortFlag) {
     activeSelectedIndices = readyIndices.slice(0, workersToUse);
     activeWorkersCount = activeSelectedIndices.length;
 
-    const targetSearchMs = message.searchTimeMs || (message.my_ms && message.my_ms > 0 ? Math.min(3000, Math.round(message.my_ms / 35)) : 450);
+    const targetSearchMs = message.searchTimeMs || (message.my_ms && message.my_ms > 0 ? Math.min(7500, Math.round(message.my_ms / 35)) : 2200);
     const maxSearchMs = message.maxTimeMs || Math.round(targetSearchMs * 1.35);
     const failsafeMs = Math.round(maxSearchMs + 800);
 

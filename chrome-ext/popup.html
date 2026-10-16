@@ -320,6 +320,18 @@
     <input type="number" id="increment" min="0" max="60" value="0" step="1">
   </div>
 
+  <!-- Search Speed / Quality -->
+  <div class="control-group">
+    <label>Time Budget / Engine Speed</label>
+    <select id="searchSpeed">
+      <option value="auto" selected>⚡ Auto-Adaptive (Blitz / Rapid / Classical)</option>
+      <option value="rapid">🧠 Rapid / Deep (6s - 10s per move)</option>
+      <option value="blitz">🎯 Blitz / Standard (1.5s - 3.5s per move)</option>
+      <option value="bullet">🚀 Bullet / Fast (0.3s - 0.8s per move)</option>
+      <option value="untimed">👑 Bot Destroyer (2.5s - 4.5s per move)</option>
+    </select>
+  </div>
+
   <button class="btn" id="btn-start">Start Engine</button>
   <button class="btn stop" id="btn-stop">Stop Engine</button>
 

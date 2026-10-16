@@ -267,6 +267,19 @@ pub fn get_book_move(fen: &str) -> Option<&'static str> {
         m.insert("rn1qkb1r/pp2pppp/2p2n2/3p1b2/8/3P1NP1/PPP1PPBP/RNBQ1RK1 b kq -", "e7e6");
         m.insert("rn1qkb1r/pp3ppp/2p1pn2/3p1b2/8/3P1NP1/PPP1PPBP/RNBQ1RK1 w kq -", "b1d2");
         m.insert("rn1qkb1r/pp3ppp/2p1pn2/3p1b2/8/3P1NP1/PPPNPPBP/R1BQ1RK1 b kq -", "f8e7");
+        // Reti Opening: 1. Nf3 Nf6 -> 2. d4 (prevents 2. e4 blunder)
+        m.insert("rnbqkb1r/pppppppp/5n2/8/8/5N2/PPPPPPPP/RNBQKB1R w KQkq -", "d2d4");
+        m.insert("rnbqkb1r/pppppp1p/5np1/8/3P4/5N2/PPP1PPPP/RNBQKB1R w KQkq -", "c2c4");
+        m.insert("rnbqkb1r/pppp1ppp/4pn2/8/3P4/5N2/PPP1PPPP/RNBQKB1R w KQkq -", "c2c4");
+        // Nimzo-Indian Defense: 1. d4 Nf6 2. c4 e6 3. Nc3 Bb4 -> 4. Qc2 (prevents 4. e4 blunder)
+        m.insert("rnbqk2r/pppp1ppp/4pn2/8/1bPP4/2N5/PP2PPPP/R1BQKBNR w KQkq -", "d1c2");
+        m.insert("rnbq1rk1/pppp1ppp/4pn2/8/1bPP4/2N5/PPQ1PPPP/R1B1KBNR w KQ -", "a2a3");
+        // King's Indian Defense
+        m.insert("rnbqk2r/ppp1ppbp/3p1np1/8/2PPP3/2N5/PP3PPP/R1BQKBNR w KQkq -", "g1f3");
+        // Petrov Defense: 1. e4 e5 2. Nf3 Nf6 -> 3. Nxe5
+        m.insert("rnbqkb1r/pppp1ppp/5n2/4p3/4P3/5N2/PPPP1PPP/RNBQKB1R w KQkq -", "f3e5");
+        // Najdorf Sicilian: 5... a6 -> 6. Be3
+        m.insert("rnbqkb1r/1p2pppp/p2p1n2/8/3NP3/2N5/PPP2PPP/R1BQKB1R w KQkq -", "c1e3");
         m
     });
     let parts: Vec<&str> = fen.split(" ").collect();

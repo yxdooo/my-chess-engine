@@ -45,7 +45,7 @@ const log = {
 
 log.info('Content', 'Logger initialized');
 
-const AETHER_VERSION = "2.4.9";
+const AETHER_VERSION = "2.4.13";
 
 /** @type {string} The last FEN position that was sent for analysis. */
 let currentFEN = "";
@@ -477,62 +477,149 @@ function findSquareElement(boardEl, file, rank) {
     );
 }
 
-function dispatchPointEvent(el, type, x, y, buttons = 0) {
-    if (!el) return;
-    const init = {
+function selectPromotion(promotionChar) {
+    if (!promotionChar) promotionChar = 'q';
+    
+    // Chess.com and Lichess promotion modals (various themes and versions)
+    const selectors = [
+        `.promotion-piece.w${promotionChar}`,
+        `.promotion-piece.b${promotionChar}`,
+        `.promotion-piece-${promotionChar}`,
+        `[data-promotion-piece="${promotionChar}"]`,
+        `[data-type="${promotionChar}"]`,
+        `.promotion-menu .w${promotionChar}`,
+        `.promotion-menu .b${promotionChar}`,
+        `.promotion-menu [class*="${promotionChar}"]`,
+        `.promotion-window .${promotionChar}`,
+        `wc-promotion-popup .${promotionChar}`,
+        // Lichess
+        `cg-board .promotion-choice .${promotionChar === 'q' ? 'queen' : promotionChar === 'r' ? 'rook' : promotionChar === 'b' ? 'bishop' : 'knight'}`,
+        `.lichess-promotion .${promotionChar === 'q' ? 'queen' : promotionChar === 'r' ? 'rook' : promotionChar === 'b' ? 'bishop' : 'knight'}`
+    ];
+
+    for (const sel of selectors) {
+        const el = document.querySelector(sel);
+        if (el) {
+            el.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, cancelable: true, composed: true, view: window }));
+            el.dispatchEvent(new PointerEvent("pointerup", { bubbles: true, cancelable: true, composed: true, view: window }));
+            el.click();
+            return true;
+        }
+    }
+
+    // Generic fallback: click first visible promotion element
+    const genericModal = document.querySelector(".promotion-choice piece, .promotion-piece, wc-promotion-popup piece");
+    if (genericModal) {
+        genericModal.click();
+        return true;
+    }
+    return false;
+}
+
+/**
+ * Executes a resilient, human-like DOM move using synthetic pointer events.
+ * First dispatches a full pointer drag-and-drop sequence (which works uniformly across
+ * Chess.com live websocket and board components), with an automatic click-to-move fallback.
+ */
+function executeDOMMove(boardEl, fromX, fromY, toX, toY, uci, promotionChar) {
+    if (!boardEl) return;
+
+    const fromEl = document.elementFromPoint(fromX, fromY) || boardEl;
+    const toEl   = document.elementFromPoint(toX, toY) || boardEl;
+
+    const createPointerInit = (x, y, buttons, pressure) => ({
         bubbles: true,
         cancelable: true,
         composed: true,
         view: window,
         clientX: x,
         clientY: y,
+        screenX: x,
+        screenY: y,
+        pageX: x + (window.scrollX || 0),
+        pageY: y + (window.scrollY || 0),
         button: 0,
         buttons: buttons,
         pointerId: 1,
         pointerType: "mouse",
         isPrimary: true,
+        pressure: pressure,
         width: 1,
-        height: 1,
-        pressure: buttons > 0 ? 0.5 : 0
-    };
-    el.dispatchEvent(new PointerEvent(type, init));
-    const mType = type.replace("pointer", "mouse");
-    el.dispatchEvent(new MouseEvent(mType, init));
-}
+        height: 1
+    });
 
-function executeDOMClickMove(boardEl, fromX, fromY, toX, toY, fromPieceEl, toSquareEl, destPieceEl) {
-    const fromTarget = fromPieceEl || boardEl;
-    const toTarget = destPieceEl || toSquareEl || boardEl;
-
-    // 1. Click source square / piece
-    dispatchPointEvent(fromTarget, "pointerdown", fromX, fromY, 1);
-    dispatchPointEvent(fromTarget, "pointerup", fromX, fromY, 0);
-    fromTarget.dispatchEvent(new MouseEvent("click", {
+    const createMouseInit = (x, y, buttons) => ({
         bubbles: true,
         cancelable: true,
         composed: true,
         view: window,
-        clientX: fromX,
-        clientY: fromY,
+        clientX: x,
+        clientY: y,
+        screenX: x,
+        screenY: y,
+        pageX: x + (window.scrollX || 0),
+        pageY: y + (window.scrollY || 0),
         button: 0,
-        buttons: 0
-    }));
+        buttons: buttons
+    });
 
-    // 2. Click destination square / piece after short natural interval (40ms)
+    // 1. POINTERDOWN & MOUSEDOWN at source square
+    fromEl.dispatchEvent(new PointerEvent("pointerdown", createPointerInit(fromX, fromY, 1, 0.5)));
+    fromEl.dispatchEvent(new MouseEvent("mousedown", createMouseInit(fromX, fromY, 1)));
+    boardEl.dispatchEvent(new PointerEvent("pointerdown", createPointerInit(fromX, fromY, 1, 0.5)));
+
+    // 2. POINTERMOVE to destination (simulating physical drag across coordinates)
     setTimeout(() => {
-        dispatchPointEvent(toTarget, "pointerdown", toX, toY, 1);
-        dispatchPointEvent(toTarget, "pointerup", toX, toY, 0);
-        toTarget.dispatchEvent(new MouseEvent("click", {
-            bubbles: true,
-            cancelable: true,
-            composed: true,
-            view: window,
-            clientX: toX,
-            clientY: toY,
-            button: 0,
-            buttons: 0
-        }));
-    }, 40);
+        const midX = (fromX + toX) / 2;
+        const midY = (fromY + toY) / 2;
+        document.dispatchEvent(new PointerEvent("pointermove", createPointerInit(midX, midY, 1, 0.5)));
+        boardEl.dispatchEvent(new PointerEvent("pointermove", createPointerInit(midX, midY, 1, 0.5)));
+
+        setTimeout(() => {
+            document.dispatchEvent(new PointerEvent("pointermove", createPointerInit(toX, toY, 1, 0.5)));
+            document.dispatchEvent(new MouseEvent("mousemove", createMouseInit(toX, toY, 1)));
+            boardEl.dispatchEvent(new PointerEvent("pointermove", createPointerInit(toX, toY, 1, 0.5)));
+
+            // 3. POINTERUP & CLICK at destination square
+            setTimeout(() => {
+                const currentToEl = document.elementFromPoint(toX, toY) || toEl;
+                currentToEl.dispatchEvent(new PointerEvent("pointerup", createPointerInit(toX, toY, 0, 0)));
+                currentToEl.dispatchEvent(new MouseEvent("mouseup", createMouseInit(toX, toY, 0)));
+                boardEl.dispatchEvent(new PointerEvent("pointerup", createPointerInit(toX, toY, 0, 0)));
+                document.dispatchEvent(new PointerEvent("pointerup", createPointerInit(toX, toY, 0, 0)));
+
+                currentToEl.dispatchEvent(new MouseEvent("click", createMouseInit(toX, toY, 0)));
+                boardEl.dispatchEvent(new MouseEvent("click", createMouseInit(toX, toY, 0)));
+
+                // 4. Click-to-Move fallback (if piece is still unmoved after 80ms)
+                setTimeout(() => {
+                    const fromFile = uci.charCodeAt(0) - 97;
+                    const fromRank = uci.charCodeAt(1) - 49;
+                    const checkPiece = findPieceElement(boardEl, fromFile, fromRank);
+                    if (checkPiece) {
+                        log.info('DOMMove', `Drag unconfirmed for ${uci}, firing click-to-move`);
+                        fromEl.dispatchEvent(new PointerEvent("pointerdown", createPointerInit(fromX, fromY, 1, 0.5)));
+                        fromEl.dispatchEvent(new PointerEvent("pointerup", createPointerInit(fromX, fromY, 0, 0)));
+                        fromEl.dispatchEvent(new MouseEvent("click", createMouseInit(fromX, fromY, 0)));
+                        boardEl.dispatchEvent(new MouseEvent("click", createMouseInit(fromX, fromY, 0)));
+
+                        setTimeout(() => {
+                            const targetElNow = document.elementFromPoint(toX, toY) || boardEl;
+                            targetElNow.dispatchEvent(new PointerEvent("pointerdown", createPointerInit(toX, toY, 1, 0.5)));
+                            targetElNow.dispatchEvent(new PointerEvent("pointerup", createPointerInit(toX, toY, 0, 0)));
+                            targetElNow.dispatchEvent(new MouseEvent("click", createMouseInit(toX, toY, 0)));
+                            boardEl.dispatchEvent(new MouseEvent("click", createMouseInit(toX, toY, 0)));
+                        }, 50);
+                    }
+                }, 80);
+
+                if (promotionChar) {
+                    setTimeout(() => selectPromotion(promotionChar), 60);
+                    setTimeout(() => selectPromotion(promotionChar), 180);
+                }
+            }, 30);
+        }, 25);
+    }, 30);
 }
 
 /**
@@ -541,52 +628,13 @@ function executeDOMClickMove(boardEl, fromX, fromY, toX, toY, fromPieceEl, toSqu
  */
 const _promoUI = { resolve: null, el: null };
 
-/**
- * Shows a stylish promotion piece picker overlay and resolves with the chosen piece char.
- * @param {string} engineChar - The engine's preferred piece ('q', 'r', 'b', 'n')
- * @returns {Promise<string>} Resolves with the chosen char
- */
 function showPromotionPicker(engineChar) {
     return Promise.resolve(engineChar || "q");
 }
 
 /**
- * Selects a promotion piece in the promotion modal.
- * @param {string} promotionChar - One of 'q', 'r', 'b', 'n'
- */
-function selectPromotion(promotionChar) {
-    if (!promotionChar) promotionChar = 'q';
-    
-    // Chess.com promotion modal
-    const chessComModal = document.querySelector(
-        `.promotion-piece.w${promotionChar}, .promotion-piece.b${promotionChar}, .promotion-piece-${promotionChar}, [data-promotion-piece="${promotionChar}"], .promotion-menu .w${promotionChar}, .promotion-menu .b${promotionChar}, .promotion-window .${promotionChar}`
-    );
-    if (chessComModal) {
-        chessComModal.click();
-        return;
-    }
-
-    // Lichess promotion modal
-    const charToName = { 'q': 'queen', 'r': 'rook', 'b': 'bishop', 'n': 'knight' };
-    const pName = charToName[promotionChar] || 'queen';
-    const lichessModal = document.querySelector(
-        `cg-board .promotion-choice .${pName}, .lichess-promotion .${pName}, #promotion-choice piece.${pName}`
-    );
-    if (lichessModal) {
-        lichessModal.click();
-        return;
-    }
-
-    // Generic fallback: click the first promotion square (usually queen)
-    const genericModal = document.querySelector(
-        ".promotion-choice piece, .promotion-piece"
-    );
-    if (genericModal) genericModal.click();
-}
-
-/**
  * Plays a move on the board by invoking the native game controller (MAIN world)
- * or dispatching resilient mouse/pointer events (DOM fallback).
+ * and dispatching resilient mouse/pointer events (DOM drag & click fallback).
  * Supports Chess.com (wc-chess-board / chess-board) and Lichess (cg-board).
  *
  * @param {string} uci - UCI move string, e.g. "e2e4" or "e7e8q" (promotion).
@@ -612,7 +660,7 @@ function playMove(uci) {
     lastExecutedMove = uci;
     addDebugLog(`Autoplay executing: ${uci}`);
 
-    // Fast-path 1: Request native controller execution in MAIN world (Chess.com)
+    // Fast-path 1: Try native user controller in MAIN world (Chess.com live userMove)
     window.postMessage({
         type: "AETHER_PLAY_MOVE",
         uci,
@@ -621,67 +669,57 @@ function playMove(uci) {
         promotion: promotionChar || undefined
     }, "*");
 
-    // Path 2: Verified Click-to-Move fallback
-    // Give native controller 70ms to execute without injecting conflicting mouse events.
-    setTimeout(() => {
-        const boardElNow = document.querySelector("wc-chess-board, chess-board, cg-board, .board");
-        if (!boardElNow) return;
+    // Path 2: Resilient DOM Pointer Drag & Click Move
+    const rectNow = boardEl.getBoundingClientRect();
+    const sqSizeNow = rectNow.width / 8;
+    
+    let fromX = rectNow.left + ((flipBoard ? 7 - fromFile : fromFile) + 0.5) * sqSizeNow;
+    let fromY = rectNow.top + ((flipBoard ? fromRank : 7 - fromRank) + 0.5) * sqSizeNow;
+    let toX   = rectNow.left + ((flipBoard ? 7 - toFile : toFile) + 0.5) * sqSizeNow;
+    let toY   = rectNow.top + ((flipBoard ? toRank : 7 - toRank) + 0.5) * sqSizeNow;
 
-        // If native controller already moved the piece, skip DOM clicks!
-        const initialPiece = findPieceElement(boardElNow, fromFile, fromRank);
-        if (!initialPiece) {
-            addDebugLog(`Piece moved natively: ${uci}`);
-            return;
-        }
-
-        const rectNow = boardElNow.getBoundingClientRect();
-        const sqSizeNow = rectNow.width / 8;
-        
-        let fromX = rectNow.left + ((flipBoard ? 7 - fromFile : fromFile) + 0.5) * sqSizeNow;
-        let fromY = rectNow.top + ((flipBoard ? fromRank : 7 - fromRank) + 0.5) * sqSizeNow;
-        let toX   = rectNow.left + ((flipBoard ? 7 - toFile : toFile) + 0.5) * sqSizeNow;
-        let toY   = rectNow.top + ((flipBoard ? toRank : 7 - toRank) + 0.5) * sqSizeNow;
-
-        const pieceEl = findPieceElement(boardElNow, fromFile, fromRank);
-        if (pieceEl) {
-            const pRect = pieceEl.getBoundingClientRect();
+    const pieceEl = findPieceElement(boardEl, fromFile, fromRank);
+    if (pieceEl) {
+        const pRect = pieceEl.getBoundingClientRect();
+        if (pRect.width > 10 && pRect.height > 10) {
             fromX = pRect.left + pRect.width / 2;
             fromY = pRect.top + pRect.height / 2;
         }
+    }
 
-        const destSquareEl = findSquareElement(boardElNow, toFile, toRank);
-        const destPieceEl = findPieceElement(boardElNow, toFile, toRank);
-        if (destPieceEl) {
-            const dpRect = destPieceEl.getBoundingClientRect();
+    const destSquareEl = findSquareElement(boardEl, toFile, toRank);
+    const destPieceEl = findPieceElement(boardEl, toFile, toRank);
+    if (destPieceEl) {
+        const dpRect = destPieceEl.getBoundingClientRect();
+        if (dpRect.width > 10 && dpRect.height > 10) {
             toX = dpRect.left + dpRect.width / 2;
             toY = dpRect.top + dpRect.height / 2;
-        } else if (destSquareEl) {
-            const dRect = destSquareEl.getBoundingClientRect();
+        }
+    } else if (destSquareEl) {
+        const dRect = destSquareEl.getBoundingClientRect();
+        if (dRect.width > 10 && dRect.height > 10) {
             toX = dRect.left + dRect.width / 2;
             toY = dRect.top + dRect.height / 2;
         }
+    }
 
-        addDebugLog(`DOM click-to-move executing: ${uci}`);
-        executeDOMClickMove(boardElNow, fromX, fromY, toX, toY, pieceEl, destSquareEl, destPieceEl);
+    executeDOMMove(boardEl, fromX, fromY, toX, toY, uci, promotionChar);
 
-        // Safety watchdog: at 700ms, only if still stuck and still our turn, do a clean re-sync
-        setTimeout(() => {
-            const checkPieceStillThere = findPieceElement(boardElNow, fromFile, fromRank);
-            if (checkPieceStillThere && currentEngineMode === "autoplay" && !isSearchInFlight) {
-                const currentStm = lastDeterminedStm;
-                const myColor = flipBoard ? "b" : "w";
-                if (currentStm === myColor) {
-                    addDebugLog(`Move ${uci} unconfirmed after 700ms — resyncing board`);
-                    currentFEN = "";
-                    processPosition();
-                }
+    // Watchdog check at 800ms: if move truly failed and still our turn, resync
+    setTimeout(() => {
+        const boardElCheck = document.querySelector("wc-chess-board, chess-board, cg-board, .board");
+        if (!boardElCheck) return;
+        const checkPiece = findPieceElement(boardElCheck, fromFile, fromRank);
+        if (checkPiece && currentEngineMode === "autoplay" && !isSearchInFlight) {
+            const currentStm = lastDeterminedStm;
+            const myColor = flipBoard ? "b" : "w";
+            if (currentStm === myColor) {
+                addDebugLog(`Move ${uci} unconfirmed after 800ms — resyncing board`);
+                currentFEN = "";
+                processPosition();
             }
-        }, 700);
-
-        if (promotionChar) {
-            setTimeout(() => selectPromotion(promotionChar), 60);
         }
-    }, 70);
+    }, 800);
 
     return true;
 }
@@ -1149,30 +1187,75 @@ let moveCount = 0;
 function parseClockText(text) {
     if (!text) return null;
     try {
-        const lines = text.split(/[\n\s]+/).map(l => l.trim());
-        for (const line of lines) {
-            let match = line.match(/^(\d+):(\d{2})(?:\.(\d+))?$/);
-            if (match) {
-                return (parseInt(match[1], 10) * 60 + parseInt(match[2], 10)) * 1000 + (match[3] ? parseInt(match[3], 10) * (match[3].length === 1 ? 100 : 10) : 0);
-            }
-            match = line.match(/^(\d+)(?:\.(\d+))?$/);
-            if (match) {
-                const sec = parseInt(match[1], 10);
-                if (sec <= 60 || match[2]) {
-                    return sec * 1000 + (match[2] ? parseInt(match[2], 10) * (match[2].length === 1 ? 100 : 10) : 0);
-                }
-            }
+        // Remove extraneous zero-width characters or non-breaking spaces
+        const cleaned = text.replace(/[\u200B-\u200D\uFEFF]/g, '').replace(/\s*:\s*/g, ':').trim();
+        
+        // 1. Check for HH:MM:SS or H:MM:SS (e.g. 1:15:30)
+        const matchHms = cleaned.match(/(?:^|\s|[^\d:])(\d{1,2}):(\d{2}):(\d{2})(?:\.(\d+))?(?:$|\s|[^\d:])/);
+        if (matchHms) {
+            const h = parseInt(matchHms[1], 10);
+            const m = parseInt(matchHms[2], 10);
+            const s = parseInt(matchHms[3], 10);
+            const ms = matchHms[4] ? parseInt(matchHms[4], 10) * (matchHms[4].length === 1 ? 100 : 10) : 0;
+            return (h * 3600 + m * 60 + s) * 1000 + ms;
         }
+
+        // 2. Check for MM:SS or M:SS (e.g. 10:00, 9:45, 0:35)
+        const matchMs = cleaned.match(/(?:^|\s|[^\d:])(\d{1,2}):(\d{2})(?:\.(\d+))?(?:$|\s|[^\d:])/);
+        if (matchMs) {
+            const m = parseInt(matchMs[1], 10);
+            const s = parseInt(matchMs[2], 10);
+            const ms = matchMs[3] ? parseInt(matchMs[3], 10) * (matchMs[3].length === 1 ? 100 : 10) : 0;
+            return (m * 60 + s) * 1000 + ms;
+        }
+
+        // 3. Check for standalone seconds with decimals (e.g. "9.4", "0.8")
+        const matchSec = cleaned.match(/(?:^|\s|[^\d.])(\d{1,2})\.(\d+)(?:$|\s|[^\d.])/);
+        if (matchSec) {
+            const s = parseInt(matchSec[1], 10);
+            const ms = parseInt(matchSec[2], 10) * (matchSec[2].length === 1 ? 100 : 10);
+            return s * 1000 + ms;
+        }
+
+        // 4. Standalone integer seconds
+        const matchIntSec = cleaned.match(/(?:^|\s|[^\d])(\d{1,2})(?:s)?(?:$|\s|[^\d])/);
+        if (matchIntSec) {
+            const s = parseInt(matchIntSec[1], 10);
+            if (s <= 60) return s * 1000;
+        }
+
         return null;
     } catch (_) { return null; }
 }
 
 function getClocks() {
-    let myClock = document.querySelector(".clock-bottom .clock-time-monospaced, .clock-bottom.clock-component, [data-cy='clock-bottom'] .clock-time-monospaced, .clock-bottom, #board-layout-player-bottom .clock-time-monospaced, .rclock-bottom .time, .cg-clock-bottom");
-    let oppClock = document.querySelector(".clock-top .clock-time-monospaced, .clock-top.clock-component, [data-cy='clock-top'] .clock-time-monospaced, .clock-top, #board-layout-player-top .clock-time-monospaced, .rclock-top .time, .cg-clock-top");
+    let myClock = document.querySelector(
+        ".clock-bottom .clock-time-monospaced, " +
+        ".clock-bottom.clock-component, " +
+        "[data-cy='clock-bottom'] .clock-time-monospaced, " +
+        "[data-cy='clock-bottom'], " +
+        ".clock-bottom, " +
+        "#board-layout-player-bottom .clock-time-monospaced, " +
+        "#board-layout-player-bottom .clock-component, " +
+        ".player-component.player-bottom .clock-component, " +
+        ".rclock-bottom .time, .cg-clock-bottom"
+    );
+    let oppClock = document.querySelector(
+        ".clock-top .clock-time-monospaced, " +
+        ".clock-top.clock-component, " +
+        "[data-cy='clock-top'] .clock-time-monospaced, " +
+        "[data-cy='clock-top'], " +
+        ".clock-top, " +
+        "#board-layout-player-top .clock-time-monospaced, " +
+        "#board-layout-player-top .clock-component, " +
+        ".player-component.player-top .clock-component, " +
+        ".rclock-top .time, .cg-clock-top"
+    );
     
     if (!myClock || !oppClock) {
-        const allClocks = document.querySelectorAll(".clock-component .clock-time-monospaced, .clock-component, .clock-time-monospaced");
+        const allClocks = document.querySelectorAll(
+            ".clock-component .clock-time-monospaced, .clock-component, .clock-time-monospaced, [data-cy='clock-time']"
+        );
         if (allClocks && allClocks.length >= 2) {
             myClock = allClocks[allClocks.length - 1];
             oppClock = allClocks[0];
@@ -1181,8 +1264,8 @@ function getClocks() {
         }
     }
     
-    let my_ms = myClock ? parseClockText(myClock.innerText.trim()) : null;
-    let opp_ms = oppClock ? parseClockText(oppClock.innerText.trim()) : null;
+    let my_ms = myClock ? parseClockText(myClock.innerText || myClock.textContent || "") : null;
+    let opp_ms = oppClock ? parseClockText(oppClock.innerText || oppClock.textContent || "") : null;
     return { my_ms, opp_ms };
 }
 

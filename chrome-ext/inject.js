@@ -69,39 +69,45 @@ function findChessComGame(board) {
 function tryExecuteChessComMove(board, from, to, promotion, uci) {
     if (!board) return false;
 
-    // 1. Native game controller on Chess.com
-    const g = findChessComGame(board);
-    if (g) {
-        const moveOptions = [
-            { from, to, promotion: promotion || undefined, animate: false, userGenerated: true },
-            { from, to, promotion: promotion || undefined },
-            { from, to, promotion },
-            uci
-        ];
-        for (const opt of moveOptions) {
+    // Check for native user-move controller methods on Chess.com
+    // These methods (userMove / makeMove) broadcast the move packet to the live WebSocket server.
+    const candidates = [
+        board.controller,
+        board.game,
+        board._game,
+        window.chesscom?.game,
+        window.game,
+        board
+    ].filter(Boolean);
+
+    for (const c of candidates) {
+        if (typeof c.userMove === "function") {
             try {
-                const res = g.move(opt);
-                if (res !== false && res !== null && res !== undefined) {
-                    return true;
-                }
+                const res = c.userMove({ from, to, promotion: promotion || undefined });
+                if (res !== false && res !== null) return true;
+            } catch (_) {}
+            try {
+                const res = c.userMove(from, to, promotion || undefined);
+                if (res !== false && res !== null) return true;
+            } catch (_) {}
+        }
+        if (typeof c.makeMove === "function") {
+            try {
+                const res = c.makeMove({ from, to, promotion: promotion || undefined });
+                if (res !== false && res !== null) return true;
+            } catch (_) {}
+            try {
+                const res = c.makeMove(from, to, promotion || undefined);
+                if (res !== false && res !== null) return true;
             } catch (_) {}
         }
     }
 
-    // 2. Direct board methods
-    if (typeof board.movePiece === "function") {
-        try {
-            const res = board.movePiece(from, to);
-            if (res !== false && res !== null) return true;
-        } catch (_) {}
-    }
-    if (typeof board.makeMove === "function") {
-        try {
-            const res = board.makeMove(from, to);
-            if (res !== false && res !== null) return true;
-        } catch (_) {}
-    }
-
+    // Notice: We deliberately DO NOT call g.move(...) here.
+    // In Chess.com live games, g.move modifies the local UI/analysis model only,
+    // without notifying the WebSocket server, which causes online move desynchronization.
+    // By returning false, content.js executes the robust DOM pointer drag-and-drop sequence
+    // that Chess.com's web component natively responds to.
     return false;
 }
 
