@@ -221,8 +221,8 @@ function handleWorkerMessage(workerIndex, data) {
             workerStates[workerIndex] = { ready: true, failed: false };
             workersReady = workerStates.filter(s => s && s.ready).length;
             
-            // Distribute hash size across ready workers
-            const perWorkerHash = Math.max(1, Math.floor(activeHashSize / Math.max(1, workersReady)));
+            // Distribute hash size across ready workers (minimum 16MB per worker)
+            const perWorkerHash = Math.max(16, Math.floor(activeHashSize / Math.max(1, workersReady)));
             try {
                 workers[workerIndex].postMessage({
                     type: "SET_HASH_SIZE",
@@ -230,7 +230,7 @@ function handleWorkerMessage(workerIndex, data) {
                 });
             } catch (_) {}
 
-            log.info('Pool', `Worker #${workerIndex} ready (${workersReady}/${workers.length} ready)`);
+            log.info('Pool', `Worker #${workerIndex} ready (${workersReady}/${workers.length} ready) | hash=${perWorkerHash}MB`);
 
             // If a search was queued and at least one worker is ready, start it
             if (messageQueue && !activeSearchRunning && workersReady >= 1) {
@@ -315,22 +315,36 @@ function processSearch(message, searchId, abortFlag) {
     }
 
     const requestedCount = Math.max(1, message.activeWorkerCount || 1);
+
+    // Boot grace period: If workers were spawned to meet requestedCount and are currently booting,
+    // wait a short 180ms window so all requested workers can join the search together!
+    if (requestedCount > readyIndices.length && workers.length >= requestedCount && !message._bootWaited) {
+        message._bootWaited = true;
+        log.info('SMP', `Waiting 180ms for ${requestedCount - readyIndices.length} booting worker(s) to finish init...`);
+        setTimeout(() => {
+            if (!activeSearchRunning) {
+                processSearch(message, searchId, abortFlag);
+            }
+        }, 180);
+        return;
+    }
+
     const workersToUse = Math.min(MAX_WORKERS, requestedCount, readyIndices.length);
     activeSelectedIndices = readyIndices.slice(0, workersToUse);
     activeWorkersCount = activeSelectedIndices.length;
 
     const targetSearchMs = message.searchTimeMs || (message.my_ms && message.my_ms > 0 ? Math.min(7500, Math.round(message.my_ms / 35)) : 2200);
     const maxSearchMs = message.maxTimeMs || Math.round(targetSearchMs * 1.35);
-    const failsafeMs = Math.round(maxSearchMs + 800);
+    const failsafeMs = Math.max(4500, Math.round(maxSearchMs + 2500));
 
-    log.info('SMP', `Starting search #${searchId} | workers=${activeWorkersCount} elo=${message.elo} target=${targetSearchMs}ms max=${maxSearchMs}ms failsafe=${failsafeMs}ms`);
+    log.info('SMP', `Starting search #${searchId} | workers=${activeWorkersCount}/${requestedCount} elo=${message.elo} target=${targetSearchMs}ms max=${maxSearchMs}ms failsafe=${failsafeMs}ms`);
     log.debug('SMP', `FEN: ${(message.fen || '').substring(0, 50)}...`);
 
     activeFailsafeTimer = setTimeout(() => {
         if (activeSearchRunning && !activeSearchCompleted) {
             log.warn('SMP', `⏱️ Failsafe timeout fired (${failsafeMs}ms). Responded: ${activeCompletedWorkers}/${activeWorkersCount}. Finalizing to protect clock.`);
-            if (activeCompletedWorkers === 0) {
-                restartWorkerPool();
+            if (abortFlag) {
+                try { abortFlag[0] = 1; } catch (_) {}
             }
             finalizeActiveSearch();
         }
@@ -483,6 +497,19 @@ function finalizeActiveSearch() {
 
 if (typeof chrome !== "undefined" && chrome.runtime?.onMessage) {
     chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+        if (message.type === "CONFIGURE_POOL") {
+            const target = Math.min(MAX_WORKERS, Math.max(1, message.targetWorkers || 2));
+            if (message.hashSize) {
+                activeHashSize = message.hashSize;
+                const perWorkerHash = Math.max(16, Math.floor(activeHashSize / Math.max(1, workersReady || 1)));
+                for (const w of workers) {
+                    try { w.postMessage({ type: "SET_HASH_SIZE", size: perWorkerHash }); } catch (_) {}
+                }
+            }
+            initWorkers(target);
+            return false;
+        }
+
         if (message.type !== "START_SMP_SEARCH") return false;
 
         startEngineSearch(message, sendResponse);

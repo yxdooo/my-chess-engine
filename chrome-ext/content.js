@@ -45,7 +45,7 @@ const log = {
 
 log.info('Content', 'Logger initialized');
 
-const AETHER_VERSION = "2.4.13";
+const AETHER_VERSION = "2.4.14";
 
 /** @type {string} The last FEN position that was sent for analysis. */
 let currentFEN = "";
@@ -76,6 +76,38 @@ let lastDeterminedStm = "w";
 let recentDebugLogs = [];
 let lastExecutedMove = null;
 let lastEngineStats = null;
+let forceMyTurnOnce = false;
+let gameInitialTimeMs = null;
+let detectedGameMode = "Auto";
+
+function updateGameModeFromClock(my_ms, opp_ms) {
+    const candidateTime = Math.max(my_ms || 0, opp_ms || 0);
+    if (candidateTime > 0) {
+        if (gameInitialTimeMs === null || (candidateTime > gameInitialTimeMs && candidateTime - gameInitialTimeMs > 60000)) {
+            gameInitialTimeMs = candidateTime;
+        }
+        if (gameInitialTimeMs <= 90000) {
+            detectedGameMode = "Bullet (" + Math.round(gameInitialTimeMs / 60000) + "m)";
+        } else if (gameInitialTimeMs <= 300000) {
+            detectedGameMode = "Blitz (" + Math.round(gameInitialTimeMs / 60000) + "m)";
+        } else if (gameInitialTimeMs <= 900000) {
+            detectedGameMode = "Rapid (" + Math.round(gameInitialTimeMs / 60000) + "m)";
+        } else {
+            detectedGameMode = "Classical (" + Math.round(gameInitialTimeMs / 60000) + "m)";
+        }
+    } else if (gameInitialTimeMs === null) {
+        detectedGameMode = "Bot / Untimed";
+    }
+}
+
+function getFormattedClock() {
+    const c = getClocks();
+    if (!c.my_ms) return "--:--";
+    const totalSec = Math.floor(c.my_ms / 1000);
+    const m = Math.floor(totalSec / 60);
+    const s = totalSec % 60;
+    return `${m}:${s < 10 ? '0' : ''}${s}`;
+}
 
 function addDebugLog(msg) {
     const time = new Date().toTimeString().slice(0, 8);
@@ -153,6 +185,12 @@ function renderDebugHUD() {
                     </div>
                 </div>
 
+                <!-- Game Mode & Time Row -->
+                <div style="background: rgba(15, 23, 42, 0.6); border: 1px solid #334155; border-radius: 6px; padding: 4px 8px; font-size: 10px; display: flex; justify-content: space-between; align-items: center;">
+                    <span style="color: #38bdf8; font-weight: 600;">⏱️ ${detectedGameMode}</span>
+                    <span style="color: #94a3b8;">Clock: <strong style="color: #f8fafc;">${getFormattedClock()}</strong>${inferredIncMs > 500 ? ` (+${Math.round(inferredIncMs/1000)}s)` : ''}</span>
+                </div>
+
                 <!-- Engine Stats -->
                 <div style="background: rgba(30, 41, 59, 0.4); border-radius: 6px; padding: 6px 8px; font-size: 10px; color: #cbd5e1;">
                     <div style="display: flex; justify-content: space-between; margin-bottom: 2px;">
@@ -196,6 +234,7 @@ function renderDebugHUD() {
     if (forceBtn) {
         forceBtn.onclick = () => {
             addDebugLog("User triggered [Force Move]");
+            forceMyTurnOnce = true;
             isSearchInFlight = false;
             currentFEN = "";
             processPosition();
@@ -211,6 +250,8 @@ function renderDebugHUD() {
                 lastDeterminedStm,
                 isMyTurn,
                 flipBoard,
+                detectedGameMode,
+                inferredIncMs,
                 engineMode: currentEngineMode,
                 lastEngineStats,
                 lastExecutedMove,
@@ -867,34 +908,149 @@ function parseBoard() {
         if (r > 0) fenPlacement += "/";
     }
 
-    // Determine side to move using board highlights, active clocks, and move list
-    let maxPly = 0;
-    document.querySelectorAll("[data-ply]").forEach((el) => {
-        const p = parseInt(el.getAttribute("data-ply"), 10);
-        if (!isNaN(p) && p > maxPly) maxPly = p;
-    });
+    // =========================================================================
+    // MULTI-TIERED DETERMINISTIC SIDE-TO-MOVE (STM) RESOLUTION
+    // =========================================================================
+    let stm = "w";
+    let highlightDetermined = false;
 
-    const moveNodes = document.querySelectorAll(
-        "wc-move-list .node:not(.icon-font-chess), .move-list-item .node, l4x rm, l4x u32"
-    );
+    // Check DOM board orientation attribute to be 100% sure of my color
+    let boardColor = flipBoard ? "b" : "w";
+    if (boardEl) {
+        const orient = boardEl.getAttribute("board-orientation") || boardEl.getAttribute("data-orientation");
+        if (orient === "black") boardColor = "b";
+        else if (orient === "white") boardColor = "w";
+    }
 
+    // Tier 1: User explicitly clicked [Force Move] -> Force user's turn!
+    if (forceMyTurnOnce) {
+        stm = boardColor;
+        highlightDetermined = true;
+        forceMyTurnOnce = false;
+        addDebugLog(`⚡ Force Move applied: forcing turn to ${stm.toUpperCase()}`);
+    }
+
+    // Tier 2: Check for starting position with no moves played yet
     const isStartPos = board[4] === "K" && board[60] === "k" &&
                        board[0] === "R" && board[7] === "R" &&
                        board[56] === "r" && board[63] === "r" &&
                        board[8] === "P" && board[15] === "P" &&
                        board[48] === "p" && board[55] === "p";
 
-    let stm = "w";
-    let highlightDetermined = false;
+    let maxPly = -1;
+    document.querySelectorAll("[data-ply]").forEach((el) => {
+        const p = parseInt(el.getAttribute("data-ply"), 10);
+        if (!isNaN(p) && p > maxPly) maxPly = p;
+    });
 
-    if (isStartPos) {
+    const moveNodes = document.querySelectorAll(
+        "wc-move-list .node:not(.icon-font-chess), .move-list-item .node, .vertical-move-list .node, l4x rm, l4x u32, .moves move"
+    );
+
+    if (!highlightDetermined && isStartPos && maxPly < 0 && moveNodes.length === 0) {
         stm = "w";
         highlightDetermined = true;
     }
 
-    // Layer 2: Board State Diffing (Physical piece movement tracking between ticks)
-    // Whenever pieces move, the color of the arriving piece reveals who just moved!
-    if (!highlightDetermined && prevBoardArray) {
+    // Tier 3: Ground-Truth Move List / Ply Count
+    // In chess:
+    // data-ply on Chess.com is 0-indexed:
+    // - ply 0 = 1. d4 (White moved) -> Next is Black ('b')
+    // - ply 1 = 1... Nf6 (Black moved) -> Next is White ('w')
+    // - ply 23 = 12... Nb4 (Black moved) -> Next is White ('w')
+    // Formula for 0-indexed data-ply: (maxPly % 2 === 0) ? 'b' : 'w'
+    // Formula for move list count: (moveCount % 2 === 1) ? 'b' : 'w'
+    let moveListStm = null;
+    if (maxPly >= 0) {
+        moveListStm = (maxPly % 2 === 0) ? "b" : "w";
+    } else if (moveNodes && moveNodes.length > 0) {
+        moveListStm = (moveNodes.length % 2 === 1) ? "b" : "w";
+    } else {
+        const allMoves = document.querySelectorAll(
+            "wc-move-list .move, wc-move-list .node, .move-list .move, .vertical-move-list .move, .rmoves .move, [data-ply]"
+        );
+        if (allMoves && allMoves.length > 0) {
+            moveListStm = (allMoves.length % 2 === 1) ? "b" : "w";
+        }
+    }
+
+    // Tier 4: Active Running Clock Detection (Visual clock glow / active class)
+    let clockStm = null;
+    try {
+        const bottomClock = document.querySelector(
+            ".clock-bottom, [data-cy='clock-bottom'], #board-layout-player-bottom, .player-bottom .clock-component, .rclock-bottom"
+        );
+        const topClock = document.querySelector(
+            ".clock-top, [data-cy='clock-top'], #board-layout-player-top, .player-top .clock-component, .rclock-top"
+        );
+        const isBottomActive = bottomClock && (
+            bottomClock.classList.contains("clock-player-turn") ||
+            bottomClock.classList.contains("running") ||
+            bottomClock.classList.contains("clock-running") ||
+            bottomClock.querySelector(".clock-player-turn, .running, .clock-running, [class*='player-turn'], [class*='active']") !== null
+        );
+        const isTopActive = topClock && (
+            topClock.classList.contains("clock-player-turn") ||
+            topClock.classList.contains("running") ||
+            topClock.classList.contains("clock-running") ||
+            topClock.querySelector(".clock-player-turn, .running, .clock-running, [class*='player-turn'], [class*='active']") !== null
+        );
+        if (isBottomActive && !isTopActive) {
+            clockStm = boardColor;
+        } else if (isTopActive && !isBottomActive) {
+            clockStm = boardColor === "w" ? "b" : "w";
+        }
+    } catch (_) {}
+
+    // Tier 5: Board Highlight Squares (.highlight on Chess.com, square.last-move on Lichess)
+    let highlightStm = null;
+    try {
+        const hlEls = boardEl.querySelectorAll(".highlight, square.last-move");
+        if (hlEls && hlEls.length >= 2) {
+            const hlSquares = [];
+            hlEls.forEach((el) => {
+                el.classList.forEach((cls) => {
+                    let f = -1, r = -1;
+                    const m1 = cls.match(/^square-([a-h])([1-8])$/);
+                    if (m1) {
+                        f = m1[1].charCodeAt(0) - 97;
+                        r = parseInt(m1[2], 10) - 1;
+                    }
+                    const m2 = cls.match(/^square-(\d)(\d)$/);
+                    if (m2) {
+                        f = parseInt(m2[1], 10) - 1;
+                        r = parseInt(m2[2], 10) - 1;
+                    }
+                    if (f >= 0 && f <= 7 && r >= 0 && r <= 7) {
+                        const sq = r * 8 + f;
+                        if (!hlSquares.includes(sq)) hlSquares.push(sq);
+                    }
+                });
+            });
+
+            const emptyHls = hlSquares.filter((sq) => board[sq] === null);
+            const pieceHls = hlSquares.filter((sq) => board[sq] !== null);
+
+            if (emptyHls.length >= 1 && pieceHls.length >= 1) {
+                let movedPiece = null;
+                if (pieceHls.length === 1) {
+                    movedPiece = board[pieceHls[0]];
+                } else {
+                    const nonKings = pieceHls.filter((sq) => board[sq] !== "K" && board[sq] !== "k");
+                    movedPiece = nonKings.length > 0 ? board[nonKings[0]] : board[pieceHls[0]];
+                }
+
+                if (movedPiece) {
+                    const isWhiteMoved = movedPiece >= "A" && movedPiece <= "Z";
+                    highlightStm = isWhiteMoved ? "b" : "w";
+                }
+            }
+        }
+    } catch (_) {}
+
+    // Tier 6: Physical Piece Arrived Diffing (Piece appeared between 100ms ticks)
+    let diffStm = null;
+    if (prevBoardArray) {
         let arrivedPieces = [];
         let vacatedPieces = [];
         for (let i = 0; i < 64; i++) {
@@ -907,131 +1063,41 @@ function parseBoard() {
         }
 
         if (arrivedPieces.length > 0) {
-            const wArrived = arrivedPieces.filter(p => p >= "A" && p <= "Z").length;
-            const bArrived = arrivedPieces.filter(p => p >= "a" && p <= "z").length;
+            const wArrived = arrivedPieces.filter((p) => p >= "A" && p <= "Z").length;
+            const bArrived = arrivedPieces.filter((p) => p >= "a" && p <= "z").length;
             if (wArrived > 0 && bArrived === 0) {
-                // White piece moved -> Black's turn ('b')
-                stm = "b";
-                highlightDetermined = true;
+                diffStm = "b";
             } else if (bArrived > 0 && wArrived === 0) {
-                // Black piece moved -> White's turn ('w')
-                stm = "w";
-                highlightDetermined = true;
+                diffStm = "w";
             } else if (wArrived > 0 && bArrived > 0) {
-                // Castling or promotion/capture
-                const wVac = vacatedPieces.filter(p => p >= "A" && p <= "Z").length;
-                const bVac = vacatedPieces.filter(p => p >= "a" && p <= "z").length;
-                stm = wVac > bVac ? "b" : "w";
-                highlightDetermined = true;
+                const wVac = vacatedPieces.filter((p) => p >= "A" && p <= "Z").length;
+                const bVac = vacatedPieces.filter((p) => p >= "a" && p <= "z").length;
+                diffStm = wVac > bVac ? "b" : "w";
             }
-        } else if (vacatedPieces.length === 0) {
-            // Exactly zero board changes -> preserve previous determined turn!
-            stm = lastDeterminedStm;
+        }
+    }
+
+    // Combine Tiers with Priority:
+    if (!highlightDetermined) {
+        if (moveListStm) {
+            stm = moveListStm;
             highlightDetermined = true;
-        }
-    }
-
-    // Layer 3: Board square highlights (.highlight on Chess.com, square.last-move on Lichess)
-    // Whenever a move is completed, the origin square is empty, and the destination square contains the moved piece!
-    if (!highlightDetermined) {
-        try {
-            const hlEls = boardEl.querySelectorAll(".highlight, square.last-move");
-            if (hlEls && hlEls.length >= 2) {
-                const hlSquares = [];
-                hlEls.forEach((el) => {
-                    el.classList.forEach((cls) => {
-                        let f = -1, r = -1;
-                        const m1 = cls.match(/^square-([a-h])([1-8])$/);
-                        if (m1) {
-                            f = m1[1].charCodeAt(0) - 97;
-                            r = parseInt(m1[2], 10) - 1;
-                        }
-                        const m2 = cls.match(/^square-(\d)(\d)$/);
-                        if (m2) {
-                            f = parseInt(m2[1], 10) - 1;
-                            r = parseInt(m2[2], 10) - 1;
-                        }
-                        if (f >= 0 && f <= 7 && r >= 0 && r <= 7) {
-                            const sq = r * 8 + f;
-                            if (!hlSquares.includes(sq)) hlSquares.push(sq);
-                        }
-                    });
-                });
-
-                const emptyHls = hlSquares.filter(sq => board[sq] === null);
-                const pieceHls = hlSquares.filter(sq => board[sq] !== null);
-
-                if (emptyHls.length >= 1 && pieceHls.length >= 1) {
-                    let movedPiece = null;
-                    if (pieceHls.length === 1) {
-                        movedPiece = board[pieceHls[0]];
-                    } else {
-                        // In check situations, king in check is also highlighted.
-                        // Filter for non-king piece, or use the piece that isn't the defender king.
-                        const nonKings = pieceHls.filter(sq => board[sq] !== "K" && board[sq] !== "k");
-                        if (nonKings.length > 0) {
-                            movedPiece = board[nonKings[0]];
-                        } else {
-                            movedPiece = board[pieceHls[0]];
-                        }
-                    }
-
-                    if (movedPiece) {
-                        const isWhiteMoved = movedPiece >= "A" && movedPiece <= "Z";
-                        stm = isWhiteMoved ? "b" : "w";
-                        highlightDetermined = true;
-                    }
-                }
-            }
-        } catch (_) {}
-    }
-
-    if (!highlightDetermined) {
-        // Fallback 1: Active clock detection (the ticking clock belongs to the player whose turn it is)
-        try {
-            const bottomClock = document.querySelector(".clock-bottom, [data-cy='clock-bottom'], #board-layout-player-bottom");
-            const topClock = document.querySelector(".clock-top, [data-cy='clock-top'], #board-layout-player-top");
-            const isBottomActive = bottomClock && (
-                bottomClock.classList.contains("clock-player-turn") ||
-                bottomClock.classList.contains("running") ||
-                bottomClock.querySelector(".clock-player-turn, .running, .clock-running") !== null
-            );
-            const isTopActive = topClock && (
-                topClock.classList.contains("clock-player-turn") ||
-                topClock.classList.contains("running") ||
-                topClock.querySelector(".clock-player-turn, .running, .clock-running") !== null
-            );
-            if (isBottomActive && !isTopActive) {
-                stm = flipBoard ? "b" : "w";
-                highlightDetermined = true;
-            } else if (isTopActive && !isBottomActive) {
-                stm = flipBoard ? "w" : "b";
-                highlightDetermined = true;
-            }
-        } catch (_) {}
-    }
-
-    if (!highlightDetermined) {
-        // Fallback 2: Move list / data-ply count
-        if (maxPly > 0) {
-            stm = maxPly % 2 === 1 ? "b" : "w";
-        } else if (moveNodes && moveNodes.length > 0) {
-            stm = moveNodes.length % 2 === 1 ? "b" : "w";
+        } else if (clockStm) {
+            stm = clockStm;
+            highlightDetermined = true;
+        } else if (diffStm) {
+            stm = diffStm;
+            highlightDetermined = true;
+        } else if (highlightStm) {
+            stm = highlightStm;
+            highlightDetermined = true;
         } else {
-            const allMoves = document.querySelectorAll(
-                "wc-move-list .move, wc-move-list .node, " +
-                ".move-list .move, .vertical-move-list .move, " +
-                ".rmoves .move, [data-ply]"
-            );
-            if (allMoves.length > 0) {
-                stm = allMoves.length % 2 === 1 ? "b" : "w";
-            }
+            // Unchanged stationary board: preserve last known STM
+            stm = lastDeterminedStm;
         }
     }
 
-    // Keep maxPly synchronized with physical board stm
-    if (stm === "w" && maxPly % 2 === 1) maxPly++;
-    if (stm === "b" && maxPly % 2 === 0 && maxPly > 0) maxPly++;
+    const calculatedPly = maxPly >= 0 ? maxPly + 1 : (moveNodes ? moveNodes.length : 0);
 
     // Reset persistent tracking ONLY if a new starting position is detected
     if (isStartPos) {
@@ -1162,7 +1228,7 @@ function parseBoard() {
 
     lastDeterminedStm = stm;
     prevBoardArray = [...board];
-    const fullmove = Math.max(1, Math.floor(maxPly / 2) + 1);
+    const fullmove = Math.max(1, Math.floor(calculatedPly / 2) + 1);
 
     return `${fenPlacement} ${stm} ${castling} ${epSquare} ${halfmoveClock} ${fullmove}`;
     } catch (e) {
@@ -1424,6 +1490,8 @@ function processPosition(networkFen = null) {
 
     
     const clocks = getClocks();
+    updateGameModeFromClock(clocks.my_ms, clocks.opp_ms);
+
     if (clocks.my_ms !== null && lastMyTime !== null && clocks.my_ms > lastMyTime) {
         let diff = clocks.my_ms - lastMyTime;
         if (diff > 0 && diff < 30000) {
@@ -1454,6 +1522,8 @@ function processPosition(networkFen = null) {
                 my_ms: clocks.my_ms !== null ? clocks.my_ms : 0,
                 opp_ms: clocks.opp_ms !== null ? clocks.opp_ms : 0,
                 inc_ms: inferredIncMs,
+                gameMode: detectedGameMode,
+                initialTimeMs: gameInitialTimeMs,
                 isMyTurn,
                 history: historyStr,
             },

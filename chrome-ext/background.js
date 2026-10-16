@@ -223,8 +223,15 @@ function computeEngineTime(timeLeft, elo, increment = 0) {
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (message.type === "START_ENGINE") {
-        log.info('Background', 'Received START_ENGINE message');
-        setupOffscreenDocument("offscreen.html");
+        log.info('Background', 'Received START_ENGINE message', { targetWorkers: message.targetWorkers, hashSize: message.hashSize });
+        chrome.storage.local.set({ isActive: true });
+        setupOffscreenDocument("offscreen.html").then(() => {
+            chrome.runtime.sendMessage({
+                type: "CONFIGURE_POOL",
+                targetWorkers: message.targetWorkers,
+                hashSize: message.hashSize
+            }).catch(() => {});
+        });
         return false;
     }
 
@@ -253,12 +260,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                 const my_ms = message.my_ms || 0;
                 const opp_ms = message.opp_ms || 0;
                 const inc_ms = message.inc_ms || 0;
+                const gameMode = message.gameMode || "";
                 const movesToGo = 0;
 
                 const normFen      = normalizeFen(message.fen);
                 const pieceCount   = normFen.split(' ')[0].replace(/[\/0-9]/g, '').length;
 
-                log.info('Background', `NEW_POSITION received: turn=${message.isMyTurn} clock=${message.timeLeft}s my_ms=${my_ms}ms speed=${searchSpeed} pieces=${pieceCount}`);
+                log.info('Background', `NEW_POSITION received: turn=${message.isMyTurn} clock=${message.timeLeft}s my_ms=${my_ms}ms mode=${gameMode} speed=${searchSpeed} workers=${workerCount} hash=${hashSize}MB pieces=${pieceCount}`);
                 log.debug('Background', `FEN: ${message.fen}`);
 
                 const fallbackToEngine = () => {
@@ -272,7 +280,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                     }
 
                     // Directly dispatch to offscreen SMP engine — utilizes embedded Polyglot master book and SF14 NNUE
-                    callOffscreenEngine(message.fen, my_ms, opp_ms, inc_ms, movesToGo, elo, workerCount, message.isMyTurn, message.history, hashSize, sendResponse, searchSpeed);
+                    callOffscreenEngine(message.fen, my_ms, opp_ms, inc_ms, movesToGo, elo, workerCount, message.isMyTurn, message.history, hashSize, sendResponse, searchSpeed, gameMode);
                 };
 
                 if (pieceCount <= 7) {
@@ -329,64 +337,70 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     }
 });
 
-function calculateSearchBudget(my_ms, inc_ms, speedMode = "auto") {
+function calculateSearchBudget(my_ms, inc_ms, speedMode = "auto", gameMode = "") {
     const inc = inc_ms || 0;
 
     // Explicit user speed presets
     if (speedMode === "bullet") {
-        return { searchTimeMs: 400, maxTimeMs: 650 };
+        return { searchTimeMs: 400, maxTimeMs: 700 };
     }
     if (speedMode === "blitz") {
-        return { searchTimeMs: 1800, maxTimeMs: 2500 };
+        return { searchTimeMs: 2000, maxTimeMs: 3000 };
     }
     if (speedMode === "rapid") {
-        return { searchTimeMs: 6000, maxTimeMs: 8500 };
+        return { searchTimeMs: 6500, maxTimeMs: 9000 };
     }
     if (speedMode === "untimed") {
-        return { searchTimeMs: 3000, maxTimeMs: 4500 };
+        return { searchTimeMs: 3200, maxTimeMs: 4800 };
     }
 
-    // Auto-adaptive calculation
+    // Auto-adaptive calculation:
+    // If no clock info (e.g. Chess.com Bot games, puzzles, untimed):
     if (!my_ms || my_ms <= 0) {
-        // Untimed game (e.g. Chess.com Play vs Bot, puzzles)
-        // 2,200ms allows reaching depth 16-19 with 6M-15M nodes on modern multi-worker WASM.
-        // Crushes 2600-2700 GM bots without blundering or lagging the UI.
-        return { searchTimeMs: 2200, maxTimeMs: 3200 };
+        // 2800ms gives depth 17-20 with 8M-16M nodes on modern multi-worker WASM.
+        // Crushes 2600-2700 GM bots with precision.
+        return { searchTimeMs: 2800, maxTimeMs: 4200 };
     }
 
-    // Hyper-bullet / Time scramble (<= 25s remaining)
-    if (my_ms <= 25000) {
-        const target = Math.min(300, Math.max(100, (my_ms / 30) + inc * 0.7));
+    // Panic / Hyper-bullet / Time scramble (<= 15s remaining)
+    if (my_ms <= 15000) {
+        const target = Math.min(250, Math.max(80, (my_ms / 25) + inc * 0.6));
         return { searchTimeMs: Math.round(target), maxTimeMs: Math.round(target * 1.25) };
     }
 
-    // Bullet (25s - 65s)
-    if (my_ms <= 65000) {
-        const target = Math.min(800, Math.max(250, (my_ms / 32) + inc * 0.75));
+    // Time scramble (15s - 35s remaining)
+    if (my_ms <= 35000) {
+        const target = Math.min(500, Math.max(180, (my_ms / 28) + inc * 0.7));
         return { searchTimeMs: Math.round(target), maxTimeMs: Math.round(target * 1.3) };
     }
 
-    // Fast Blitz (1 min - 3 min)
+    // Bullet (35s - 75s)
+    if (my_ms <= 75000) {
+        const target = Math.min(950, Math.max(300, (my_ms / 32) + inc * 0.75));
+        return { searchTimeMs: Math.round(target), maxTimeMs: Math.round(target * 1.3) };
+    }
+
+    // Fast Blitz (1m 15s - 3m)
     if (my_ms <= 180000) {
-        const target = Math.min(2200, Math.max(700, (my_ms / 35) + inc * 0.8));
+        const target = Math.min(2400, Math.max(800, (my_ms / 35) + inc * 0.8));
         return { searchTimeMs: Math.round(target), maxTimeMs: Math.round(target * 1.35) };
     }
 
-    // Blitz (3 min - 5 min)
+    // Blitz (3m - 5m)
     if (my_ms <= 300000) {
-        const target = Math.min(3800, Math.max(1200, (my_ms / 38) + inc * 0.8));
+        const target = Math.min(4000, Math.max(1400, (my_ms / 38) + inc * 0.8));
         return { searchTimeMs: Math.round(target), maxTimeMs: Math.round(target * 1.35) };
     }
 
-    // Rapid (5 min - 10 min)
-    // In 10-minute games, allocates 4.5s - 8s per move, exploring depth 18-22 with millions of nodes.
+    // Rapid (5m - 10m)
+    // In a 10-minute game, 5s - 8s per move lets the engine search 18-22 ply deep
     if (my_ms <= 600000) {
-        const target = Math.min(7500, Math.max(2500, (my_ms / 40) + inc * 0.85));
+        const target = Math.min(8000, Math.max(3000, (my_ms / 40) + inc * 0.85));
         return { searchTimeMs: Math.round(target), maxTimeMs: Math.round(target * 1.4) };
     }
 
     // Classical (> 10 min)
-    const target = Math.min(12000, Math.max(4000, (my_ms / 45) + inc * 0.85));
+    const target = Math.min(12000, Math.max(4500, (my_ms / 45) + inc * 0.85));
     return { searchTimeMs: Math.round(target), maxTimeMs: Math.round(target * 1.4) };
 }
 
@@ -402,10 +416,11 @@ function callOffscreenEngine(
     history,
     hashSize,
     sendResponse,
-    searchSpeed = "auto"
+    searchSpeed = "auto",
+    gameMode = ""
 ) {
     resetOffscreenIdleTimeout();
-    const budget = calculateSearchBudget(my_ms, inc_ms, searchSpeed);
+    const budget = calculateSearchBudget(my_ms, inc_ms, searchSpeed, gameMode);
 
     setupOffscreenDocument("offscreen.html").then(() => {
         let responded = false;
@@ -415,7 +430,7 @@ function callOffscreenEngine(
                 log.warn('Background', 'Offscreen document timed out — falling back to single worker');
                 runFallbackWorker(fen, my_ms, opp_ms, inc_ms, movesToGo, elo, history, hashSize, isMyTurn, sendResponse, workerCount);
             }
-        }, (budget.maxTimeMs || 650) + 1200);
+        }, Math.max(5000, (budget.maxTimeMs || 2500) + 3000));
 
         chrome.runtime.sendMessage(
             {
