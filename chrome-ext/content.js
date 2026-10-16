@@ -45,7 +45,7 @@ const log = {
 
 log.info('Content', 'Logger initialized');
 
-const AETHER_VERSION = "2.4.7";
+const AETHER_VERSION = "2.4.8";
 
 /** @type {string} The last FEN position that was sent for analysis. */
 let currentFEN = "";
@@ -477,34 +477,65 @@ function findSquareElement(boardEl, file, rank) {
     );
 }
 
-function simulateDrag(fromX, fromY, toX, toY, fromElTarget = null, toElTarget = null) {
-    const fromEl = fromElTarget || document.elementFromPoint(fromX, fromY);
-    if (!fromEl) return;
-    const evtInitFrom = { bubbles: true, cancelable: true, view: window, clientX: fromX, clientY: fromY, button: 0, buttons: 1 };
-    const evtInitTo = { bubbles: true, cancelable: true, view: window, clientX: toX, clientY: toY, button: 0, buttons: 1 };
-    const evtInitUp = { bubbles: true, cancelable: true, view: window, clientX: toX, clientY: toY, button: 0, buttons: 0 };
+function dispatchPointEvent(el, type, x, y, buttons = 0) {
+    if (!el) return;
+    const init = {
+        bubbles: true,
+        cancelable: true,
+        composed: true,
+        view: window,
+        clientX: x,
+        clientY: y,
+        button: 0,
+        buttons: buttons,
+        pointerId: 1,
+        pointerType: "mouse",
+        isPrimary: true,
+        width: 1,
+        height: 1,
+        pressure: buttons > 0 ? 0.5 : 0
+    };
+    el.dispatchEvent(new PointerEvent(type, init));
+    const mType = type.replace("pointer", "mouse");
+    el.dispatchEvent(new MouseEvent(mType, init));
+}
 
-    fromEl.dispatchEvent(new PointerEvent("pointerdown", evtInitFrom));
-    fromEl.dispatchEvent(new MouseEvent("mousedown", evtInitFrom));
-    
-    // Add a tiny async delay so React DND / Chess.com can register the drag start
+function executeDOMMove(boardEl, fromX, fromY, toX, toY, fromPieceEl, toSquareEl) {
+    const fromTarget = fromPieceEl || boardEl;
+    const toTarget = toSquareEl || document.elementFromPoint(toX, toY) || boardEl;
+
+    // 1. Pointer Down at source square
+    dispatchPointEvent(fromTarget, "pointerdown", fromX, fromY, 1);
+    if (fromTarget !== boardEl) {
+        dispatchPointEvent(boardEl, "pointerdown", fromX, fromY, 1);
+    }
+
+    // 2. Drag motion
     setTimeout(() => {
-        window.dispatchEvent(new PointerEvent("pointermove", evtInitTo));
-        window.dispatchEvent(new MouseEvent("mousemove", evtInitTo));
-        fromEl.dispatchEvent(new PointerEvent("pointermove", evtInitTo));
-        fromEl.dispatchEvent(new MouseEvent("mousemove", evtInitTo));
-        
+        dispatchPointEvent(window, "pointermove", toX, toY, 1);
+        dispatchPointEvent(boardEl, "pointermove", toX, toY, 1);
+
+        // 3. Pointer Up & Drop at destination
         setTimeout(() => {
-            const toEl = toElTarget || document.elementFromPoint(toX, toY) || fromEl;
-            toEl.dispatchEvent(new PointerEvent("pointerup", evtInitUp));
-            toEl.dispatchEvent(new MouseEvent("mouseup", evtInitUp));
-            document.dispatchEvent(new PointerEvent("pointerup", evtInitUp));
-            document.dispatchEvent(new MouseEvent("mouseup", evtInitUp));
-            window.dispatchEvent(new PointerEvent("pointerup", evtInitUp));
-            window.dispatchEvent(new MouseEvent("mouseup", evtInitUp));
-            toEl.dispatchEvent(new MouseEvent("click", evtInitUp));
-        }, 15);
-    }, 15);
+            dispatchPointEvent(toTarget, "pointerup", toX, toY, 0);
+            if (toTarget !== boardEl) {
+                dispatchPointEvent(boardEl, "pointerup", toX, toY, 0);
+            }
+            dispatchPointEvent(window, "pointerup", toX, toY, 0);
+
+            // 4. Click confirmation on destination
+            toTarget.dispatchEvent(new MouseEvent("click", {
+                bubbles: true,
+                cancelable: true,
+                composed: true,
+                view: window,
+                clientX: toX,
+                clientY: toY,
+                button: 0,
+                buttons: 0
+            }));
+        }, 20);
+    }, 20);
 }
 
 /**
@@ -557,7 +588,8 @@ function selectPromotion(promotionChar) {
 }
 
 /**
- * Plays a move on the board by simulating the mouse clicks a user would make.
+ * Plays a move on the board by invoking the native game controller (MAIN world)
+ * or dispatching resilient mouse/pointer events (DOM fallback).
  * Supports Chess.com (wc-chess-board / chess-board) and Lichess (cg-board).
  *
  * @param {string} uci - UCI move string, e.g. "e2e4" or "e7e8q" (promotion).
@@ -574,16 +606,37 @@ function playMove(uci) {
 
     if (fromFile < 0 || fromFile > 7 || fromRank < 0 || fromRank > 7 || toFile < 0 || toFile > 7 || toRank < 0 || toRank > 7) return false;
 
-    const boardEl = document.querySelector("wc-chess-board, chess-board, cg-board");
+    const boardEl = document.querySelector("wc-chess-board, chess-board, cg-board, .board");
     if (!boardEl) return false;
+
+    const fromSq = uci.slice(0, 2);
+    const toSq = uci.slice(2, 4);
 
     lastExecutedMove = uci;
     addDebugLog(`Autoplay executing: ${uci}`);
 
-    const reactionDelay = currentEngineMode === "autoplay" ? 5 : 50 + Math.floor(Math.random() * 50);
+    // Fast-path 1: Request native controller execution in MAIN world (Chess.com)
+    window.postMessage({
+        type: "AETHER_PLAY_MOVE",
+        uci,
+        from: fromSq,
+        to: toSq,
+        promotion: promotionChar || undefined
+    }, "*");
+
+    // Path 2: DOM-based Pointer and Click execution (immediate for Lichess or fallback)
+    const reactionDelay = currentEngineMode === "autoplay" ? 10 : 50 + Math.floor(Math.random() * 40);
     setTimeout(() => {
-        const boardElNow = document.querySelector("wc-chess-board, chess-board, cg-board");
+        const boardElNow = document.querySelector("wc-chess-board, chess-board, cg-board, .board");
         if (!boardElNow) return;
+
+        // If native controller already moved the piece (piece no longer on source square), skip DOM events!
+        const initialPiece = findPieceElement(boardElNow, fromFile, fromRank);
+        if (!initialPiece) {
+            addDebugLog(`Piece moved natively: ${uci}`);
+            return;
+        }
+
         const rectNow = boardElNow.getBoundingClientRect();
         const sqSizeNow = rectNow.width / 8;
         
@@ -605,51 +658,46 @@ function playMove(uci) {
             toX = dRect.left + dRect.width / 2;
             toY = dRect.top + dRect.height / 2;
         }
-        
-        simulateDrag(fromX, fromY, toX, toY, pieceEl, destSquareEl);
 
-        // Verification & Click-to-Move fallback
+        executeDOMMove(boardElNow, fromX, fromY, toX, toY, pieceEl, destSquareEl);
+
+        // Verification & Click-to-Move fallback at 350ms
         setTimeout(() => {
             const checkPiece = findPieceElement(boardElNow, fromFile, fromRank);
             if (checkPiece) {
-                addDebugLog(`Fallback: Click-to-move retry for ${uci}`);
-                const clickDown = { bubbles: true, cancelable: true, view: window, clientX: fromX, clientY: fromY, button: 0, buttons: 1 };
-                const clickUp = { bubbles: true, cancelable: true, view: window, clientX: fromX, clientY: fromY, button: 0, buttons: 0 };
-                checkPiece.dispatchEvent(new PointerEvent("pointerdown", clickDown));
-                checkPiece.dispatchEvent(new MouseEvent("mousedown", clickDown));
-                checkPiece.dispatchEvent(new PointerEvent("pointerup", clickUp));
-                checkPiece.dispatchEvent(new MouseEvent("mouseup", clickUp));
-                checkPiece.dispatchEvent(new MouseEvent("click", clickUp));
+                addDebugLog(`Fallback: Direct click sequence for ${uci}`);
+                dispatchPointEvent(checkPiece, "pointerdown", fromX, fromY, 1);
+                dispatchPointEvent(checkPiece, "pointerup", fromX, fromY, 0);
+                checkPiece.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, composed: true, view: window, clientX: fromX, clientY: fromY }));
 
                 setTimeout(() => {
-                    const destEl = destSquareEl || document.elementFromPoint(toX, toY);
-                    if (destEl) {
-                        const toClickDown = { bubbles: true, cancelable: true, view: window, clientX: toX, clientY: toY, button: 0, buttons: 1 };
-                        const toClickUp = { bubbles: true, cancelable: true, view: window, clientX: toX, clientY: toY, button: 0, buttons: 0 };
-                        destEl.dispatchEvent(new PointerEvent("pointerdown", toClickDown));
-                        destEl.dispatchEvent(new MouseEvent("mousedown", toClickDown));
-                        destEl.dispatchEvent(new PointerEvent("pointerup", toClickUp));
-                        destEl.dispatchEvent(new MouseEvent("mouseup", toClickUp));
-                        destEl.dispatchEvent(new MouseEvent("click", toClickUp));
-                    }
-                }, 40);
+                    const destEl = destSquareEl || document.elementFromPoint(toX, toY) || boardElNow;
+                    dispatchPointEvent(destEl, "pointerdown", toX, toY, 1);
+                    dispatchPointEvent(destEl, "pointerup", toX, toY, 0);
+                    destEl.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, composed: true, view: window, clientX: toX, clientY: toY }));
+                }, 50);
             }
-        }, 260);
+        }, 350);
 
-        // Verification: If piece is still on source square 700ms later, reset currentFEN so observer/poller retries immediately
+        // Safety watchdog: at 1400ms, only if still stuck and still our turn, do a clean re-sync
         setTimeout(() => {
             const checkPieceStillThere = findPieceElement(boardElNow, fromFile, fromRank);
-            if (checkPieceStillThere && currentEngineMode === "autoplay") {
-                addDebugLog(`Move ${uci} unconfirmed on board — clearing currentFEN for immediate retry`);
-                currentFEN = "";
+            if (checkPieceStillThere && currentEngineMode === "autoplay" && !isSearchInFlight) {
+                const currentStm = lastDeterminedStm;
+                const myColor = flipBoard ? "b" : "w";
+                if (currentStm === myColor) {
+                    addDebugLog(`Move ${uci} unconfirmed after 1400ms — resyncing board`);
+                    currentFEN = "";
+                    processPosition();
+                }
             }
-        }, 700);
+        }, 1400);
 
         if (promotionChar) {
-            const promoDelay = 150 + Math.floor(Math.random() * 50);
+            const promoDelay = 120 + Math.floor(Math.random() * 40);
             setTimeout(async () => {
                 const chosenChar = await showPromotionPicker(promotionChar);
-                setTimeout(() => selectPromotion(chosenChar), 80);
+                setTimeout(() => selectPromotion(chosenChar), 60);
             }, promoDelay);
         }
     }, reactionDelay);
@@ -1359,9 +1407,14 @@ function processPosition(networkFen = null) {
                 updateDebugHUD();
                 
                 // Abort if the board has already changed to a DIFFERENT chess position
-                if (currentFEN !== normFen) {
-                    addDebugLog('Stale engine response (FEN changed)');
+                const normPlacement = normFen.split(" ")[0];
+                const currentPlacement = (currentFEN || "").split(" ")[0];
+                if (currentPlacement && currentPlacement !== normPlacement) {
+                    addDebugLog('Stale engine response (board moved)');
                     return;
+                }
+                if (!currentFEN) {
+                    currentFEN = normFen;
                 }
 
                 addDebugLog(`Search done: ${response.bestMove} (${response.score || 0}cp d=${response.depth || 0})`);
@@ -1542,11 +1595,14 @@ chrome.runtime.onMessage.addListener((msg) => {
 
 window.addEventListener("message", (event) => {
     if (!isContextValid()) return;
-    if (
-        event.source !== window ||
-        !event.data ||
-        event.data.type !== "CHESS_WS_MESSAGE"
-    ) {
+    if (event.source !== window || !event.data) return;
+
+    if (event.data.type === "AETHER_MOVE_SUCCESS") {
+        addDebugLog(`Native controller confirmed: ${event.data.uci}`);
+        return;
+    }
+
+    if (event.data.type !== "CHESS_WS_MESSAGE") {
         return;
     }
 
