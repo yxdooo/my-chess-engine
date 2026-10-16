@@ -822,7 +822,7 @@ impl ChessEngine {
                 let (mut alpha, mut beta, mut delta) = if depth <= 4 || best_score == -INF || pv_idx > 0 {
                     (-INF, INF, INF)
                 } else {
-                    let init_delta = if split_count > 1 && split_id > 0 { 75 } else { 50 };
+                    let init_delta = if split_count > 1 && split_id > 0 { 40 } else { 25 };
                     (best_score - init_delta, best_score + init_delta, init_delta)
                 };
 
@@ -2399,8 +2399,8 @@ impl ChessEngine {
                 if score > alpha && did_lmr {
                     score = -self.negamax(&next_board, search_depth, -alpha - 1, -alpha, ply.saturating_add(1), next_halfmove, tt, pawn_hash, None);
                 }
-                // On PV nodes, if the full-depth zero-window search exceeded alpha, re-search with full window
-                if score > alpha && is_pv_node {
+                // On PV nodes, if the full-depth zero-window search exceeded alpha without failing high on beta, re-search with full window
+                if score > alpha && score < beta && is_pv_node {
                     score = -self.negamax(&next_board, search_depth, -beta, -alpha, ply.saturating_add(1), next_halfmove, tt, pawn_hash, None);
                 }
             }
