@@ -66,6 +66,166 @@ let persistentCastling = {
     bRookHMoved: false,
 };
 
+/** Live debug telemetry and HUD state */
+let lastDeterminedStm = "w";
+let recentDebugLogs = [];
+let lastExecutedMove = null;
+let lastEngineStats = null;
+
+function addDebugLog(msg) {
+    const time = new Date().toTimeString().slice(0, 8);
+    recentDebugLogs.unshift(`[${time}] ${msg}`);
+    if (recentDebugLogs.length > 5) recentDebugLogs.pop();
+    updateDebugHUD();
+}
+
+function renderDebugHUD() {
+    if (!document.body) return;
+    let hud = document.getElementById("aether-debug-hud");
+    if (!hud) {
+        hud = document.createElement("div");
+        hud.id = "aether-debug-hud";
+        hud.style.cssText = `
+            position: fixed;
+            bottom: 16px;
+            right: 16px;
+            width: 310px;
+            background: rgba(15, 23, 42, 0.94);
+            backdrop-filter: blur(8px);
+            border: 1px solid rgba(46, 204, 113, 0.5);
+            border-radius: 10px;
+            color: #f1f5f9;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, monospace;
+            font-size: 11px;
+            z-index: 2147483647;
+            box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.6), 0 8px 10px -6px rgba(0, 0, 0, 0.6);
+            overflow: hidden;
+            transition: all 0.2s ease;
+        `;
+        document.body.appendChild(hud);
+    }
+
+    const myColor = flipBoard ? "b" : "w";
+    const isMyTurn = lastDeterminedStm === myColor;
+    const isCollapsed = hud.getAttribute("data-collapsed") === "true";
+
+    if (isCollapsed) {
+        hud.innerHTML = `
+            <div style="padding: 6px 12px; display: flex; align-items: center; justify-content: space-between; cursor: pointer; background: #0f172a;" id="aether-hud-header">
+                <span style="font-weight: bold; color: #2ecc71;">⚡ Aether v2.4.5</span>
+                <span style="background: ${isMyTurn ? '#22c55e' : '#64748b'}; color: #fff; padding: 2px 6px; border-radius: 4px; font-weight: bold;">
+                    ${isMyTurn ? "MY TURN" : "WAITING"}
+                </span>
+                <button id="aether-hud-toggle" style="background:none; border:none; color:#94a3b8; cursor:pointer; font-size:14px;">➕</button>
+            </div>
+        `;
+    } else {
+        hud.innerHTML = `
+            <div style="padding: 8px 12px; background: #1e293b; border-bottom: 1px solid rgba(255,255,255,0.1); display: flex; align-items: center; justify-content: space-between;" id="aether-hud-header">
+                <div style="display: flex; align-items: center; gap: 6px;">
+                    <span style="color: #2ecc71; font-weight: bold; font-size: 12px;">⚡ Aether Chess</span>
+                    <span style="background: rgba(46,204,113,0.15); color: #2ecc71; padding: 1px 5px; border-radius: 3px; font-size: 10px;">v2.4.5</span>
+                </div>
+                <div style="display: flex; gap: 6px; align-items: center;">
+                    <span style="color: #94a3b8; font-size: 10px;">${(currentEngineMode || 'autoplay').toUpperCase()}</span>
+                    <button id="aether-hud-toggle" style="background:none; border:none; color:#94a3b8; cursor:pointer; font-size:12px;" title="Minimize">➖</button>
+                </div>
+            </div>
+            <div style="padding: 10px 12px; display: flex; flex-direction: column; gap: 8px;">
+                <!-- Status Row -->
+                <div style="display: flex; gap: 6px;">
+                    <div style="flex: 1; background: ${isMyTurn ? 'rgba(34, 197, 94, 0.18)' : 'rgba(100, 116, 139, 0.12)'}; border: 1px solid ${isMyTurn ? '#22c55e' : '#475569'}; border-radius: 6px; padding: 6px 8px; text-align: center;">
+                        <div style="color: #94a3b8; font-size: 9px; text-transform: uppercase;">Turn Status</div>
+                        <div style="color: ${isMyTurn ? '#4ade80' : '#cbd5e1'}; font-weight: bold; font-size: 12px; margin-top: 2px;">
+                            ${isMyTurn ? "🟢 MY TURN" : "⏳ OPPONENT"}
+                        </div>
+                    </div>
+                    <div style="flex: 1; background: rgba(30, 41, 59, 0.6); border: 1px solid #334155; border-radius: 6px; padding: 6px 8px; text-align: center;">
+                        <div style="color: #94a3b8; font-size: 9px; text-transform: uppercase;">Color / STM</div>
+                        <div style="color: #f8fafc; font-weight: bold; font-size: 12px; margin-top: 2px;">
+                            ${myColor === 'w' ? 'White' : 'Black'} / ${lastDeterminedStm.toUpperCase()}
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Engine Stats -->
+                <div style="background: rgba(30, 41, 59, 0.4); border-radius: 6px; padding: 6px 8px; font-size: 10px; color: #cbd5e1;">
+                    <div style="display: flex; justify-content: space-between; margin-bottom: 2px;">
+                        <span>Eval: <strong style="color: #38bdf8;">${lastEngineStats ? (lastEngineStats.score > 0 ? '+' : '') + (lastEngineStats.score/100).toFixed(2) : '-'}</strong></span>
+                        <span>Depth: <strong>${lastEngineStats?.depth || '-'}</strong></span>
+                        <span>Nodes: <strong>${lastEngineStats?.nodes ? (lastEngineStats.nodes > 1000 ? Math.round(lastEngineStats.nodes/1000) + 'k' : lastEngineStats.nodes) : '-'}</strong></span>
+                    </div>
+                    <div style="display: flex; justify-content: space-between;">
+                        <span>Best: <strong style="color: #4ade80;">${lastEngineStats?.bestMove || '-'}</strong></span>
+                        <span>Played: <strong style="color: #facc15;">${lastExecutedMove || '-'}</strong></span>
+                    </div>
+                </div>
+
+                <!-- Recent Activity Feed -->
+                <div style="background: #090d16; border-radius: 4px; padding: 6px; font-family: monospace; font-size: 9px; color: #94a3b8; max-height: 55px; overflow-y: hidden;">
+                    ${recentDebugLogs.map(l => `<div style="white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">${l}</div>`).join('') || '<div>Waiting for moves...</div>'}
+                </div>
+
+                <!-- Action Buttons -->
+                <div style="display: flex; gap: 6px; margin-top: 2px;">
+                    <button id="aether-force-btn" style="flex: 1; background: #2563eb; color: white; border: none; border-radius: 4px; padding: 5px; cursor: pointer; font-weight: bold; font-size: 10px;">
+                        ▶ Force Move
+                    </button>
+                    <button id="aether-copy-btn" style="flex: 1; background: #334155; color: #f1f5f9; border: none; border-radius: 4px; padding: 5px; cursor: pointer; font-weight: bold; font-size: 10px;">
+                        📋 Copy Debug
+                    </button>
+                </div>
+            </div>
+        `;
+    }
+
+    const toggleBtn = hud.querySelector("#aether-hud-toggle");
+    if (toggleBtn) {
+        toggleBtn.onclick = () => {
+            const current = hud.getAttribute("data-collapsed") === "true";
+            hud.setAttribute("data-collapsed", current ? "false" : "true");
+            renderDebugHUD();
+        };
+    }
+    const forceBtn = hud.querySelector("#aether-force-btn");
+    if (forceBtn) {
+        forceBtn.onclick = () => {
+            addDebugLog("User triggered [Force Move]");
+            currentFEN = "";
+            processPosition();
+        };
+    }
+    const copyBtn = hud.querySelector("#aether-copy-btn");
+    if (copyBtn) {
+        copyBtn.onclick = () => {
+            const report = {
+                version: "2.4.5",
+                currentFEN,
+                myColor,
+                lastDeterminedStm,
+                isMyTurn,
+                flipBoard,
+                engineMode: currentEngineMode,
+                lastEngineStats,
+                lastExecutedMove,
+                recentLogs: recentDebugLogs,
+                boardPiecesCount: prevBoardArray ? prevBoardArray.filter(Boolean).length : null,
+                domBoardFound: !!document.querySelector("wc-chess-board, chess-board"),
+            };
+            navigator.clipboard.writeText(JSON.stringify(report, null, 2)).then(() => {
+                copyBtn.innerText = "✅ Copied!";
+                setTimeout(() => { if (copyBtn) copyBtn.innerText = "📋 Copy Debug"; }, 1500);
+            });
+        };
+    }
+}
+
+function updateDebugHUD() {
+    try {
+        renderDebugHUD();
+    } catch (_) {}
+}
+
 /**
  * Cache of ponder search results: normalized FEN -> { bestMove, pv }.
  * Populated by the background script's ponder response.
@@ -286,8 +446,33 @@ function drawArrow(fromIdx, toIdx, color) {
  * @param {number} clientX
  * @param {number} clientY
  */
-function simulateDrag(fromX, fromY, toX, toY) {
-    const fromEl = document.elementFromPoint(fromX, fromY);
+function findPieceElement(boardEl, file, rank) {
+    if (!boardEl) return null;
+    const colChar = String.fromCharCode(97 + file);
+    const rowChar = String.fromCharCode(49 + rank);
+    const sqNum = `${file + 1}${rank + 1}`;
+    const sqAlg = `${colChar}${rowChar}`;
+    return boardEl.querySelector(
+        `.piece.square-${sqNum}, .piece.square-${sqAlg}, ` +
+        `[class*="piece"][class*="square-${sqNum}"], [class*="piece"][class*="square-${sqAlg}"], ` +
+        `piece.${sqAlg}, .square-${sqNum} .piece, .square-${sqAlg} .piece`
+    );
+}
+
+function findSquareElement(boardEl, file, rank) {
+    if (!boardEl) return null;
+    const colChar = String.fromCharCode(97 + file);
+    const rowChar = String.fromCharCode(49 + rank);
+    const sqNum = `${file + 1}${rank + 1}`;
+    const sqAlg = `${colChar}${rowChar}`;
+    return boardEl.querySelector(
+        `.square-${sqNum}, .square-${sqAlg}, ` +
+        `[class*="square-${sqNum}"], [class*="square-${sqAlg}"]`
+    );
+}
+
+function simulateDrag(fromX, fromY, toX, toY, fromElTarget = null, toElTarget = null) {
+    const fromEl = fromElTarget || document.elementFromPoint(fromX, fromY);
     if (!fromEl) return;
     const evtInitFrom = { bubbles: true, cancelable: true, view: window, clientX: fromX, clientY: fromY, button: 0, buttons: 1 };
     const evtInitTo = { bubbles: true, cancelable: true, view: window, clientX: toX, clientY: toY, button: 0, buttons: 1 };
@@ -304,9 +489,13 @@ function simulateDrag(fromX, fromY, toX, toY) {
         fromEl.dispatchEvent(new MouseEvent("mousemove", evtInitTo));
         
         setTimeout(() => {
-            const toEl = document.elementFromPoint(toX, toY) || fromEl;
+            const toEl = toElTarget || document.elementFromPoint(toX, toY) || fromEl;
             toEl.dispatchEvent(new PointerEvent("pointerup", evtInitUp));
             toEl.dispatchEvent(new MouseEvent("mouseup", evtInitUp));
+            document.dispatchEvent(new PointerEvent("pointerup", evtInitUp));
+            document.dispatchEvent(new MouseEvent("mouseup", evtInitUp));
+            window.dispatchEvent(new PointerEvent("pointerup", evtInitUp));
+            window.dispatchEvent(new MouseEvent("mouseup", evtInitUp));
             toEl.dispatchEvent(new MouseEvent("click", evtInitUp));
         }, 15);
     }, 15);
@@ -382,22 +571,64 @@ function playMove(uci) {
     const boardEl = document.querySelector("wc-chess-board, chess-board, cg-board");
     if (!boardEl) return false;
 
+    lastExecutedMove = uci;
+    addDebugLog(`Autoplay executing: ${uci}`);
+
     const reactionDelay = currentEngineMode === "autoplay" ? 5 : 50 + Math.floor(Math.random() * 50);
     setTimeout(() => {
         const boardElNow = document.querySelector("wc-chess-board, chess-board, cg-board");
         if (!boardElNow) return;
         const rectNow = boardElNow.getBoundingClientRect();
         const sqSizeNow = rectNow.width / 8;
-        const fromNow = {
-            x: rectNow.left + ((flipBoard ? 7 - fromFile : fromFile) + 0.5) * sqSizeNow,
-            y: rectNow.top + ((flipBoard ? fromRank : 7 - fromRank) + 0.5) * sqSizeNow
-        };
-        const toNow = {
-            x: rectNow.left + ((flipBoard ? 7 - toFile : toFile) + 0.5) * sqSizeNow,
-            y: rectNow.top + ((flipBoard ? toRank : 7 - toRank) + 0.5) * sqSizeNow
-        };
         
-        simulateDrag(fromNow.x, fromNow.y, toNow.x, toNow.y);
+        let fromX = rectNow.left + ((flipBoard ? 7 - fromFile : fromFile) + 0.5) * sqSizeNow;
+        let fromY = rectNow.top + ((flipBoard ? fromRank : 7 - fromRank) + 0.5) * sqSizeNow;
+        let toX   = rectNow.left + ((flipBoard ? 7 - toFile : toFile) + 0.5) * sqSizeNow;
+        let toY   = rectNow.top + ((flipBoard ? toRank : 7 - toRank) + 0.5) * sqSizeNow;
+
+        const pieceEl = findPieceElement(boardElNow, fromFile, fromRank);
+        if (pieceEl) {
+            const pRect = pieceEl.getBoundingClientRect();
+            fromX = pRect.left + pRect.width / 2;
+            fromY = pRect.top + pRect.height / 2;
+        }
+
+        const destSquareEl = findSquareElement(boardElNow, toFile, toRank);
+        if (destSquareEl) {
+            const dRect = destSquareEl.getBoundingClientRect();
+            toX = dRect.left + dRect.width / 2;
+            toY = dRect.top + dRect.height / 2;
+        }
+        
+        simulateDrag(fromX, fromY, toX, toY, pieceEl, destSquareEl);
+
+        // Verification & Click-to-Move fallback
+        setTimeout(() => {
+            const checkPiece = findPieceElement(boardElNow, fromFile, fromRank);
+            if (checkPiece) {
+                addDebugLog(`Fallback: Click-to-move retry for ${uci}`);
+                const clickDown = { bubbles: true, cancelable: true, view: window, clientX: fromX, clientY: fromY, button: 0, buttons: 1 };
+                const clickUp = { bubbles: true, cancelable: true, view: window, clientX: fromX, clientY: fromY, button: 0, buttons: 0 };
+                checkPiece.dispatchEvent(new PointerEvent("pointerdown", clickDown));
+                checkPiece.dispatchEvent(new MouseEvent("mousedown", clickDown));
+                checkPiece.dispatchEvent(new PointerEvent("pointerup", clickUp));
+                checkPiece.dispatchEvent(new MouseEvent("mouseup", clickUp));
+                checkPiece.dispatchEvent(new MouseEvent("click", clickUp));
+
+                setTimeout(() => {
+                    const destEl = destSquareEl || document.elementFromPoint(toX, toY);
+                    if (destEl) {
+                        const toClickDown = { bubbles: true, cancelable: true, view: window, clientX: toX, clientY: toY, button: 0, buttons: 1 };
+                        const toClickUp = { bubbles: true, cancelable: true, view: window, clientX: toX, clientY: toY, button: 0, buttons: 0 };
+                        destEl.dispatchEvent(new PointerEvent("pointerdown", toClickDown));
+                        destEl.dispatchEvent(new MouseEvent("mousedown", toClickDown));
+                        destEl.dispatchEvent(new PointerEvent("pointerup", toClickUp));
+                        destEl.dispatchEvent(new MouseEvent("mouseup", toClickUp));
+                        destEl.dispatchEvent(new MouseEvent("click", toClickUp));
+                    }
+                }, 40);
+            }
+        }, 260);
 
         if (promotionChar) {
             const promoDelay = 150 + Math.floor(Math.random() * 50);
@@ -568,7 +799,46 @@ function parseBoard() {
         highlightDetermined = true;
     }
 
-    // Primary authority: Board square highlights (.highlight on Chess.com, square.last-move on Lichess)
+    // Layer 2: Board State Diffing (Physical piece movement tracking between ticks)
+    // Whenever pieces move, the color of the arriving piece reveals who just moved!
+    if (!highlightDetermined && prevBoardArray) {
+        let arrivedPieces = [];
+        let vacatedPieces = [];
+        for (let i = 0; i < 64; i++) {
+            const curr = board[i];
+            const prev = prevBoardArray[i];
+            if (curr !== prev) {
+                if (curr !== null) arrivedPieces.push(curr);
+                if (prev !== null && curr === null) vacatedPieces.push(prev);
+            }
+        }
+
+        if (arrivedPieces.length > 0) {
+            const wArrived = arrivedPieces.filter(p => p >= "A" && p <= "Z").length;
+            const bArrived = arrivedPieces.filter(p => p >= "a" && p <= "z").length;
+            if (wArrived > 0 && bArrived === 0) {
+                // White piece moved -> Black's turn ('b')
+                stm = "b";
+                highlightDetermined = true;
+            } else if (bArrived > 0 && wArrived === 0) {
+                // Black piece moved -> White's turn ('w')
+                stm = "w";
+                highlightDetermined = true;
+            } else if (wArrived > 0 && bArrived > 0) {
+                // Castling or promotion/capture
+                const wVac = vacatedPieces.filter(p => p >= "A" && p <= "Z").length;
+                const bVac = vacatedPieces.filter(p => p >= "a" && p <= "z").length;
+                stm = wVac > bVac ? "b" : "w";
+                highlightDetermined = true;
+            }
+        } else if (vacatedPieces.length === 0) {
+            // Exactly zero board changes -> preserve previous determined turn!
+            stm = lastDeterminedStm;
+            highlightDetermined = true;
+        }
+    }
+
+    // Layer 3: Board square highlights (.highlight on Chess.com, square.last-move on Lichess)
     // Whenever a move is completed, the origin square is empty, and the destination square contains the moved piece!
     if (!highlightDetermined) {
         try {
@@ -797,6 +1067,7 @@ function parseBoard() {
         }
     }
 
+    lastDeterminedStm = stm;
     prevBoardArray = [...board];
     const fullmove = Math.max(1, Math.floor(maxPly / 2) + 1);
 
@@ -963,6 +1234,8 @@ function processPosition(networkFen = null) {
     const isMyTurn = stm === myColor;
     
     log.info('Board', `Parsed FEN`, { fenShort: fen.substring(0, 50), myColor, stm, isMyTurn, flipBoard });
+    addDebugLog(`Parsed board: STM=${stm.toUpperCase()} Turn=${isMyTurn ? 'YES' : 'NO'}`);
+    updateDebugHUD();
 
     // Reset FEN history on a new game.
     if (fen.startsWith("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w")) {
@@ -1049,11 +1322,18 @@ function processPosition(networkFen = null) {
                     return;
                 }
                 if (!response) return;
+
+                lastEngineStats = response;
+                updateDebugHUD();
                 
                 // Abort if the board has already changed to a DIFFERENT chess position
                 if (currentFEN !== normFen) {
-                    log.info('Engine', 'Ignoring stale search response because position has changed');
+                    addDebugLog('Stale engine response (FEN changed)');
                     return;
+                }
+
+                if (response.bestMove) {
+                    addDebugLog(`Search done: ${response.bestMove} (${response.score || 0}cp d=${response.depth || 0})`);
                 }
 
                 // Cache ponder result for our next turn.
@@ -1174,16 +1454,44 @@ function setupObserver() {
 }
 
 setupObserver();
+try { renderDebugHUD(); } catch (_) {}
+
+try {
+    window.__AETHER_DEBUG__ = {
+        getState: () => ({
+            version: "2.4.5",
+            currentFEN,
+            lastDeterminedStm,
+            myColor: flipBoard ? "b" : "w",
+            isMyTurn: lastDeterminedStm === (flipBoard ? "b" : "w"),
+            lastEngineStats,
+            lastExecutedMove,
+            logs: recentDebugLogs,
+            boardFound: !!document.querySelector("wc-chess-board, chess-board"),
+        }),
+        forceMove: () => {
+            currentFEN = "";
+            processPosition();
+        },
+        play: (uci) => playMove(uci),
+    };
+    log.info('Debug', 'Aether Debug tools ready at window.__AETHER_DEBUG__');
+} catch (_) {}
+
 // Periodically re-check and attach to board if navigation occurred or SPA page updated
 pollInterval = setInterval(() => {
     if (!isContextValid()) return;
     setupObserver();
     processPosition();
+    try { renderDebugHUD(); } catch (_) {}
 }, 2500);
 
 // Initial analysis after the board has had time to render.
 setTimeout(() => {
-    if (isContextValid()) processPosition();
+    if (isContextValid()) {
+        try { renderDebugHUD(); } catch (_) {}
+        processPosition();
+    }
 }, 1000);
 
 // Force re-evaluation on demand (triggered by popup when engine is started).
