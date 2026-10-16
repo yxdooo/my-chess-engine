@@ -3510,7 +3510,20 @@ mod tests {
         let res2 = engine.search_native(fen2, 1000.0, 1500.0, 16, 0, 1, "", true, None);
         println!("MOVE 6 (after 5... Nxc3): best_move={:?} score={} depth={}", res2.best_move, res2.score, res2.depth);
     }
+
+    #[test]
+    fn test_large_hash_sizes() {
+        let mut engine = ChessEngine::new();
+        engine.set_hash_size(512);
+        let tt = get_tt();
+        assert_eq!(tt.size, 16_777_216, "512MB must allocate 16,777,216 buckets");
+
+        engine.set_hash_size(1024);
+        let tt1024 = get_tt();
+        assert_eq!(tt1024.size, 33_554_432, "1024MB must allocate 33,554,432 buckets");
+    }
 }
+
 
 
 

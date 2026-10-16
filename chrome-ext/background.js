@@ -52,8 +52,9 @@ chrome.runtime.onInstalled.addListener(() => {
                 isActive: true,
                 elo: 3000,
                 cpuMode: "max",
-                targetWorkers: Math.min(4, Math.max(1, (navigator.hardwareConcurrency || 4) - 1)),
+                targetWorkers: Math.min(16, Math.max(1, (navigator.hardwareConcurrency || 4) - 1)),
                 hashSize: 128,
+
                 increment: 0,
                 engineMode: "autoplay"
             });
@@ -219,8 +220,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                 }
 
                 const elo = result.elo || 3000;
-                const workerCount  = Math.min(8, Math.max(1, result.targetWorkers || ((navigator.hardwareConcurrency || 4) - 1)));
+                const workerCount  = Math.min(16, Math.max(1, result.targetWorkers || ((navigator.hardwareConcurrency || 4) - 1)));
                 const hashSize     = result.hashSize || 128;
+
                 const increment    = result.increment || 0;
                 const my_ms = message.my_ms || 0;
                 const opp_ms = message.opp_ms || 0;

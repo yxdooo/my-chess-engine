@@ -7,7 +7,8 @@
  */
 import { log } from "./logger.js";
 
-const MAX_WORKERS = 4;
+const MAX_WORKERS = 16;
+
 
 /** @type {Worker[]} The active worker pool. */
 let workers = [];

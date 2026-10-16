@@ -172,10 +172,11 @@ document.addEventListener("DOMContentLoaded", () => {
      */
     function resolveWorkerCount(cpuMode) {
         const cores = navigator.hardwareConcurrency || 4;
-        if (cpuMode === "balanced") return Math.min(2, Math.max(1, Math.floor(cores / 2)));
-        if (cpuMode === "max")      return Math.min(4, Math.max(1, cores - 1)); // Cap at 4 workers in Chrome to prevent WASM thread and memory bloat
+        if (cpuMode === "balanced") return Math.min(8, Math.max(1, Math.floor(cores / 2)));
+        if (cpuMode === "max")      return Math.min(16, Math.max(1, cores - 1)); // Scales up to 16 workers on multi-core CPUs
         return 1; // "eco"
     }
+
 
     // -----------------------------------------------------------------------
     // Settings Live Update
