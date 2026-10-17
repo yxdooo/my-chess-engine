@@ -40,3 +40,7 @@ TOURNAMENT_REPORT.md
 
 .junie/
 engine-wasm/results/*.csv
+
+# AI Agent Architectural Documentation
+chrome-ext/ARCHITECTURE.md
+engine-wasm/ARCHITECTURE.md
