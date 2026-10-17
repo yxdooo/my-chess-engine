@@ -124,7 +124,32 @@ onmessage = async (e) => {
 
         if (result) {
             try {
-                const parsed = JSON.parse(result);
+                let parsed = JSON.parse(result);
+                if (!parsed || !parsed.bestMove) {
+                    // Retry with sanitized FEN (strip strict castling / en-passant flags that may fail Board::is_sane)
+                    const parts = (fen || "").trim().split(/\s+/);
+                    if (parts.length >= 2) {
+                        const sanitizedFen = `${parts[0]} ${parts[1]} - - 0 1`;
+                        try {
+                            const retryRes = engine.get_best_move(
+                                sanitizedFen,
+                                Math.min(e.data.searchTimeMs || 250.0, 350.0),
+                                elo,
+                                splitId,
+                                splitCount,
+                                "",
+                                abortFlag
+                            );
+                            if (retryRes) {
+                                const retryParsed = JSON.parse(retryRes);
+                                if (retryParsed && retryParsed.bestMove) {
+                                    parsed = retryParsed;
+                                    log.info('Search', `Worker[${workerId}] recovered move via sanitized FEN → ${parsed.bestMove}`);
+                                }
+                            }
+                        } catch (_) {}
+                    }
+                }
                 if (!parsed.bestMove) {
                     log.warn('Search', `Worker[${workerId}] got empty bestMove`, { parsed, fenShort });
                 } else {

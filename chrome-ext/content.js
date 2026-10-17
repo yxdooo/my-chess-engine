@@ -45,7 +45,7 @@ const log = {
 
 log.info('Content', 'Logger initialized');
 
-const AETHER_VERSION = "2.4.15";
+const AETHER_VERSION = "2.4.16";
 
 /** @type {string} The last FEN position that was sent for analysis. */
 let currentFEN = "";
@@ -746,27 +746,111 @@ function playMove(uci) {
 
     executeDOMMove(boardEl, fromX, fromY, toX, toY, uci, promotionChar);
 
-    // Watchdog check at 800ms: if move truly failed and still our turn, resync
+    // Watchdog check at 450ms: if move failed (e.g. king was in check or turn desynced), resync immediately
     setTimeout(() => {
         const boardElCheck = document.querySelector("wc-chess-board, chess-board, cg-board, .board");
         if (!boardElCheck) return;
         const checkPiece = findPieceElement(boardElCheck, fromFile, fromRank);
         if (checkPiece && currentEngineMode === "autoplay" && !isSearchInFlight) {
-            const currentStm = lastDeterminedStm;
-            const myColor = flipBoard ? "b" : "w";
-            if (currentStm === myColor) {
-                addDebugLog(`Move ${uci} unconfirmed after 800ms — resyncing board`);
-                currentFEN = "";
-                processPosition();
-            }
+            addDebugLog(`⚠️ Move ${uci} unconfirmed after 450ms — resyncing board`);
+            currentFEN = "";
+            processPosition();
         }
-    }, 800);
+    }, 450);
 
     return true;
 }
 // ---------------------------------------------------------------------------
 // Board Parsing
 // ---------------------------------------------------------------------------
+
+/**
+ * Checks whether the specified side's King ('w' or 'b') is currently attacked on the 64-element board array.
+ * In legal chess, if one side's King is in check, that side MUST be the side to move!
+ * @param {Array<string|null>} board
+ * @param {string} kingColor 'w' or 'b'
+ * @returns {boolean}
+ */
+function isKingAttacked(board, kingColor) {
+    const targetKing = kingColor === "w" ? "K" : "k";
+    const isEnemy = (p) => p !== null && (kingColor === "w" ? (p >= "a" && p <= "z") : (p >= "A" && p <= "Z"));
+    let kingSq = -1;
+    for (let i = 0; i < 64; i++) {
+        if (board[i] === targetKing) {
+            kingSq = i;
+            break;
+        }
+    }
+    if (kingSq === -1) return false;
+    const kr = Math.floor(kingSq / 8);
+    const kf = kingSq % 8;
+
+    // 1. Pawn attacks
+    if (kingColor === "w") {
+        if (kr < 7) {
+            if (kf > 0 && board[(kr + 1) * 8 + (kf - 1)] === "p") return true;
+            if (kf < 7 && board[(kr + 1) * 8 + (kf + 1)] === "p") return true;
+        }
+    } else {
+        if (kr > 0) {
+            if (kf > 0 && board[(kr - 1) * 8 + (kf - 1)] === "P") return true;
+            if (kf < 7 && board[(kr - 1) * 8 + (kf + 1)] === "P") return true;
+        }
+    }
+
+    // 2. Knight attacks
+    const enemyKnight = kingColor === "w" ? "n" : "N";
+    const knightOffsets = [[-2,-1],[-2,1],[-1,-2],[-1,2],[1,-2],[1,2],[2,-1],[2,1]];
+    for (const [dr, df] of knightOffsets) {
+        const r = kr + dr, f = kf + df;
+        if (r >= 0 && r < 8 && f >= 0 && f < 8 && board[r * 8 + f] === enemyKnight) return true;
+    }
+
+    // 3. Orthogonal rays (Rook / Queen)
+    const enemyRook = kingColor === "w" ? "r" : "R";
+    const enemyQueen = kingColor === "w" ? "q" : "Q";
+    const orthoDirs = [[-1,0],[1,0],[0,-1],[0,1]];
+    for (const [dr, df] of orthoDirs) {
+        let r = kr + dr, f = kf + df;
+        while (r >= 0 && r < 8 && f >= 0 && f < 8) {
+            const p = board[r * 8 + f];
+            if (p !== null) {
+                if (p === enemyRook || p === enemyQueen) return true;
+                break;
+            }
+            r += dr;
+            f += df;
+        }
+    }
+
+    // 4. Diagonal rays (Bishop / Queen)
+    const enemyBishop = kingColor === "w" ? "b" : "B";
+    const diagDirs = [[-1,-1],[-1,1],[1,-1],[1,1]];
+    for (const [dr, df] of diagDirs) {
+        let r = kr + dr, f = kf + df;
+        while (r >= 0 && r < 8 && f >= 0 && f < 8) {
+            const p = board[r * 8 + f];
+            if (p !== null) {
+                if (p === enemyBishop || p === enemyQueen) return true;
+                break;
+            }
+            r += dr;
+            f += df;
+        }
+    }
+
+    // 5. Adjacent King
+    const enemyKing = kingColor === "w" ? "k" : "K";
+    for (let dr = -1; dr <= 1; dr++) {
+        for (let df = -1; df <= 1; df++) {
+            if (dr === 0 && df === 0) continue;
+            const r = kr + dr, f = kf + df;
+            if (r >= 0 && r < 8 && f >= 0 && f < 8 && board[r * 8 + f] === enemyKing) return true;
+        }
+    }
+
+    return false;
+}
 
 /**
  * Parses the current board state from the DOM and returns a FEN string,
@@ -930,6 +1014,21 @@ function parseBoard() {
         addDebugLog(`⚡ Force Move applied: forcing turn to ${stm.toUpperCase()}`);
     }
 
+    // Tier 1.5: Mathematical In-Check Law
+    // In legal chess, if one side's King is under attack, that side MUST be the side to move!
+    // Sending a FEN where the non-moving side is in check causes the Rust engine to reject the FEN as illegal.
+    if (!highlightDetermined) {
+        const wInCheck = isKingAttacked(board, "w");
+        const bInCheck = isKingAttacked(board, "b");
+        if (wInCheck && !bInCheck) {
+            stm = "w";
+            highlightDetermined = true;
+        } else if (bInCheck && !wInCheck) {
+            stm = "b";
+            highlightDetermined = true;
+        }
+    }
+
     // Tier 2: Check for starting position with no moves played yet
     const isStartPos = board[4] === "K" && board[60] === "k" &&
                        board[0] === "R" && board[7] === "R" &&
@@ -938,9 +1037,13 @@ function parseBoard() {
                        board[48] === "p" && board[55] === "p";
 
     let maxPly = -1;
+    let minPly = 999999;
     document.querySelectorAll("[data-ply]").forEach((el) => {
         const p = parseInt(el.getAttribute("data-ply"), 10);
-        if (!isNaN(p) && p > maxPly) maxPly = p;
+        if (!isNaN(p)) {
+            if (p > maxPly) maxPly = p;
+            if (p < minPly) minPly = p;
+        }
     });
 
     const moveNodes = document.querySelectorAll(
@@ -953,21 +1056,17 @@ function parseBoard() {
     }
 
     // Tier 3: Ground-Truth Move List / Ply Count
-    // In chess:
-    // data-ply on Chess.com is 0-indexed:
-    // - ply 0 = 1. d4 (White moved) -> Next is Black ('b')
-    // - ply 1 = 1... Nf6 (Black moved) -> Next is White ('w')
-    // - ply 23 = 12... Nb4 (Black moved) -> Next is White ('w')
-    // Formula for 0-indexed data-ply: (maxPly % 2 === 0) ? 'b' : 'w'
-    // Formula for move list count: (moveCount % 2 === 1) ? 'b' : 'w'
+    // Handles both 1-indexed [data-ply] (Chess.com modern: ply 1 = 1. Nf3 -> totalPlies=1 -> Black's turn)
+    // and 0-indexed [data-ply] (ply 0 = 1. Nf3 -> totalPlies=1 -> Black's turn).
     let moveListStm = null;
     if (maxPly >= 0) {
-        moveListStm = (maxPly % 2 === 0) ? "b" : "w";
+        const totalPlies = (minPly === 0) ? (maxPly + 1) : maxPly;
+        moveListStm = (totalPlies % 2 === 1) ? "b" : "w";
     } else if (moveNodes && moveNodes.length > 0) {
         moveListStm = (moveNodes.length % 2 === 1) ? "b" : "w";
     } else {
         const allMoves = document.querySelectorAll(
-            "wc-move-list .move, wc-move-list .node, .move-list .move, .vertical-move-list .move, .rmoves .move, [data-ply]"
+            "wc-move-list .move, wc-move-list .node, .move-list .move, .vertical-move-list .move, .rmoves .move"
         );
         if (allMoves && allMoves.length > 0) {
             moveListStm = (allMoves.length % 2 === 1) ? "b" : "w";
@@ -1003,6 +1102,8 @@ function parseBoard() {
     } catch (_) {}
 
     // Tier 5: Board Highlight Squares (.highlight on Chess.com, square.last-move on Lichess)
+    // Only trust highlightStm when all highlighted pieces belong to the SAME color
+    // (avoids pollution when user/click-to-move highlights a friendly piece alongside opponent's last move).
     let highlightStm = null;
     try {
         const hlEls = boardEl.querySelectorAll(".highlight, square.last-move");
@@ -1030,25 +1131,16 @@ function parseBoard() {
 
             const emptyHls = hlSquares.filter((sq) => board[sq] === null);
             const pieceHls = hlSquares.filter((sq) => board[sq] !== null);
+            const hasWhiteHl = pieceHls.some((sq) => board[sq] >= "A" && board[sq] <= "Z");
+            const hasBlackHl = pieceHls.some((sq) => board[sq] >= "a" && board[sq] <= "z");
 
-            if (emptyHls.length >= 1 && pieceHls.length >= 1) {
-                let movedPiece = null;
-                if (pieceHls.length === 1) {
-                    movedPiece = board[pieceHls[0]];
-                } else {
-                    const nonKings = pieceHls.filter((sq) => board[sq] !== "K" && board[sq] !== "k");
-                    movedPiece = nonKings.length > 0 ? board[nonKings[0]] : board[pieceHls[0]];
-                }
-
-                if (movedPiece) {
-                    const isWhiteMoved = movedPiece >= "A" && movedPiece <= "Z";
-                    highlightStm = isWhiteMoved ? "b" : "w";
-                }
+            if (emptyHls.length >= 1 && pieceHls.length >= 1 && (hasWhiteHl !== hasBlackHl)) {
+                highlightStm = hasWhiteHl ? "b" : "w";
             }
         }
     } catch (_) {}
 
-    // Tier 6: Physical Piece Arrived Diffing (Piece appeared between 100ms ticks)
+    // Tier 6: Physical Piece Arrived Diffing (Piece appeared between ticks)
     let diffStm = null;
     if (prevBoardArray) {
         let arrivedPieces = [];
@@ -1078,26 +1170,30 @@ function parseBoard() {
     }
 
     // Combine Tiers with Priority:
+    // 1. Physical piece arrival diff (ground truth when a piece just moved on the board)
+    // 2. Unambiguous board highlight squares (last move highlight on the board itself)
+    // 3. Move list ply count (now supports both 0-indexed and 1-indexed data-ply)
+    // 4. Active running clock indicator
+    // 5. Preserve last known STM on unchanged stationary board
     if (!highlightDetermined) {
-        if (moveListStm) {
-            stm = moveListStm;
-            highlightDetermined = true;
-        } else if (clockStm) {
-            stm = clockStm;
-            highlightDetermined = true;
-        } else if (diffStm) {
+        if (diffStm) {
             stm = diffStm;
             highlightDetermined = true;
         } else if (highlightStm) {
             stm = highlightStm;
             highlightDetermined = true;
+        } else if (moveListStm) {
+            stm = moveListStm;
+            highlightDetermined = true;
+        } else if (clockStm) {
+            stm = clockStm;
+            highlightDetermined = true;
         } else {
-            // Unchanged stationary board: preserve last known STM
             stm = lastDeterminedStm;
         }
     }
 
-    const calculatedPly = maxPly >= 0 ? maxPly + 1 : (moveNodes ? moveNodes.length : 0);
+    const calculatedPly = maxPly >= 0 ? ((minPly === 0) ? maxPly + 1 : maxPly) : (moveNodes ? moveNodes.length : 0);
 
     // Reset persistent tracking ONLY if a new starting position is detected
     if (isStartPos) {
@@ -1151,14 +1247,31 @@ function parseBoard() {
     }
     if (castling === "") castling = "-";
 
-    // En-passant detection from previous board or DOM highlights
+    // En-passant detection from previous board or DOM highlights.
+    // CRITICAL: The Rust `chess` crate (`Board::from_str`) strictly requires that an en-passant
+    // square ONLY be set in FEN when an adjacent enemy pawn is present on the 4th/5th rank to capture it!
+    // Setting epSquare without an adjacent enemy pawn causes `Board::from_str` to return Err -> empty bestMove!
     let epSquare = "-";
+    const hasAdjacentEnemyPawnForEp = (fileIdx, moverColor) => {
+        if (moverColor === "w") {
+            // White pushed 2->4 (rank index 3, squares 24..31); check Black pawn 'p' on adjacent files
+            return (fileIdx > 0 && board[24 + fileIdx - 1] === "p") ||
+                   (fileIdx < 7 && board[24 + fileIdx + 1] === "p");
+        } else {
+            // Black pushed 7->5 (rank index 4, squares 32..39); check White pawn 'P' on adjacent files
+            return (fileIdx > 0 && board[32 + fileIdx - 1] === "P") ||
+                   (fileIdx < 7 && board[32 + fileIdx + 1] === "P");
+        }
+    };
+
     if (prevBoardArray) {
         if (stm === "b") {
             // White moved. Check if White pawn jumped from rank 2 (8..15) to rank 4 (24..31)
             for (let f = 0; f < 8; f++) {
                 if (prevBoardArray[8 + f] === "P" && board[8 + f] === null && board[24 + f] === "P") {
-                    epSquare = String.fromCharCode(97 + f) + "3";
+                    if (hasAdjacentEnemyPawnForEp(f, "w")) {
+                        epSquare = String.fromCharCode(97 + f) + "3";
+                    }
                     break;
                 }
             }
@@ -1166,7 +1279,9 @@ function parseBoard() {
             // Black moved. Check if Black pawn jumped from rank 7 (48..55) to rank 5 (32..39)
             for (let f = 0; f < 8; f++) {
                 if (prevBoardArray[48 + f] === "p" && board[48 + f] === null && board[32 + f] === "p") {
-                    epSquare = String.fromCharCode(97 + f) + "6";
+                    if (hasAdjacentEnemyPawnForEp(f, "b")) {
+                        epSquare = String.fromCharCode(97 + f) + "6";
+                    }
                     break;
                 }
             }
@@ -1190,12 +1305,17 @@ function parseBoard() {
                     if (i === j) continue;
                     const from = hlSquares[i];
                     const to = hlSquares[j];
+                    const fIdx = to.charCodeAt(0) - 97;
                     if (stm === "b" && from[0] === to[0] && from[1] === "2" && to[1] === "4") {
-                        const sqIdx = (4 - 1) * 8 + (to.charCodeAt(0) - 97);
-                        if (board[sqIdx] === "P") epSquare = to[0] + "3";
+                        const sqIdx = (4 - 1) * 8 + fIdx;
+                        if (board[sqIdx] === "P" && hasAdjacentEnemyPawnForEp(fIdx, "w")) {
+                            epSquare = to[0] + "3";
+                        }
                     } else if (stm === "w" && from[0] === to[0] && from[1] === "7" && to[1] === "5") {
-                        const sqIdx = (5 - 1) * 8 + (to.charCodeAt(0) - 97);
-                        if (board[sqIdx] === "p") epSquare = to[0] + "6";
+                        const sqIdx = (5 - 1) * 8 + fIdx;
+                        if (board[sqIdx] === "p" && hasAdjacentEnemyPawnForEp(fIdx, "b")) {
+                            epSquare = to[0] + "6";
+                        }
                     }
                 }
             }
@@ -1698,7 +1818,7 @@ function setupObserver() {
         clearTimeout(debounceTimer);
         debounceTimer = setTimeout(() => {
              if (!isContextValid()) return;
-             if (Date.now() - lastProcessTime > 100 && !isProcessing) {
+             if (!isProcessing) {
                  isProcessing = true;
                  lastProcessTime = Date.now();
                  setTimeout(() => {
@@ -1707,7 +1827,7 @@ function setupObserver() {
                      isProcessing = false;
                  }, 0);
              }
-        }, 50);
+        }, 60);
     });
 
     for (const target of targets) {
@@ -1755,7 +1875,7 @@ pollInterval = setInterval(() => {
     setupObserver();
     processPosition();
     try { renderDebugHUD(); } catch (_) {}
-}, 2500);
+}, 400);
 
 // Initial analysis after the board has had time to render.
 setTimeout(() => {
